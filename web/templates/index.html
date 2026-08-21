@@ -1,0 +1,1907 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Weinstein Stage Scanner</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<!-- Phase 4: 차트 라이브러리 (Lightweight-Charts v4 standalone CDN, ~52KB gzip) -->
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  [x-cloak]{display:none!important}
+  .tab-active{border-bottom:3px solid #6366f1;color:#4f46e5;font-weight:700}
+  .card{background:#fff;border-radius:1rem;border:1px solid #f1f5f9;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  .sig-b{background:linear-gradient(135deg,#ecfdf5,#d1fae5);border-left:4px solid #10b981}
+  .sig-r{background:linear-gradient(135deg,#eff6ff,#dbeafe);border-left:4px solid #3b82f6}
+  .spin{animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .pct-pos{color:#16a34a;font-weight:700}
+  .pct-neg{color:#dc2626;font-weight:700}
+  .pct-zero{color:#6b7280}
+  input,select,textarea{outline:none}
+  input:focus,select:focus,textarea:focus{ring:2px;ring-color:#a5b4fc}
+  .input{width:100%;border:1px solid #e2e8f0;border-radius:.5rem;padding:.4rem .75rem;font-size:.875rem}
+  .input:focus{border-color:#a5b4fc;box-shadow:0 0 0 2px #e0e7ff}
+  .btn{padding:.45rem 1.1rem;border-radius:.6rem;font-size:.85rem;font-weight:600;transition:all .15s;cursor:pointer}
+  .btn-primary{background:#6366f1;color:#fff}.btn-primary:hover{background:#4f46e5}
+  .btn-danger{background:#fee2e2;color:#991b1b}.btn-danger:hover{background:#fecaca}
+  .btn-ghost{background:#f1f5f9;color:#475569}.btn-ghost:hover{background:#e2e8f0}
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;display:flex;align-items:center;justify-content:center;padding:1rem}
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-track{background:#f8fafc}
+  ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
+</style>
+</head>
+<body class="bg-slate-50 min-h-screen text-sm" x-data="app()" x-init="init()">
+
+<!-- ── 헤더 ───────────────────────────────────────────────── -->
+<header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+  <div class="max-w-screen-xl mx-auto px-4 h-14 flex items-center gap-4">
+    <div class="flex items-center gap-2.5 mr-4">
+      <div class="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-black text-base">W</div>
+      <span class="font-bold text-slate-800 text-base hidden sm:block">Weinstein Scanner</span>
+    </div>
+
+    <!-- 탭 -->
+    <nav class="flex gap-1 flex-1 overflow-x-auto">
+      <template x-for="tab in tabs" :key="tab.id">
+        <button @click="activeTab=tab.id"
+          :class="activeTab===tab.id ? 'tab-active text-indigo-700' : 'text-slate-500 hover:text-slate-700'"
+          class="px-3 py-4 whitespace-nowrap text-sm transition border-b-3 border-transparent">
+          <span x-text="tab.label"></span>
+          <span x-show="tab.id==='scan' && results.length>0"
+            class="ml-1 bg-indigo-100 text-indigo-700 text-xs px-1.5 py-0.5 rounded-full font-semibold"
+            x-text="results.length"></span>
+        </button>
+      </template>
+    </nav>
+
+    <div class="flex items-center gap-2 ml-2">
+      <span class="text-xs text-slate-400 hidden md:block" x-text="nowKst"></span>
+      <div class="w-2 h-2 rounded-full flex-shrink-0"
+        :class="settings.telegram_configured ? 'bg-emerald-400' : 'bg-red-400'"
+        :title="settings.telegram_configured ? '텔레그램 연결됨' : '텔레그램 미설정'"></div>
+      <button @click="testTelegram()" class="btn btn-ghost text-xs px-2 py-1">📨 텔레그램</button>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-screen-xl mx-auto px-4 py-5">
+
+<!-- ════════════════════════════════════════════════════════
+     탭 1: 스캔 결과
+═════════════════════════════════════════════════════════ -->
+<div x-show="activeTab==='scan'" x-cloak>
+
+  <!-- 스캔 컨트롤 -->
+  <div class="card p-4 mb-4">
+    <div class="flex flex-wrap items-center gap-3">
+
+      <!-- 시장 선택 (KR / US — 동시 스캔 없음) -->
+      <div class="flex gap-1.5 rounded-lg bg-slate-100 p-0.5">
+        <button @click="scanMarket='KR'"
+          :class="scanMarket==='KR' ? 'bg-white shadow text-indigo-700 font-bold' : 'text-slate-500 hover:text-slate-700'"
+          class="btn text-sm px-4 py-1.5 rounded-md transition-all">
+          🇰🇷 한국
+        </button>
+        <button @click="scanMarket='US'"
+          :class="scanMarket==='US' ? 'bg-white shadow text-indigo-700 font-bold' : 'text-slate-500 hover:text-slate-700'"
+          class="btn text-sm px-4 py-1.5 rounded-md transition-all">
+          🇺🇸 미국
+        </button>
+      </div>
+
+      <!-- KR 유니버스 -->
+      <div x-show="scanMarket==='KR'" class="flex items-center gap-1.5">
+        <span class="text-xs text-slate-500">유니버스</span>
+        <select x-model="krUniverse" class="text-xs border border-slate-200 rounded px-2 py-1 bg-white text-slate-700">
+          <option value="kospi+kosdaq">KOSPI + KOSDAQ 전체</option>
+          <option value="kospi">KOSPI 만</option>
+          <option value="kosdaq">KOSDAQ 만</option>
+        </select>
+      </div>
+
+      <!-- US 유니버스 -->
+      <div x-show="scanMarket==='US'" class="flex items-center gap-1.5">
+        <span class="text-xs text-slate-500">유니버스</span>
+        <select x-model="usUniverse" class="text-xs border border-slate-200 rounded px-2 py-1 bg-white text-slate-700">
+          <option value="sp500+nasdaq100">S&P500 + NASDAQ100 (~517개)</option>
+          <option value="nyse">NYSE 전체 (~2,700개)</option>
+          <option value="nasdaq">NASDAQ 전체 (~3,800개)</option>
+          <option value="nyse+nasdaq">NYSE + NASDAQ 전체 (~6,500개)</option>
+        </select>
+      </div>
+
+      <div class="text-xs text-slate-400 hidden md:flex flex-col">
+        <template x-for="s in nextSchedules" :key="s.name">
+          <span>⏰ 다음 자동: <span class="text-indigo-600 font-medium" x-text="s.next_run"></span></span>
+        </template>
+      </div>
+
+      <div class="flex-1"></div>
+
+      <button @click="startScan()" :disabled="isScanning"
+        :class="isScanning ? 'opacity-50 cursor-not-allowed bg-slate-300 text-slate-500' : 'btn-primary'"
+        class="btn flex items-center gap-2">
+        <svg x-show="isScanning" class="spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"/>
+        </svg>
+        <span x-text="isScanning ? '스캔 중...' : '🔍 지금 스캔'"></span>
+      </button>
+    </div>
+
+    <!-- 진행바 -->
+    <div x-show="isScanning" x-cloak class="mt-3">
+      <div class="flex justify-between text-xs text-slate-500 mb-1">
+        <span x-text="scanProg.current_stock||'준비 중...'"></span>
+        <span x-text="scanProg.total>0 ? `${scanProg.progress}/${scanProg.total}` : ''"></span>
+      </div>
+      <div class="w-full bg-slate-200 rounded-full h-1.5">
+        <div class="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
+          :style="`width:${scanProg.total>0?Math.round(scanProg.progress/scanProg.total*100):0}%`"></div>
+      </div>
+    </div>
+
+    <!-- 통계 뱃지 -->
+    <div class="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
+      <span>📈 매수시그널 <strong class="text-slate-800" x-text="stats.buy"></strong></span>
+      <span>🚀 돌파 <strong class="text-slate-800" x-text="stats.breakout"></strong></span>
+      <span>🔁 재돌파 <strong class="text-slate-800" x-text="stats.rebreakout"></strong></span>
+      <span>🔄 반등 <strong class="text-slate-800" x-text="stats.rebound"></strong></span>
+      <span>🇰🇷 한국 <strong class="text-slate-800" x-text="stats.kr"></strong></span>
+      <span>🇺🇸 미국 <strong class="text-slate-800" x-text="stats.us"></strong></span>
+    </div>
+  </div>
+
+  <!-- 시장 상태 배너 (Forest to Trees) -->
+  <div x-show="marketStatus.US || marketStatus.KR" class="mb-3 rounded-xl border p-3 flex flex-wrap gap-4 text-xs"
+    :class="{
+      'bg-red-50 border-red-200':   (marketStatus.US_condition==='BEAR'||marketStatus.KR_condition==='BEAR'),
+      'bg-amber-50 border-amber-200': (marketStatus.US_condition==='CAUTION'||marketStatus.KR_condition==='CAUTION') && marketStatus.US_condition!=='BEAR' && marketStatus.KR_condition!=='BEAR',
+      'bg-emerald-50 border-emerald-200': marketStatus.US_condition==='BULL' && marketStatus.KR_condition==='BULL',
+      'bg-slate-50 border-slate-200': !marketStatus.US_condition || (marketStatus.US_condition==='NEUTRAL'&&marketStatus.KR_condition==='NEUTRAL'),
+    }">
+    <span class="font-bold text-slate-600">🌲 시장 지수</span>
+    <template x-if="marketStatus.US">
+      <div class="flex gap-2 flex-wrap">
+        <template x-for="idx in marketStatus.US" :key="idx.ticker">
+          <span class="flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold"
+            :class="{'bg-emerald-100 text-emerald-700':idx.stage==='STAGE2','bg-red-100 text-red-700':idx.stage==='STAGE4','bg-amber-100 text-amber-700':idx.stage==='STAGE3','bg-slate-100 text-slate-600':idx.stage==='STAGE1'}">
+            🇺🇸 <span x-text="idx.name"></span>
+            <span x-text="idx.stage.replace('STAGE','S')"></span>
+            <span class="opacity-70" x-text="(idx.pct_vs_ma>=0?'+':'')+idx.pct_vs_ma+'%'"></span>
+          </span>
+        </template>
+      </div>
+    </template>
+    <template x-if="marketStatus.KR">
+      <div class="flex gap-2 flex-wrap">
+        <template x-for="idx in marketStatus.KR" :key="idx.ticker">
+          <span class="flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold"
+            :class="{'bg-emerald-100 text-emerald-700':idx.stage==='STAGE2','bg-red-100 text-red-700':idx.stage==='STAGE4','bg-amber-100 text-amber-700':idx.stage==='STAGE3','bg-slate-100 text-slate-600':idx.stage==='STAGE1'}">
+            🇰🇷 <span x-text="idx.name"></span>
+            <span x-text="idx.stage.replace('STAGE','S')"></span>
+            <span class="opacity-70" x-text="(idx.pct_vs_ma>=0?'+':'')+idx.pct_vs_ma+'%'"></span>
+          </span>
+        </template>
+      </div>
+    </template>
+    <template x-if="marketStatus.US_condition==='BEAR'||marketStatus.KR_condition==='BEAR'">
+      <span class="text-red-600 font-bold">⚠️ 하락장 — 돌파 성공률 급감, 비중 축소 권고</span>
+    </template>
+    <template x-if="marketStatus.US_condition==='CAUTION'||marketStatus.KR_condition==='CAUTION'">
+      <span class="text-amber-600 font-semibold">⚠️ 혼조세 — 선별적 매매 필요</span>
+    </template>
+    <button @click="loadMarketStatus(true)" class="ml-auto text-slate-400 hover:text-slate-600">↺</button>
+  </div>
+
+  <!-- 필터 -->
+  <div class="flex flex-wrap gap-2 mb-3">
+    <select x-model="filter.market" @change="loadResults()" class="input w-auto">
+      <option value="ALL">전체 시장</option>
+      <option value="KR">🇰🇷 한국</option>
+      <option value="US">🇺🇸 미국</option>
+    </select>
+    <select x-model="filter.signal_type" @change="loadResults()" class="input w-auto">
+      <option value="ALL">전체 신호</option>
+      <option value="BREAKOUT">🚀 돌파</option>
+      <option value="RE_BREAKOUT">🔁 재돌파</option>
+      <option value="REBOUND">🔄 반등</option>
+    </select>
+    <select x-model="filter.days" @change="loadResults()" class="input w-auto">
+      <option value="1">오늘</option><option value="3">3일</option>
+      <option value="7">7일</option><option value="14">14일</option>
+      <option value="30">30일</option>
+    </select>
+    <button @click="loadResults()" class="btn btn-ghost">↺ 새로고침</button>
+    <!-- Strict 거부 행 opt-in (세션 한정 — 새로고침 시 OFF 리셋) -->
+    <label class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md border border-slate-200 bg-white text-slate-600 cursor-pointer hover:bg-slate-50"
+           title="Strict Weinstein 거부 신호 (QA·백테스팅용) 도 결과에 포함. 매수/감시 버튼은 자동 비활성.">
+      <input type="checkbox" x-model="filter.include_rejected" @change="loadResults()" class="accent-red-500">
+      <span>👁 거부 신호 보기 <span class="text-slate-400">(QA)</span></span>
+    </label>
+    <button x-show="results.length > 0"
+      @click="showBulkDeleteModal = true"
+      class="btn btn-danger ml-auto flex items-center gap-1.5">
+      <span>🗑️</span>
+      <span>일괄 삭제</span>
+      <span class="bg-red-200 text-red-800 text-xs px-1.5 py-0.5 rounded-full font-bold"
+            x-text="results.length + '건'"></span>
+    </button>
+  </div>
+
+  <!-- QA 모드 안내 배너 — include_rejected ON 일 때만 -->
+  <template x-if="filter.include_rejected">
+    <div class="bg-amber-50 text-amber-700 text-xs px-3 py-2 rounded-md mb-3 flex items-center gap-2">
+      <span>⚠️</span>
+      <span>
+        QA 모드: Strict 거부 신호
+        <span class="font-semibold" x-text="results.filter(r => r.strict_filter_passed === false).length + '건'"></span>
+        포함 — 매수/감시 동선 비활성됨
+      </span>
+    </div>
+  </template>
+
+  <!-- 일괄 삭제 확인 모달 -->
+  <div x-show="showBulkDeleteModal" x-cloak class="modal-bg" @click.self="showBulkDeleteModal=false">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
+      <div class="text-center mb-5">
+        <div class="text-4xl mb-3">🗑️</div>
+        <h3 class="font-bold text-slate-800 text-lg mb-1">검출 항목 일괄 삭제</h3>
+        <p class="text-sm text-slate-500">현재 필터 조건에 해당하는</p>
+        <p class="text-lg font-bold text-red-600 my-1" x-text="results.length + '건'"></p>
+        <p class="text-sm text-slate-500">을 모두 삭제합니다.</p>
+        <!-- 현재 필터 요약 -->
+        <div class="mt-3 bg-slate-50 rounded-xl p-3 text-xs text-slate-500 text-left space-y-1">
+          <div class="flex justify-between">
+            <span class="text-slate-400">시장</span>
+            <span class="font-medium text-slate-700"
+              x-text="filter.market==='ALL'?'전체':filter.market==='KR'?'🇰🇷 한국':'🇺🇸 미국'"></span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">신호 유형</span>
+            <span class="font-medium text-slate-700"
+              x-text="filter.signal_type==='ALL'?'전체':filter.signal_type==='BREAKOUT'?'🚀 돌파':filter.signal_type==='RE_BREAKOUT'?'🔁 재돌파':'🔄 반등'"></span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">기간</span>
+            <span class="font-medium text-slate-700" x-text="filter.days+'일 이내'"></span>
+          </div>
+          <template x-if="filter.include_rejected">
+            <div class="flex justify-between text-amber-600">
+              <span>거부 행 포함</span>
+              <span class="font-medium">QA 모드</span>
+            </div>
+          </template>
+        </div>
+        <p class="text-xs text-red-400 mt-3">⚠️ 삭제 후 복구할 수 없습니다</p>
+      </div>
+      <div class="flex gap-2">
+        <button @click="showBulkDeleteModal=false"
+          class="flex-1 btn btn-ghost">취소</button>
+        <button @click="deleteAllResults()"
+          :disabled="bulkDeleting"
+          class="flex-1 btn btn-danger flex items-center justify-center gap-1.5">
+          <svg x-show="bulkDeleting" class="spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+          </svg>
+          <span x-text="bulkDeleting ? '삭제 중…' : '전체 삭제'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 결과 없음 -->
+  <div x-show="results.length===0" class="card p-16 text-center text-slate-400">
+    <div class="text-5xl mb-3">📊</div>
+    <p class="font-semibold text-slate-500">아직 스캔 결과가 없습니다</p>
+    <p class="mt-1 text-xs">위의 "지금 스캔" 버튼을 눌러 시작하세요</p>
+  </div>
+
+  <!-- 결과 카드 -->
+  <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+    <template x-for="r in results" :key="r.id">
+      <div class="rounded-xl p-4 border relative"
+        :class="[
+          r.signal_type==='BREAKOUT'?'sig-b':r.signal_type==='RE_BREAKOUT'?'border-purple-200 bg-purple-50/60':'sig-r',
+          r.strict_filter_passed===false ? 'opacity-60 ring-1 ring-red-200' : ''
+        ]">
+        <button @click="deleteResult(r.id)" title="삭제"
+          class="absolute top-2 right-2 w-5 h-5 flex items-center justify-center rounded-full text-slate-300 hover:text-red-500 hover:bg-red-50 transition text-sm leading-none">×</button>
+        <div class="flex justify-between items-start mb-2 pr-5">
+          <div class="flex gap-1.5 flex-wrap">
+            <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+              :class="r.market==='KR'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'"
+              x-text="r.market==='KR'?'🇰🇷 KR':'🇺🇸 US'"></span>
+            <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+              :class="r.signal_type==='BREAKOUT'?'bg-emerald-100 text-emerald-700':r.signal_type==='RE_BREAKOUT'?'bg-purple-100 text-purple-700':'bg-blue-100 text-blue-700'"
+              x-text="r.signal_type==='BREAKOUT'?'🚀 돌파':r.signal_type==='RE_BREAKOUT'?'🔁 재돌파':'🔄 반등'"></span>
+            <!-- Strict Weinstein 필터 상태 배지 (3 상태: pass / reject / legacy) -->
+            <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+              :class="r.strict_filter_passed===true?'bg-emerald-100 text-emerald-700':r.strict_filter_passed===false?'bg-red-100 text-red-700':'bg-slate-100 text-slate-500'"
+              :title="r.strict_filter_passed===true?'Strict Weinstein 8 게이트 통과':r.strict_filter_passed===false?'Strict Weinstein 게이트 거부 — 매수 후보 아님':'Legacy 결과 (strict 평가 이전)'"
+              x-text="r.strict_filter_passed===true?'✓ Strict':r.strict_filter_passed===false?'✗ 거부':'Strict —'"></span>
+            <!-- Mansfield RS 배지 — rs_value 는 (ratio/SMA52−1)*100 의 0선 기준 퍼센트.
+                 strict gate 는 rs_value≥0 을 요구. Legacy ratio RS(r.rs, ~1.0 기준 배수)
+                 와는 스케일이 다르므로 분기 렌더링.
+                 색상 기준: ≥+5 강함(orange) / ≥0 중립(slate) / <0 약함·strict 거부 후보(red). -->
+            <template x-if="r.rs_value!=null">
+              <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+                :class="r.rs_value>=5?'bg-orange-100 text-orange-700':r.rs_value>=0?'bg-slate-100 text-slate-600':'bg-red-50 text-red-600'"
+                :title="'Mansfield RS '+(r.rs_value>=0?'+':'')+r.rs_value.toFixed(1)+' (vs 시장, 0선 기준)'+(r.rs_trend?' · 추세: '+r.rs_trend:'')"
+                x-text="'MRS '+(r.rs_value>=0?'+':'')+r.rs_value.toFixed(1)+(r.rs_trend==='RISING'?' ↗':r.rs_trend==='FALLING'?' ↘':'')"></span>
+            </template>
+            <!-- Legacy ratio RS (r.rs, ~1.0 기준 배수) — rs_value 부재 시 fallback -->
+            <template x-if="r.rs_value==null && r.rs!=null">
+              <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+                :class="r.rs>=1.5?'bg-orange-100 text-orange-700':r.rs>=1?'bg-slate-100 text-slate-600':'bg-slate-50 text-slate-400'"
+                :title="'상대강도 비율: 시장 대비 '+r.rs+'배 (legacy ratio RS)'"
+                x-text="'RS '+r.rs+'x'"></span>
+            </template>
+            <!-- Grade 배지 (S/A/B 종합 등급 — 채워진 경우만) -->
+            <template x-if="r.grade">
+              <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+                :class="r.grade==='S'?'bg-amber-100 text-amber-700':r.grade==='A'?'bg-emerald-50 text-emerald-700':'bg-slate-100 text-slate-600'"
+                :title="'종합 등급 '+r.grade"
+                x-text="r.grade"></span>
+            </template>
+            <!-- Sector 배지 (sector_name truthy 일 때만 — NULL 이면 미렌더) -->
+            <template x-if="r.sector_name">
+              <span class="text-xs px-2 py-0.5 rounded-full font-semibold bg-indigo-50 text-indigo-700"
+                x-text="r.sector_name"></span>
+            </template>
+          </div>
+          <span class="text-xs text-slate-400 flex-shrink-0">
+            <span class="text-slate-300">시그널</span> <span x-text="r.signal_date||r.scan_time?.slice(0,10)"></span>
+          </span>
+        </div>
+        <p class="font-bold text-slate-900" x-text="r.name"></p>
+        <p class="text-xs text-slate-400 mb-3" x-text="r.ticker"></p>
+        <div class="grid grid-cols-3 gap-1.5 text-xs mb-3">
+          <div class="bg-white/70 rounded-lg p-2 text-center">
+            <div class="text-slate-400 mb-0.5">현재가</div>
+            <div class="font-bold text-slate-800" x-text="r.market==='KR' ? r.price?.toLocaleString()+'원' : '$'+r.price?.toFixed(2)"></div>
+          </div>
+          <div class="bg-white/70 rounded-lg p-2 text-center">
+            <div class="text-slate-400 mb-0.5">MA150</div>
+            <div class="font-bold text-slate-800" x-text="r.market==='KR' ? r.ma150?.toLocaleString()+'원' : '$'+r.ma150?.toFixed(2)"></div>
+          </div>
+          <div class="bg-white/70 rounded-lg p-2 text-center">
+            <div class="text-slate-400 mb-0.5">거래량비</div>
+            <div class="font-bold" :class="r.volume_ratio>=2?'text-red-600':r.volume_ratio>=1.5?'text-orange-500':'text-slate-700'"
+              x-text="(r.volume_ratio||0).toFixed(1)+'x'"></div>
+          </div>
+        </div>
+        <!-- 거부 사유 펼치기 (strict 거부 행만) -->
+        <template x-if="r.strict_filter_passed === false && (r.filter_reasons||[]).length">
+          <div class="mb-2">
+            <button @click="r._reasonsOpen = !r._reasonsOpen"
+              class="text-xs text-red-600 hover:text-red-700 font-medium inline-flex items-center gap-1">
+              <span>📋 거부 사유</span>
+              <span x-text="r.filter_reasons.length"></span><span>개</span>
+              <span x-text="r._reasonsOpen ? '▴' : '▾'"></span>
+            </button>
+            <div x-show="r._reasonsOpen" x-cloak class="mt-1.5 flex flex-wrap gap-1">
+              <template x-for="reason in r.filter_reasons" :key="reason">
+                <span class="bg-red-50 text-red-700 text-[11px] px-1.5 py-0.5 rounded"
+                      :title="reason"
+                      x-text="reasonLabel(reason)"></span>
+              </template>
+            </div>
+          </div>
+        </template>
+        <div class="flex gap-2">
+          <button @click="openChart(r)"
+            class="flex-1 text-xs bg-white/80 hover:bg-white border border-slate-200 rounded-lg py-1.5 text-slate-600 hover:text-emerald-600 transition font-medium">
+            📈 차트
+          </button>
+          <button @click="openAddTxFromScan(r)"
+            :disabled="r.strict_filter_passed === false"
+            :title="r.strict_filter_passed === false ? 'Strict 거부 행은 매수 동선 차단 (QA 인스펙트 전용)' : ''"
+            class="flex-1 text-xs bg-white/80 hover:bg-white border border-slate-200 rounded-lg py-1.5 text-slate-600 hover:text-indigo-600 transition font-medium"
+            :class="r.strict_filter_passed === false ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''">
+            + 매수
+          </button>
+          <button @click="openAddWatch(r)"
+            :disabled="r.strict_filter_passed === false"
+            :title="r.strict_filter_passed === false ? 'Strict 거부 행은 감시 추가 차단 (QA 인스펙트 전용)' : ''"
+            class="flex-1 text-xs bg-white/80 hover:bg-white border border-slate-200 rounded-lg py-1.5 text-slate-600 hover:text-amber-600 transition font-medium"
+            :class="r.strict_filter_passed === false ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''">
+            👁 감시
+          </button>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- 스캔 이력 -->
+  <div class="card mt-5">
+    <div class="px-4 pt-4 pb-2 font-semibold text-slate-700">📋 스캔 이력</div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-50 text-slate-500 uppercase">
+          <tr>
+            <th class="px-4 py-2 text-left">실행시간</th>
+            <th class="px-4 py-2">대상</th>
+            <th class="px-4 py-2 text-right">분석</th>
+            <th class="px-4 py-2 text-right">시그널</th>
+            <th class="px-4 py-2">상태</th>
+            <th class="px-4 py-2">트리거</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          <template x-for="log in scanLogs" :key="log.id">
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-2 text-slate-600" x-text="fmtDt(log.started_at)"></td>
+              <td class="px-4 py-2 text-center"><span class="bg-slate-100 text-slate-600 px-2 py-0.5 rounded" x-text="log.market"></span></td>
+              <td class="px-4 py-2 text-right text-slate-600" x-text="(log.total_scanned||0).toLocaleString()"></td>
+              <td class="px-4 py-2 text-right font-semibold" :class="log.signals_found>0?'text-indigo-600':'text-slate-400'" x-text="log.signals_found"></td>
+              <td class="px-4 py-2 text-center">
+                <span class="px-2 py-0.5 rounded-full font-medium"
+                  :class="log.status==='DONE'?'bg-emerald-100 text-emerald-700':log.status==='RUNNING'?'bg-yellow-100 text-yellow-700':'bg-red-100 text-red-700'"
+                  x-text="log.status==='DONE'?'완료':log.status==='RUNNING'?'진행중':'오류'"></span>
+              </td>
+              <td class="px-4 py-2 text-center text-slate-400" x-text="log.triggered_by==='scheduler'?'자동':'수동'"></td>
+            </tr>
+          </template>
+          <tr x-show="scanLogs.length===0"><td colspan="6" class="px-4 py-8 text-center text-slate-400">이력 없음</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     탭 2: 계좌 현황
+═════════════════════════════════════════════════════════ -->
+<div x-show="activeTab==='account'" x-cloak>
+
+  <!-- 통화별 합산 요약 -->
+  <div class="grid grid-cols-2 gap-4 mb-6">
+    <div class="card p-4 border-l-4 border-blue-400">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="text-lg">🇰🇷</span>
+        <span class="font-bold text-slate-700">원화 계좌 합계</span>
+        <span class="text-xs text-slate-400 ml-1">KRW</span>
+      </div>
+      <div class="text-2xl font-black text-blue-700"
+        x-text="'₩ ' + krwAccounts.reduce((s,a)=>s+a.total,0).toLocaleString()"></div>
+      <div class="flex gap-4 mt-2 text-xs text-slate-500">
+        <span>현금 ₩<span class="font-semibold text-slate-700"
+          x-text="krwAccounts.reduce((s,a)=>s+a.cash,0).toLocaleString()"></span></span>
+        <span>주식 ₩<span class="font-semibold text-slate-700"
+          x-text="krwAccounts.reduce((s,a)=>s+a.stock_eval,0).toLocaleString()"></span></span>
+      </div>
+    </div>
+    <div class="card p-4 border-l-4 border-emerald-400">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="text-lg">🇺🇸</span>
+        <span class="font-bold text-slate-700">달러 계좌 합계</span>
+        <span class="text-xs text-slate-400 ml-1">USD</span>
+      </div>
+      <div class="text-2xl font-black text-emerald-700"
+        x-text="'$ ' + usdAccounts.reduce((s,a)=>s+a.total,0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})"></div>
+      <div class="flex gap-4 mt-2 text-xs text-slate-500">
+        <span>현금 $<span class="font-semibold text-slate-700"
+          x-text="usdAccounts.reduce((s,a)=>s+a.cash,0).toLocaleString(undefined,{minimumFractionDigits:2})"></span></span>
+        <span>주식 $<span class="font-semibold text-slate-700"
+          x-text="usdAccounts.reduce((s,a)=>s+a.stock_eval,0).toLocaleString(undefined,{minimumFractionDigits:2})"></span></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 🇰🇷 원화 계좌 -->
+  <div class="mb-6">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="text-base font-bold text-slate-700">🇰🇷 원화 계좌</span>
+      <span class="text-xs text-slate-400">KRW</span>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+      <template x-for="acct in krwAccounts" :key="acct.id">
+        <div class="card p-4 cursor-pointer border-2 transition"
+          :class="selectedAccountId===acct.id ? 'border-blue-400 bg-blue-50/30' : 'border-transparent hover:border-blue-200'"
+          @click="selectedAccountId=acct.id; loadTransactions(); loadHoldings()">
+          <div class="flex justify-between items-start mb-2">
+            <div>
+              <div class="flex items-center gap-1.5 mb-0.5">
+                <span class="text-xs px-1.5 py-0.5 rounded font-semibold bg-blue-100 text-blue-700"
+                  x-text="acct.account_type_label"></span>
+                <span x-show="acct.broker" class="text-xs text-slate-400" x-text="acct.broker"></span>
+              </div>
+              <p class="font-bold text-slate-800" x-text="acct.name"></p>
+            </div>
+            <div class="flex flex-col items-end gap-1">
+              <span x-show="selectedAccountId===acct.id"
+                class="text-xs bg-blue-500 text-white px-2 py-0.5 rounded-full font-medium">선택됨</span>
+              <button @click.stop="deleteAccount(acct.id)"
+                class="text-xs text-red-400 hover:text-red-600 px-1.5 py-0.5 rounded hover:bg-red-50">삭제</button>
+            </div>
+          </div>
+          <div class="space-y-1">
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-500">💵 현금 잔고</span>
+              <span class="font-semibold text-slate-700" x-text="'₩ ' + acct.cash?.toLocaleString()"></span>
+            </div>
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-500">📈 주식 평가액</span>
+              <span class="font-semibold text-slate-700" x-text="'₩ ' + acct.stock_eval?.toLocaleString()"></span>
+            </div>
+            <div class="h-px bg-slate-100 my-1"></div>
+            <div class="flex justify-between text-sm">
+              <span class="text-slate-600 font-medium">💰 총 자산</span>
+              <span class="font-black text-blue-700" x-text="'₩ ' + acct.total?.toLocaleString()"></span>
+            </div>
+          </div>
+        </div>
+      </template>
+      <!-- 원화 계좌 추가 -->
+      <div class="card p-4 flex items-center justify-center cursor-pointer hover:bg-slate-50 transition border-dashed border-2 border-slate-200 min-h-[120px]"
+        @click="openAddAccount('KR')">
+        <div class="text-center text-slate-400">
+          <div class="text-2xl mb-1">+</div>
+          <p class="text-xs font-medium">원화 계좌 추가</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 🇺🇸 달러 계좌 -->
+  <div class="mb-6">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="text-base font-bold text-slate-700">🇺🇸 달러 계좌</span>
+      <span class="text-xs text-slate-400">USD</span>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+      <template x-for="acct in usdAccounts" :key="acct.id">
+        <div class="card p-4 cursor-pointer border-2 transition"
+          :class="selectedAccountId===acct.id ? 'border-emerald-400 bg-emerald-50/30' : 'border-transparent hover:border-emerald-200'"
+          @click="selectedAccountId=acct.id; loadTransactions(); loadHoldings()">
+          <div class="flex justify-between items-start mb-2">
+            <div>
+              <div class="flex items-center gap-1.5 mb-0.5">
+                <span class="text-xs px-1.5 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-700"
+                  x-text="acct.account_type_label"></span>
+                <span x-show="acct.broker" class="text-xs text-slate-400" x-text="acct.broker"></span>
+              </div>
+              <p class="font-bold text-slate-800" x-text="acct.name"></p>
+            </div>
+            <div class="flex flex-col items-end gap-1">
+              <span x-show="selectedAccountId===acct.id"
+                class="text-xs bg-emerald-500 text-white px-2 py-0.5 rounded-full font-medium">선택됨</span>
+              <button @click.stop="deleteAccount(acct.id)"
+                class="text-xs text-red-400 hover:text-red-600 px-1.5 py-0.5 rounded hover:bg-red-50">삭제</button>
+            </div>
+          </div>
+          <div class="space-y-1">
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-500">💵 현금 잔고</span>
+              <span class="font-semibold text-slate-700"
+                x-text="'$ ' + acct.cash?.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})"></span>
+            </div>
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-500">📈 주식 평가액</span>
+              <span class="font-semibold text-slate-700"
+                x-text="'$ ' + acct.stock_eval?.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})"></span>
+            </div>
+            <div class="h-px bg-slate-100 my-1"></div>
+            <div class="flex justify-between text-sm">
+              <span class="text-slate-600 font-medium">💰 총 자산</span>
+              <span class="font-black text-emerald-700"
+                x-text="'$ ' + acct.total?.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})"></span>
+            </div>
+          </div>
+        </div>
+      </template>
+      <!-- 달러 계좌 추가 -->
+      <div class="card p-4 flex items-center justify-center cursor-pointer hover:bg-slate-50 transition border-dashed border-2 border-slate-200 min-h-[120px]"
+        @click="openAddAccount('US')">
+        <div class="text-center text-slate-400">
+          <div class="text-2xl mb-1">+</div>
+          <p class="text-xs font-medium">달러 계좌 추가</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 거래 내역 입력 버튼 -->
+  <div class="flex gap-2 mb-4">
+    <button @click="openAddTx('DEPOSIT')" class="btn btn-primary flex items-center gap-1.5">💰 입금</button>
+    <button @click="openAddTx('WITHDRAW')" class="btn btn-ghost flex items-center gap-1.5">💸 출금</button>
+    <button @click="openAddTx('BUY')" class="btn flex items-center gap-1.5 bg-emerald-600 text-white hover:bg-emerald-700">🛒 매수</button>
+    <button @click="openAddTx('SELL')" class="btn flex items-center gap-1.5 bg-red-500 text-white hover:bg-red-600">💱 매도</button>
+    <div class="flex-1"></div>
+    <button @click="loadAccounts()" class="btn btn-ghost">↺ 새로고침</button>
+  </div>
+
+  <!-- 최근 거래 내역 (미니) -->
+  <div class="card">
+    <div class="px-4 pt-4 pb-2 font-semibold text-slate-700">📋 최근 거래 내역</div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-50 text-slate-500 uppercase">
+          <tr>
+            <th class="px-4 py-2 text-left">날짜</th>
+            <th class="px-4 py-2">유형</th>
+            <th class="px-4 py-2 text-left">종목</th>
+            <th class="px-4 py-2 text-right">수량</th>
+            <th class="px-4 py-2 text-right">단가</th>
+            <th class="px-4 py-2 text-right">금액</th>
+            <th class="px-4 py-2 text-right">수수료/세금</th>
+            <th class="px-4 py-2">메모</th>
+            <th class="px-4 py-2"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          <template x-for="t in transactions.slice(0,30)" :key="t.id">
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-2 text-slate-600 whitespace-nowrap" x-text="t.trade_date"></td>
+              <td class="px-4 py-2 text-center">
+                <span class="px-2 py-0.5 rounded-full font-semibold text-xs"
+                  :class="{'bg-emerald-100 text-emerald-700':t.tx_type==='DEPOSIT','bg-slate-100 text-slate-600':t.tx_type==='WITHDRAW','bg-blue-100 text-blue-700':t.tx_type==='BUY','bg-red-100 text-red-700':t.tx_type==='SELL'}"
+                  x-text="{'BUY':'매수','SELL':'매도','DEPOSIT':'입금','WITHDRAW':'출금'}[t.tx_type]||t.tx_type">
+                </span>
+              </td>
+              <td class="px-4 py-2">
+                <span x-show="t.name" class="font-medium text-slate-700" x-text="t.name"></span>
+                <span x-show="t.ticker" class="text-slate-400 ml-1" x-text="'('+t.ticker+')'"></span>
+              </td>
+              <td class="px-4 py-2 text-right text-slate-600" x-text="t.quantity?.toLocaleString()||'-'"></td>
+              <td class="px-4 py-2 text-right text-slate-600"
+                x-text="t.price ? fmtMoney(t.price, acctCurrency(t.account_id)) : '-'"></td>
+              <td class="px-4 py-2 text-right font-semibold text-slate-700"
+                x-text="fmtMoney(t.amount, acctCurrency(t.account_id))"></td>
+              <td class="px-4 py-2 text-right text-slate-400"
+                x-text="((t.fee||0)+(t.tax||0))>0 ? fmtMoney((t.fee||0)+(t.tax||0), acctCurrency(t.account_id)) : '-'"></td>
+              <td class="px-4 py-2 text-slate-400 max-w-24 truncate" x-text="t.memo||'-'"></td>
+              <td class="px-4 py-2">
+                <button @click="deleteTx(t.id)" class="text-red-400 hover:text-red-600 px-1.5 py-0.5 rounded hover:bg-red-50">✕</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="transactions.length===0"><td colspan="9" class="px-4 py-10 text-center text-slate-400">거래 내역 없음</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     탭 3: 보유 주식
+═════════════════════════════════════════════════════════ -->
+<div x-show="activeTab==='holdings'" x-cloak>
+
+  <!-- 필터 바 -->
+  <div class="flex justify-between items-center mb-4">
+    <div class="flex gap-2">
+      <button @click="holdingsMarket='ALL'"
+        :class="holdingsMarket==='ALL'?'bg-indigo-600 text-white':'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'"
+        class="px-4 py-1.5 rounded-full text-sm font-semibold transition">전체</button>
+      <button @click="holdingsMarket='KR'"
+        :class="holdingsMarket==='KR'?'bg-indigo-600 text-white':'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'"
+        class="px-4 py-1.5 rounded-full text-sm font-semibold transition">🇰🇷 한국</button>
+      <button @click="holdingsMarket='US'"
+        :class="holdingsMarket==='US'?'bg-indigo-600 text-white':'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'"
+        class="px-4 py-1.5 rounded-full text-sm font-semibold transition">🇺🇸 미국</button>
+    </div>
+    <button @click="refreshPrices()" class="btn btn-ghost flex items-center gap-1.5">
+      <svg class="w-3.5 h-3.5" :class="priceRefreshing?'spin':''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+      </svg>
+      현재가 업데이트
+    </button>
+  </div>
+
+  <!-- 보유 주식 없음 -->
+  <div x-show="holdings.length===0" class="card p-16 text-center text-slate-400">
+    <div class="text-5xl mb-3">💼</div>
+    <p class="font-semibold text-slate-500">보유 주식이 없습니다</p>
+    <p class="mt-1 text-xs">매수 기록을 추가하면 자동으로 반영됩니다</p>
+  </div>
+
+  <!-- ── 🇰🇷 한국 주식 섹션 ── -->
+  <template x-if="holdings.length>0 && (holdingsMarket==='ALL'||holdingsMarket==='KR') && krHoldings.length>0">
+    <div class="mb-6">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-base font-bold text-slate-700">🇰🇷 한국 주식</span>
+        <span class="text-xs text-slate-400">KRW</span>
+      </div>
+      <!-- KR 요약 -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+        <div class="card p-3 text-center">
+          <div class="text-xs text-slate-400 mb-1">보유 종목</div>
+          <div class="text-lg font-bold text-slate-800" x-text="krHoldings.length+'개'"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-xs text-slate-400 mb-1">총 매입</div>
+          <div class="text-lg font-bold text-slate-800"
+            x-text="'₩'+krHoldings.reduce((s,h)=>s+(h.avg_price*h.quantity),0).toLocaleString()"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-xs text-slate-400 mb-1">총 평가</div>
+          <div class="text-lg font-bold text-slate-800"
+            x-text="'₩'+krHoldings.reduce((s,h)=>s+(h.eval_amount||0),0).toLocaleString()"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-xs text-slate-400 mb-1">총 손익</div>
+          <template x-if="true">
+            <div class="text-lg font-bold"
+              :class="krHoldings.reduce((s,h)=>s+(h.profit_loss||0),0)>=0?'pct-pos':'pct-neg'"
+              x-text="(krHoldings.reduce((s,h)=>s+(h.profit_loss||0),0)>=0?'+':'')+'₩'+krHoldings.reduce((s,h)=>s+(h.profit_loss||0),0).toLocaleString()"></div>
+          </template>
+        </div>
+      </div>
+      <!-- KR 테이블 -->
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead class="bg-slate-50 text-slate-500 uppercase">
+              <tr>
+                <th class="px-4 py-3 text-left">종목</th>
+                <th class="px-4 py-3 text-right">수량</th>
+                <th class="px-4 py-3 text-right">평단가</th>
+                <th class="px-4 py-3 text-right">현재가</th>
+                <th class="px-4 py-3 text-right">수익률</th>
+                <th class="px-4 py-3 text-right">평가금액</th>
+                <th class="px-4 py-3 text-right">손익</th>
+                <th class="px-4 py-3 text-center">업데이트</th>
+                <th class="px-4 py-3 text-center">삭제</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <template x-for="h in krHoldings" :key="h.id">
+                <tr class="hover:bg-slate-50 transition">
+                  <td class="px-4 py-3">
+                    <div class="font-semibold text-slate-800" x-text="h.name"></div>
+                    <div class="text-slate-400" x-text="h.ticker"></div>
+                  </td>
+                  <td class="px-4 py-3 text-right text-slate-700 font-medium" x-text="h.quantity?.toLocaleString()"></td>
+                  <td class="px-4 py-3 text-right text-slate-700" x-text="'₩'+h.avg_price?.toLocaleString()"></td>
+                  <td class="px-4 py-3 text-right font-semibold"
+                    :class="!h.current_price?'text-slate-400':h.current_price>=h.avg_price?'text-emerald-600':'text-red-600'"
+                    x-text="h.current_price ? '₩'+h.current_price?.toLocaleString() : '-'"></td>
+                  <td class="px-4 py-3 text-right font-bold text-base"
+                    :class="h.profit_loss_pct>0?'pct-pos':h.profit_loss_pct<0?'pct-neg':'pct-zero'"
+                    x-text="h.current_price ? (h.profit_loss_pct>=0?'+':'')+h.profit_loss_pct?.toFixed(2)+'%' : '-'"></td>
+                  <td class="px-4 py-3 text-right text-slate-700" x-text="'₩'+h.eval_amount?.toLocaleString()"></td>
+                  <td class="px-4 py-3 text-right font-semibold"
+                    :class="h.profit_loss>0?'text-emerald-600':h.profit_loss<0?'text-red-600':'text-slate-400'"
+                    x-text="h.current_price ? (h.profit_loss>=0?'+₩':'-₩')+Math.abs(h.profit_loss)?.toLocaleString() : '-'"></td>
+                  <td class="px-4 py-3 text-center text-slate-400"
+                    x-text="h.price_updated_at ? fmtDt(h.price_updated_at) : '미업데이트'"></td>
+                  <td class="px-4 py-3 text-center">
+                    <button @click="deleteHolding(h.id, h.name||h.ticker)"
+                      class="text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded transition">삭제</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ── 🇺🇸 미국 주식 섹션 ── -->
+  <template x-if="holdings.length>0 && (holdingsMarket==='ALL'||holdingsMarket==='US') && usHoldings.length>0">
+    <div>
+      <div class="flex items-center gap-3 mb-3">
+        <span class="text-base font-bold text-slate-700">🇺🇸 미국 주식</span>
+        <span class="text-xs text-slate-400">USD</span>
+        <span class="text-xs bg-amber-50 border border-amber-200 text-amber-700 px-2 py-0.5 rounded-full font-semibold">
+          환율 $1 = <span x-text="usdKrw.toLocaleString()"></span>원
+        </span>
+        <button @click="loadExchangeRate()" class="text-xs text-slate-400 hover:text-slate-600">↺</button>
+      </div>
+      <!-- US 요약 -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+        <div class="card p-3 text-center">
+          <div class="text-xs text-slate-400 mb-1">보유 종목</div>
+          <div class="text-lg font-bold text-slate-800" x-text="usHoldings.length+'개'"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-xs text-slate-400 mb-1">총 매입</div>
+          <div class="text-lg font-bold text-slate-800"
+            x-text="'$'+(usHoldings.reduce((s,h)=>s+(h.avg_price*h.quantity),0)).toFixed(2)"></div>
+          <div class="text-xs text-slate-400 mt-0.5"
+            x-text="'₩'+(usHoldings.reduce((s,h)=>s+(h.avg_price*h.quantity),0)*usdKrw).toLocaleString(undefined,{maximumFractionDigits:0})"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-xs text-slate-400 mb-1">총 평가</div>
+          <div class="text-lg font-bold text-slate-800"
+            x-text="'$'+(usHoldings.reduce((s,h)=>s+(h.eval_amount||0),0)).toFixed(2)"></div>
+          <div class="text-xs text-slate-400 mt-0.5"
+            x-text="'₩'+(usHoldings.reduce((s,h)=>s+(h.eval_amount||0),0)*usdKrw).toLocaleString(undefined,{maximumFractionDigits:0})"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-xs text-slate-400 mb-1">총 손익</div>
+          <template x-if="true">
+            <div>
+              <div class="text-lg font-bold"
+                :class="usHoldings.reduce((s,h)=>s+(h.profit_loss||0),0)>=0?'pct-pos':'pct-neg'"
+                x-text="(usHoldings.reduce((s,h)=>s+(h.profit_loss||0),0)>=0?'+':'')+' $'+(usHoldings.reduce((s,h)=>s+(h.profit_loss||0),0)).toFixed(2)"></div>
+              <div class="text-xs text-slate-400 mt-0.5"
+                x-text="'₩'+(usHoldings.reduce((s,h)=>s+(h.profit_loss||0),0)*usdKrw).toLocaleString(undefined,{maximumFractionDigits:0})"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+      <!-- US 테이블 -->
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead class="bg-slate-50 text-slate-500 uppercase">
+              <tr>
+                <th class="px-4 py-3 text-left">종목</th>
+                <th class="px-4 py-3 text-right">수량</th>
+                <th class="px-4 py-3 text-right">평단가(USD)</th>
+                <th class="px-4 py-3 text-right">현재가(USD)</th>
+                <th class="px-4 py-3 text-right">수익률</th>
+                <th class="px-4 py-3 text-right">평가금액</th>
+                <th class="px-4 py-3 text-right">원화 평가</th>
+                <th class="px-4 py-3 text-right">손익(USD)</th>
+                <th class="px-4 py-3 text-center">업데이트</th>
+                <th class="px-4 py-3 text-center">삭제</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <template x-for="h in usHoldings" :key="h.id">
+                <tr class="hover:bg-slate-50 transition">
+                  <td class="px-4 py-3">
+                    <div class="font-semibold text-slate-800" x-text="h.name"></div>
+                    <div class="text-slate-400" x-text="h.ticker"></div>
+                  </td>
+                  <td class="px-4 py-3 text-right text-slate-700 font-medium" x-text="h.quantity?.toLocaleString()"></td>
+                  <td class="px-4 py-3 text-right text-slate-700" x-text="'$'+h.avg_price?.toFixed(2)"></td>
+                  <td class="px-4 py-3 text-right font-semibold"
+                    :class="!h.current_price?'text-slate-400':h.current_price>=h.avg_price?'text-emerald-600':'text-red-600'"
+                    x-text="h.current_price ? '$'+h.current_price?.toFixed(2) : '-'"></td>
+                  <td class="px-4 py-3 text-right font-bold text-base"
+                    :class="h.profit_loss_pct>0?'pct-pos':h.profit_loss_pct<0?'pct-neg':'pct-zero'"
+                    x-text="h.current_price ? (h.profit_loss_pct>=0?'+':'')+h.profit_loss_pct?.toFixed(2)+'%' : '-'"></td>
+                  <td class="px-4 py-3 text-right text-slate-700" x-text="'$'+(h.eval_amount||0).toFixed(2)"></td>
+                  <td class="px-4 py-3 text-right text-slate-500"
+                    x-text="h.eval_amount ? '₩'+((h.eval_amount||0)*usdKrw).toLocaleString(undefined,{maximumFractionDigits:0}) : '-'"></td>
+                  <td class="px-4 py-3 text-right font-semibold"
+                    :class="h.profit_loss>0?'text-emerald-600':h.profit_loss<0?'text-red-600':'text-slate-400'"
+                    x-text="h.current_price ? (h.profit_loss>=0?'+':'')+' $'+(h.profit_loss||0).toFixed(2) : '-'"></td>
+                  <td class="px-4 py-3 text-center text-slate-400"
+                    x-text="h.price_updated_at ? fmtDt(h.price_updated_at) : '미업데이트'"></td>
+                  <td class="px-4 py-3 text-center">
+                    <button @click="deleteHolding(h.id, h.name||h.ticker)"
+                      class="text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded transition">삭제</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </template>
+
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     탭 4: 거래 일지
+═════════════════════════════════════════════════════════ -->
+<div x-show="activeTab==='journal'" x-cloak>
+  <div class="flex flex-wrap gap-2 mb-4 items-center">
+    <select x-model="txFilter.account_id" @change="loadTransactions()" class="input w-auto">
+      <option value="">전체 계좌</option>
+      <template x-for="a in accounts" :key="a.id">
+        <option :value="a.id" x-text="a.name"></option>
+      </template>
+    </select>
+    <select x-model="txFilter.type" @change="loadTransactions()" class="input w-auto">
+      <option value="ALL">전체 유형</option>
+      <option value="BUY">매수</option>
+      <option value="SELL">매도</option>
+      <option value="DEPOSIT">입금</option>
+      <option value="WITHDRAW">출금</option>
+    </select>
+    <div class="flex-1"></div>
+    <button @click="openAddTx('BUY')" class="btn bg-blue-600 text-white hover:bg-blue-700">+ 거래 추가</button>
+  </div>
+
+  <!-- 요약 통계 -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    <div class="card p-3 text-center">
+      <div class="text-xs text-slate-400 mb-1">총 입금</div>
+      <div class="text-lg font-bold text-emerald-600" x-text="txStats.totalDeposit.toLocaleString()"></div>
+    </div>
+    <div class="card p-3 text-center">
+      <div class="text-xs text-slate-400 mb-1">총 출금</div>
+      <div class="text-lg font-bold text-slate-600" x-text="txStats.totalWithdraw.toLocaleString()"></div>
+    </div>
+    <div class="card p-3 text-center">
+      <div class="text-xs text-slate-400 mb-1">총 매수금액</div>
+      <div class="text-lg font-bold text-blue-600" x-text="txStats.totalBuy.toLocaleString()"></div>
+    </div>
+    <div class="card p-3 text-center">
+      <div class="text-xs text-slate-400 mb-1">총 매도금액</div>
+      <div class="text-lg font-bold text-red-500" x-text="txStats.totalSell.toLocaleString()"></div>
+    </div>
+  </div>
+
+  <div class="card overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-50 text-slate-500 uppercase sticky top-0">
+          <tr>
+            <th class="px-4 py-3 text-left">날짜</th>
+            <th class="px-4 py-3">유형</th>
+            <th class="px-4 py-3 text-left">종목</th>
+            <th class="px-4 py-3 text-right">수량</th>
+            <th class="px-4 py-3 text-right">단가</th>
+            <th class="px-4 py-3 text-right">금액</th>
+            <th class="px-4 py-3 text-right">수수료</th>
+            <th class="px-4 py-3 text-right">세금</th>
+            <th class="px-4 py-3 text-left">메모</th>
+            <th class="px-4 py-3"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          <template x-for="t in allTransactions" :key="t.id">
+            <tr class="hover:bg-slate-50 transition">
+              <td class="px-4 py-2.5 whitespace-nowrap text-slate-600" x-text="t.trade_date"></td>
+              <td class="px-4 py-2.5 text-center">
+                <span class="px-2 py-0.5 rounded-full font-semibold"
+                  :class="{'bg-emerald-100 text-emerald-700':t.tx_type==='DEPOSIT','bg-slate-100 text-slate-600':t.tx_type==='WITHDRAW','bg-blue-100 text-blue-700':t.tx_type==='BUY','bg-red-100 text-red-700':t.tx_type==='SELL'}"
+                  x-text="{'BUY':'매수','SELL':'매도','DEPOSIT':'입금','WITHDRAW':'출금'}[t.tx_type]||t.tx_type">
+                </span>
+              </td>
+              <td class="px-4 py-2.5">
+                <span x-show="t.name" class="font-medium text-slate-700" x-text="t.name"></span>
+                <span x-show="t.ticker" class="text-slate-400 ml-1" x-text="'('+t.ticker+')'"></span>
+                <span x-show="!t.name && !t.ticker" class="text-slate-400">-</span>
+              </td>
+              <td class="px-4 py-2.5 text-right text-slate-600" x-text="t.quantity?.toLocaleString()||'-'"></td>
+              <td class="px-4 py-2.5 text-right text-slate-600" x-text="t.price?.toLocaleString()||'-'"></td>
+              <td class="px-4 py-2.5 text-right font-semibold text-slate-800" x-text="t.amount?.toLocaleString()"></td>
+              <td class="px-4 py-2.5 text-right text-slate-400" x-text="(t.fee||0)>0?t.fee.toLocaleString():'-'"></td>
+              <td class="px-4 py-2.5 text-right text-slate-400" x-text="(t.tax||0)>0?t.tax.toLocaleString():'-'"></td>
+              <td class="px-4 py-2.5 text-slate-400 max-w-xs truncate" x-text="t.memo||'-'"></td>
+              <td class="px-4 py-2.5 text-center">
+                <button @click="deleteTx(t.id)" class="text-red-400 hover:text-red-600 rounded hover:bg-red-50 px-1.5 py-0.5">✕</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="allTransactions.length===0">
+            <td colspan="10" class="px-4 py-12 text-center text-slate-400">거래 내역이 없습니다</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     탭 5: 감시 목록
+═════════════════════════════════════════════════════════ -->
+<div x-show="activeTab==='watch'" x-cloak>
+  <div class="flex justify-between items-center mb-4">
+    <p class="text-xs text-slate-500">등록된 종목에 Stage2 매도 시그널 발생 시 텔레그램으로 알림을 받습니다</p>
+    <button @click="openAddWatch(null)" class="btn btn-primary">+ 종목 추가</button>
+  </div>
+
+  <div x-show="watchList.length===0" class="card p-16 text-center text-slate-400">
+    <div class="text-5xl mb-3">👁</div>
+    <p class="font-semibold text-slate-500">감시 종목이 없습니다</p>
+    <p class="mt-1 text-xs">스캔 결과에서 "감시 등록" 버튼을 누르거나 직접 추가하세요</p>
+  </div>
+
+  <div x-show="watchList.length>0" class="card overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-50 text-slate-500 uppercase">
+          <tr>
+            <th class="px-4 py-3 text-left">종목</th>
+            <th class="px-4 py-3 text-right">매수가</th>
+            <th class="px-4 py-3 text-right">손절가</th>
+            <th class="px-4 py-3 text-right">목표가</th>
+            <th class="px-4 py-3 text-left">메모</th>
+            <th class="px-4 py-3 text-center">등록일</th>
+            <th class="px-4 py-3"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          <template x-for="w in watchList" :key="w.id">
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span class="text-xs px-1.5 py-0.5 rounded font-semibold"
+                    :class="w.market==='KR'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'"
+                    x-text="w.market"></span>
+                  <div>
+                    <div class="font-semibold text-slate-800" x-text="w.name"></div>
+                    <div class="text-slate-400" x-text="w.ticker"></div>
+                  </div>
+                </div>
+              </td>
+              <td class="px-4 py-3 text-right text-slate-700" x-text="w.buy_price?.toLocaleString()||'-'"></td>
+              <td class="px-4 py-3 text-right text-red-500 font-medium" x-text="w.stop_loss?.toLocaleString()||'-'"></td>
+              <td class="px-4 py-3 text-right text-emerald-600 font-medium" x-text="w.target_price?.toLocaleString()||'-'"></td>
+              <td class="px-4 py-3 text-slate-400 max-w-xs truncate" x-text="w.memo||'-'"></td>
+              <td class="px-4 py-3 text-center text-slate-400" x-text="w.created_at?.slice(0,10)||'-'"></td>
+              <td class="px-4 py-3 text-center">
+                <button @click="removeWatch(w.ticker)" class="btn btn-danger text-xs px-2 py-1">삭제</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<!-- ══════════════════ 모달: 거래 추가 ══════════════════════ -->
+<div x-show="showTxModal" x-cloak class="modal-bg" @click.self="showTxModal=false">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+    <div class="flex justify-between items-center mb-5">
+      <h2 class="text-base font-bold text-slate-800" x-text="txModalTitle"></h2>
+      <button @click="showTxModal=false" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">×</button>
+    </div>
+    <form @submit.prevent="submitTx()" class="space-y-3">
+      <!-- 계좌 선택 -->
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">계좌 *</label>
+        <select x-model.number="txForm.account_id" @change="onTxAccountChange()" required class="input">
+          <template x-for="a in accounts" :key="a.id">
+            <option :value="a.id" x-text="a.name"></option>
+          </template>
+        </select>
+      </div>
+      <!-- 유형 -->
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">유형 *</label>
+        <div class="flex gap-2">
+          <template x-for="tp in ['BUY','SELL','DEPOSIT','WITHDRAW']" :key="tp">
+            <button type="button" @click="txForm.tx_type=tp"
+              :class="txForm.tx_type===tp ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'"
+              class="flex-1 btn text-xs"
+              x-text="{'BUY':'매수','SELL':'매도','DEPOSIT':'입금','WITHDRAW':'출금'}[tp]">
+            </button>
+          </template>
+        </div>
+      </div>
+      <!-- 날짜 -->
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">거래일 *</label>
+        <input x-model="txForm.trade_date" type="date" required class="input"/>
+      </div>
+      <!-- 종목 (매수/매도만) -->
+      <template x-if="txForm.tx_type==='BUY'||txForm.tx_type==='SELL'">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">티커 *</label>
+            <input x-model="txForm.ticker" placeholder="005930 / AAPL" class="input" :required="txForm.tx_type==='BUY'||txForm.tx_type==='SELL'"/>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">종목명</label>
+            <input x-model="txForm.name" placeholder="삼성전자" class="input"/>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">시장 <span class="text-slate-300">(계좌 따라 자동)</span></label>
+            <select x-model="txForm.market" class="input bg-slate-50 text-slate-500" disabled>
+              <option value="KR">🇰🇷 한국</option>
+              <option value="US">🇺🇸 미국</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">수량 *</label>
+            <input x-model.number="txForm.quantity" type="number" step="any" min="0" placeholder="0" class="input"
+              :required="txForm.tx_type==='BUY'||txForm.tx_type==='SELL'"
+              @input="txForm.amount = (txForm.price||0) * (txForm.quantity||0)"/>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">단가 *</label>
+            <input x-model.number="txForm.price" type="number" step="any" min="0" placeholder="0" class="input"
+              :required="txForm.tx_type==='BUY'||txForm.tx_type==='SELL'"
+              @input="txForm.amount = (txForm.price||0) * (txForm.quantity||0)"/>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">수수료</label>
+            <input x-model.number="txForm.fee" type="number" step="any" min="0" placeholder="0" class="input"/>
+          </div>
+        </div>
+      </template>
+      <!-- 세금 (매도만) -->
+      <template x-if="txForm.tx_type==='SELL'">
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">세금 (증권거래세 등)</label>
+          <input x-model.number="txForm.tax" type="number" step="any" min="0" placeholder="0" class="input"/>
+        </div>
+      </template>
+      <!-- 금액 -->
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">
+          <span x-text="(txForm.tx_type==='BUY'||txForm.tx_type==='SELL') ? '총 금액 (자동계산)' : '금액 *'"></span>
+        </label>
+        <input x-model.number="txForm.amount" type="number" step="any" min="0" required
+          :readonly="txForm.tx_type==='BUY'||txForm.tx_type==='SELL'"
+          :class="(txForm.tx_type==='BUY'||txForm.tx_type==='SELL') ? 'bg-slate-50' : ''"
+          class="input" placeholder="0"/>
+      </div>
+      <!-- 메모 -->
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">메모</label>
+        <input x-model="txForm.memo" placeholder="자유 메모" class="input"/>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" @click="showTxModal=false" class="flex-1 btn btn-ghost">취소</button>
+        <button type="submit" class="flex-1 btn btn-primary">저장</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ══════════════════ 모달: 감시 추가 ══════════════════════ -->
+<div x-show="showWatchModal" x-cloak class="modal-bg" @click.self="showWatchModal=false">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+    <div class="flex justify-between items-center mb-5">
+      <h2 class="text-base font-bold text-slate-800">감시 종목 추가</h2>
+      <button @click="showWatchModal=false" class="text-slate-400 text-2xl leading-none">×</button>
+    </div>
+    <form @submit.prevent="submitWatch()" class="space-y-3">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">티커 *</label>
+          <input x-model="watchForm.ticker" required placeholder="005930 / AAPL" class="input"/>
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">종목명 *</label>
+          <input x-model="watchForm.name" required placeholder="삼성전자" class="input"/>
+        </div>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">시장 *</label>
+        <select x-model="watchForm.market" class="input">
+          <option value="KR">🇰🇷 한국</option>
+          <option value="US">🇺🇸 미국</option>
+        </select>
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">매수가</label>
+          <input x-model.number="watchForm.buy_price" type="number" step="any" placeholder="0" class="input"/>
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">손절가</label>
+          <input x-model.number="watchForm.stop_loss" type="number" step="any" placeholder="0" class="input"/>
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">목표가</label>
+          <input x-model.number="watchForm.target_price" type="number" step="any" placeholder="0" class="input"/>
+        </div>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">메모</label>
+        <input x-model="watchForm.memo" placeholder="자유 메모" class="input"/>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" @click="showWatchModal=false" class="flex-1 btn btn-ghost">취소</button>
+        <button type="submit" class="flex-1 btn btn-primary">추가</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ══════════════════ 모달: 계좌 추가 ══════════════════════ -->
+<div x-show="showAddAccount" x-cloak class="modal-bg" @click.self="showAddAccount=false">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+    <div class="flex justify-between items-center mb-5">
+      <h2 class="text-base font-bold text-slate-800" x-text="accountForm._region==='US' ? '🇺🇸 달러 계좌 추가' : '🇰🇷 원화 계좌 추가'"></h2>
+      <button @click="showAddAccount=false" class="text-slate-400 text-2xl leading-none">×</button>
+    </div>
+    <form @submit.prevent="submitAccount()" class="space-y-3">
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">계좌 유형 *</label>
+        <div class="grid grid-cols-2 gap-2">
+          <template x-for="opt in accountTypeOptions" :key="opt.value">
+            <button type="button" @click="accountForm.account_type = opt.value"
+              :class="accountForm.account_type===opt.value
+                ? (accountForm._region==='US' ? 'bg-emerald-600 text-white' : 'bg-blue-600 text-white')
+                : 'bg-slate-100 text-slate-600'"
+              class="btn text-xs" x-text="opt.label">
+            </button>
+          </template>
+        </div>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">계좌명 *</label>
+        <input x-model="accountForm.name" required
+          :placeholder="accountForm._region==='US' ? '예) 한투 해외주식' : '예) 키움 국내주식'"
+          class="input"/>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">증권사</label>
+        <input x-model="accountForm.broker" placeholder="키움, 한국투자, NH, 미래에셋 ..." class="input"/>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">메모</label>
+        <input x-model="accountForm.memo" placeholder="자유 메모" class="input"/>
+      </div>
+      <!-- 통화 표시 (자동) -->
+      <div class="text-xs text-slate-400 bg-slate-50 rounded-lg px-3 py-2">
+        통화: <strong x-text="accountForm._region==='US' ? '$ USD (달러)' : '₩ KRW (원화)'"></strong>
+        로 자동 설정됩니다
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" @click="showAddAccount=false" class="flex-1 btn btn-ghost">취소</button>
+        <button type="submit" class="flex-1 btn btn-primary">추가</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ══════════════════ 모달: 차트 ════════════════════════ -->
+<div x-show="chartModal.open" x-cloak class="modal-bg" @click.self="closeChart()" @keydown.escape.window="closeChart()">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-4 sm:p-6">
+    <div class="flex justify-between items-start mb-4 gap-3 flex-wrap">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+          :class="chartModal.market==='KR'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'"
+          x-text="chartModal.market==='KR'?'🇰🇷 KR':'🇺🇸 US'"></span>
+        <h2 class="text-base font-bold text-slate-800" x-text="chartModal.name || chartModal.ticker"></h2>
+        <span class="text-xs text-slate-400" x-text="chartModal.ticker"></span>
+      </div>
+      <button @click="closeChart()" class="text-slate-400 text-2xl leading-none">×</button>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-2 mb-3">
+      <div class="inline-flex rounded-lg bg-slate-100 p-0.5">
+        <button @click="setChartTimeframe('daily')"
+          :class="chartModal.timeframe==='daily'?'bg-white shadow text-indigo-600':'text-slate-500'"
+          class="text-xs font-semibold px-3 py-1 rounded-md transition">일봉</button>
+        <button @click="setChartTimeframe('weekly')"
+          :class="chartModal.timeframe==='weekly'?'bg-white shadow text-indigo-600':'text-slate-500'"
+          class="text-xs font-semibold px-3 py-1 rounded-md transition">주봉</button>
+      </div>
+      <select @change="setChartRange($event.target.value)" :value="chartModal.range"
+        class="input !w-auto !py-1 text-xs">
+        <option value="6m">6개월</option>
+        <option value="1y">1년</option>
+        <option value="2y">2년</option>
+        <option value="5y">5년</option>
+      </select>
+      <span class="text-xs text-slate-400 ml-auto"
+        x-text="chartModal.timeframe==='weekly'?'30주 MA':'150일 MA'"></span>
+    </div>
+
+    <div class="relative" style="height:420px">
+      <div id="chart-container" class="w-full h-full rounded-lg border border-slate-100"></div>
+
+      <!-- 로딩 -->
+      <div x-show="chartModal.loading"
+        class="absolute inset-0 flex items-center justify-center bg-white/70 rounded-lg">
+        <div class="flex items-center gap-2 text-slate-500 text-sm">
+          <div class="w-5 h-5 border-2 border-indigo-200 border-t-indigo-500 rounded-full spin"></div>
+          <span>차트를 불러오는 중...</span>
+        </div>
+      </div>
+
+      <!-- 빈 데이터 -->
+      <div x-show="!chartModal.loading && chartModal.empty && !chartModal.error"
+        class="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
+        📭 데이터 없음
+      </div>
+
+      <!-- 에러 -->
+      <div x-show="!chartModal.loading && chartModal.error"
+        class="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm">
+        <div class="text-red-500">⚠️ 차트를 불러오지 못했습니다</div>
+        <div class="text-xs text-slate-400" x-text="chartModal.error"></div>
+        <button @click="loadChart()" class="btn btn-ghost text-xs mt-1">다시 시도</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ 토스트 ════════════════════════════ -->
+<div class="fixed bottom-5 right-5 z-50 flex flex-col gap-2" style="pointer-events:none">
+  <template x-for="t in toasts" :key="t.id">
+    <div class="flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-lg text-sm font-medium text-white"
+      :class="t.type==='success'?'bg-emerald-500':t.type==='error'?'bg-red-500':'bg-slate-700'"
+      style="pointer-events:auto">
+      <span x-text="t.type==='success'?'✅':t.type==='error'?'❌':'ℹ️'"></span>
+      <span x-text="t.message"></span>
+    </div>
+  </template>
+</div>
+
+<!-- ══════════════════ Alpine.js 앱 ═══════════════════ -->
+<script>
+// Strict Weinstein filter reason 한국어 라벨 매핑.
+// 백엔드 enum 은 stable identifier 로 둠 → UI 라벨 변경 시 백엔드 재배포 불필요.
+// 신규 reason 추가 시 이 매핑도 함께 업데이트. 미매핑 키는 raw enum 그대로 fallback.
+// Source: scanner/strict_filter.py (23 reasons).
+const REASON_LABELS_KO = {
+  market_bear:                '시장 BEAR — 신규 매수 차단',
+  market_unknown:             '시장 데이터 부재',
+  market_caution_breakout:    'CAUTION 시장에서 돌파 차단',
+  sector_stage4:              '섹터 Stage 4 (하락)',
+  sector_not_stage2:          '섹터 Stage 2 아님',
+  weekly_data_missing:        '주봉 데이터 부재',
+  below_weekly_30ma:          '주봉 30MA 미달',
+  below_daily_150ma:          '일봉 150MA 미달',
+  stage_stage3:               '종목 Stage 3 (분배)',
+  stage_stage4:               '종목 Stage 4 (하락)',
+  weekly_30ma_slope_negative: '30주 MA 기울기 음수',
+  base_insufficient:          'Base 기간 부족',
+  base_too_wide:              'Base 폭 과대 (>15%)',
+  rebound_no_retest:          '리테스트 없는 반등',
+  breakout_daily_volume:      '돌파일 일봉 거래량 미달',
+  breakout_weekly_volume:     '돌파주 주봉 거래량 미달',
+  rs_below_zero:              'Mansfield RS < 0',
+  rs_falling:                 'RS 추세 하락',
+  rs_benchmark_missing:       'RS 벤치마크 부재',
+  rs_no_zero_cross:           'RS 0선 음→양 전환 없음',
+  extended_above_ma150:       'MA150 +15% 초과 과열',
+  extended_above_30w:         '30주 MA 대비 30%+ 과열',
+  stop_loss_missing:          '손절가 산출 실패',
+  stop_loss_above_price:      '손절가가 현재가 이상(비정상)',
+};
+function reasonLabel(key) { return REASON_LABELS_KO[key] || key; }
+
+function app() {
+  return {
+    nowKst: '', activeTab: 'scan',
+    tabs: [
+      {id:'scan',   label:'📊 스캔 결과'},
+      {id:'account',label:'💰 계좌 현황'},
+      {id:'holdings',label:'📈 보유 주식'},
+      {id:'journal',label:'📋 거래 일지'},
+      {id:'watch',  label:'👁 감시 목록'},
+    ],
+
+    // 스캔
+    isScanning: false,
+    scanMarket: 'KR',
+    krUniverse: 'kospi+kosdaq',
+    usUniverse: 'sp500+nasdaq100',
+    scanProg: {progress:0,total:0,current_stock:''},
+    results: [], scanLogs: [], nextSchedules: [],
+    // include_rejected: 세션 한정 (새로고침 시 OFF 리셋 — localStorage 미사용)
+    filter: {market:'ALL', signal_type:'ALL', days:7, include_rejected:false},
+    stats: {buy:0,breakout:0,rebreakout:0,rebound:0,kr:0,us:0},
+    marketStatus: {},
+    settings: {},
+    showBulkDeleteModal: false, bulkDeleting: false,
+
+    // 계좌
+    accounts: [], selectedAccountId: null,
+    showAddAccount: false, accountForm: {account_type:'KR_STOCK', _region:'KR'},
+    // account_type 옵션 (지역별로 필터됨)
+    accountTypeOptions: [],
+    KR_TYPES: [
+      {value:'KR_STOCK',  label:'국내주식'},
+      {value:'KR_ISA',    label:'ISA'},
+      {value:'KR_PENSION',label:'연금저축'},
+      {value:'KR_IRP',    label:'IRP'},
+      {value:'OTHER',     label:'기타'},
+    ],
+    US_TYPES: [
+      {value:'US_STOCK', label:'해외주식'},
+      {value:'OTHER',    label:'기타'},
+    ],
+
+    // 거래
+    transactions: [], allTransactions: [],
+    txFilter: {account_id:'', type:'ALL'},
+    txStats: {totalDeposit:0, totalWithdraw:0, totalBuy:0, totalSell:0},
+    showTxModal: false, txModalTitle: '',
+    txForm: {tx_type:'BUY', market:'KR', trade_date: new Date().toISOString().slice(0,10),
+             amount:0, fee:0, tax:0, memo:''},
+
+    // 보유 주식
+    holdings: [], priceRefreshing: false,
+    holdingStats: {totalCost:0, totalEval:0, totalPL:0},
+    holdingsMarket: 'ALL',
+    usdKrw: 1380,
+
+    // 감시
+    watchList: [], showWatchModal: false,
+    watchForm: {market:'KR'},
+
+    // 차트 (Phase 4)
+    chartModal: {open:false, market:'', ticker:'', name:'',
+                 timeframe:'daily', range:'1y',
+                 loading:false, error:null, empty:false},
+    _chart: null, _chartCandles: null, _chartVolume: null, _chartMa: null,
+    _chartResizeObs: null,
+
+    toasts: [],
+    _si: null, _ci: null,
+
+    async init() {
+      this.updateClock();
+      this._ci = setInterval(() => this.updateClock(), 1000);
+      await Promise.all([this.loadSettings(), this.loadAccounts(),
+                         this.loadResults(), this.loadTransactions(),
+                         this.loadAllTransactions(), this.loadHoldings(),
+                         this.loadWatchList(), this.loadScanLogs(),
+                         this.loadExchangeRate(), this.loadMarketStatus()]);
+      this._si = setInterval(() => this.pollStatus(), 2500);
+    },
+
+    updateClock() {
+      const kst = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Seoul'}));
+      this.nowKst = kst.toLocaleString('ko-KR',{
+        month:'2-digit',day:'2-digit',
+        hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+    },
+
+    async loadSettings() {
+      try { this.settings = await (await fetch('/api/settings')).json(); } catch{}
+    },
+
+    async pollStatus() {
+      try {
+        const d = await (await fetch('/api/scan/status')).json();
+        const was = this.isScanning;
+        this.isScanning = d.is_running;
+        this.scanProg = d;
+        this.nextSchedules = d.next_schedules||[];
+        if (was && !d.is_running) {
+          await Promise.all([this.loadResults(), this.loadScanLogs(), this.loadHoldings()]);
+          this.toast('스캔 완료!', 'success');
+        }
+      } catch{}
+    },
+
+    async startScan() {
+      if (this.isScanning) return;
+      try {
+        const universe = this.scanMarket === 'KR' ? this.krUniverse : this.usUniverse;
+        const d = await (await fetch(`/api/scan/start?market=${this.scanMarket}&universe=${universe}`,{method:'POST'})).json();
+        if (d.status==='started') { this.isScanning=true; this.toast(d.message,'success'); }
+        else this.toast(d.message||'오류','error');
+      } catch { this.toast('서버 오류','error'); }
+    },
+
+    async loadResults() {
+      try {
+        const {market,signal_type,days,include_rejected} = this.filter;
+        const inc = include_rejected ? '&include_rejected=true' : '';
+        const data = await (await fetch(`/api/results?market=${market}&signal_type=${signal_type}&days=${days}&limit=200${inc}`)).json();
+        // 거부 사유 펼침 상태(_reasonsOpen)는 카드별 로컬 토글 — 응답에 포함되지 않음.
+        this.results = data.map(r => ({...r, _reasonsOpen: false}));
+
+        // stats 는 strict-pass 의미를 보전 — 거부 행은 카운트에서 제외.
+        // (토글 ON 으로 결과 그리드에 거부가 섞여도 통계는 pass + legacy 만 집계)
+        const buyable = this.results.filter(r => r.strict_filter_passed !== false);
+        this.stats.buy=buyable.length;
+        this.stats.breakout=buyable.filter(r=>r.signal_type==='BREAKOUT').length;
+        this.stats.rebreakout=buyable.filter(r=>r.signal_type==='RE_BREAKOUT').length;
+        this.stats.rebound=buyable.filter(r=>r.signal_type==='REBOUND').length;
+        this.stats.kr=buyable.filter(r=>r.market==='KR').length;
+        this.stats.us=buyable.filter(r=>r.market==='US').length;
+      } catch{}
+    },
+
+    async deleteResult(id) {
+      const r = await fetch(`/api/results/${id}`, {method:'DELETE'});
+      if (r.ok) { this.results = this.results.filter(x=>x.id!==id); this.toast('삭제됐습니다','success'); }
+      else this.toast('삭제 실패','error');
+    },
+
+    async deleteAllResults() {
+      if (this.bulkDeleting) return;
+      this.bulkDeleting = true;
+      try {
+        const {market, signal_type, days, include_rejected} = this.filter;
+        const inc = include_rejected ? '&include_rejected=true' : '';
+        const url = `/api/results?market=${market}&signal_type=${signal_type}&days=${days}${inc}`;
+        const r = await fetch(url, {method:'DELETE'});
+        if (r.ok) {
+          const d = await r.json();
+          this.showBulkDeleteModal = false;
+          await this.loadResults();
+          this.toast(`${d.count}건 삭제 완료`, 'success');
+        } else {
+          this.toast('삭제 실패', 'error');
+        }
+      } catch { this.toast('서버 오류', 'error'); }
+      finally { this.bulkDeleting = false; }
+    },
+
+    async loadScanLogs() {
+      try { this.scanLogs = await (await fetch('/api/scan/logs')).json(); } catch{}
+    },
+
+    // ── 계좌 ──
+    get krwAccounts() { return this.accounts.filter(a => a.currency === 'KRW'); },
+    get usdAccounts() { return this.accounts.filter(a => a.currency === 'USD'); },
+
+    async loadAccounts() {
+      try {
+        this.accounts = await (await fetch('/api/accounts')).json();
+        if (!this.selectedAccountId && this.accounts.length > 0)
+          this.selectedAccountId = this.accounts[0].id;
+      } catch{}
+    },
+
+    openAddAccount(region) {
+      this.accountForm = {
+        _region: region,
+        account_type: region === 'US' ? 'US_STOCK' : 'KR_STOCK',
+        name: '', broker: '', memo: '',
+      };
+      this.accountTypeOptions = region === 'US' ? this.US_TYPES : this.KR_TYPES;
+      this.showAddAccount = true;
+    },
+
+    async submitAccount() {
+      try {
+        const {_region, ...body} = this.accountForm;
+        await fetch('/api/accounts', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)});
+        this.toast('계좌가 추가됐습니다', 'success');
+        this.showAddAccount = false;
+        await this.loadAccounts();
+      } catch { this.toast('계좌 추가 실패', 'error'); }
+    },
+
+    async deleteAccount(id) {
+      if (!confirm('이 계좌를 삭제하시겠습니까?\n(거래 내역은 유지됩니다)')) return;
+      try {
+        await fetch(`/api/accounts/${id}`, {method:'DELETE'});
+        this.toast('계좌가 삭제됐습니다', 'success');
+        if (this.selectedAccountId === id) this.selectedAccountId = null;
+        await this.loadAccounts();
+      } catch { this.toast('삭제 실패', 'error'); }
+    },
+
+    // 계좌 ID → 통화 조회
+    acctCurrency(accountId) {
+      const a = this.accounts.find(a => a.id === accountId);
+      return a ? a.currency : 'KRW';
+    },
+
+    // ── 거래 ──
+    _marketForAccount(accountId) {
+      const a = this.accounts.find(x=>x.id===accountId);
+      return (a?.account_type==='US_STOCK') ? 'US' : 'KR';
+    },
+    onTxAccountChange() {
+      this.txForm.market = this._marketForAccount(this.txForm.account_id);
+    },
+    openAddTx(type) {
+      const aid = this.selectedAccountId || (this.accounts[0]?.id);
+      this.txForm = {
+        tx_type: type, market: this._marketForAccount(aid),
+        account_id: aid,
+        trade_date: new Date().toISOString().slice(0,10),
+        amount:0, fee:0, tax:0, memo:''
+      };
+      this.txModalTitle = {'BUY':'매수 기록','SELL':'매도 기록','DEPOSIT':'입금 기록','WITHDRAW':'출금 기록'}[type];
+      this.showTxModal = true;
+    },
+
+    openAddTxFromScan(result) {
+      this.txForm = {
+        tx_type:'BUY', market: result.market,
+        account_id: this.selectedAccountId || (this.accounts[0]?.id),
+        ticker: result.ticker, name: result.name,
+        trade_date: new Date().toISOString().slice(0,10),
+        price: result.price, quantity: 0,
+        amount:0, fee:0, tax:0, memo:''
+      };
+      this.txModalTitle = '매수 기록 - '+result.name;
+      this.showTxModal = true;
+    },
+
+    async submitTx() {
+      try {
+        const body = {...this.txForm};
+        if (body.tx_type==='BUY'||body.tx_type==='SELL')
+          body.amount = (body.price||0)*(body.quantity||0);
+        const r = await fetch('/api/transactions',{method:'POST',
+          headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        if (r.ok) {
+          this.toast('거래가 기록됐습니다','success');
+          this.showTxModal=false;
+          await Promise.all([this.loadAccounts(), this.loadTransactions(),
+                             this.loadAllTransactions(), this.loadHoldings()]);
+        } else {
+          const e = await r.json();
+          this.toast(e.detail||'저장 실패','error');
+        }
+      } catch { this.toast('오류 발생','error'); }
+    },
+
+    async deleteTx(id) {
+      if (!confirm('이 거래 내역을 삭제하시겠습니까?')) return;
+      try {
+        await fetch(`/api/transactions/${id}`,{method:'DELETE'});
+        this.toast('삭제됐습니다','success');
+        await Promise.all([this.loadAccounts(), this.loadTransactions(),
+                           this.loadAllTransactions(), this.loadHoldings()]);
+      } catch { this.toast('삭제 실패','error'); }
+    },
+
+    async loadTransactions() {
+      try {
+        const aid = this.selectedAccountId ? `&account_id=${this.selectedAccountId}` : '';
+        this.transactions = await (await fetch(`/api/transactions?limit=30${aid}`)).json();
+      } catch{}
+    },
+
+    async loadAllTransactions() {
+      try {
+        const aid = this.txFilter.account_id ? `&account_id=${this.txFilter.account_id}` : '';
+        const tp  = this.txFilter.type !== 'ALL' ? `&tx_type=${this.txFilter.type}` : '';
+        this.allTransactions = await (await fetch(`/api/transactions?limit=500${aid}${tp}`)).json();
+        this.txStats.totalDeposit  = this.allTransactions.filter(t=>t.tx_type==='DEPOSIT').reduce((s,t)=>s+(t.amount||0),0);
+        this.txStats.totalWithdraw = this.allTransactions.filter(t=>t.tx_type==='WITHDRAW').reduce((s,t)=>s+(t.amount||0),0);
+        this.txStats.totalBuy      = this.allTransactions.filter(t=>t.tx_type==='BUY').reduce((s,t)=>s+(t.amount||0),0);
+        this.txStats.totalSell     = this.allTransactions.filter(t=>t.tx_type==='SELL').reduce((s,t)=>s+(t.amount||0),0);
+      } catch{}
+    },
+
+    // ── 보유 주식 (항상 전체 계좌 조회) ──
+    async loadHoldings() {
+      try {
+        this.holdings = await (await fetch('/api/holdings')).json();
+        this.holdingStats.totalCost = this.holdings.reduce((s,h)=>s+(h.avg_price*h.quantity),0);
+        this.holdingStats.totalEval = this.holdings.reduce((s,h)=>s+(h.eval_amount||0),0);
+        this.holdingStats.totalPL   = this.holdings.reduce((s,h)=>s+(h.profit_loss||0),0);
+      } catch{}
+    },
+
+    async loadMarketStatus(force=false) {
+      try {
+        const d = await (await fetch(`/api/market/status${force?'?force=true':''}`)).json();
+        this.marketStatus = d;
+      } catch {}
+    },
+
+    async loadExchangeRate() {
+      try {
+        const d = await (await fetch('/api/exchange-rate')).json();
+        this.usdKrw = d.rate;
+      } catch {}
+    },
+
+    get krHoldings() { return this.holdings.filter(h=>h.market==='KR'); },
+    get usHoldings() { return this.holdings.filter(h=>h.market!=='KR'); },
+    get filteredHoldings() {
+      if (this.holdingsMarket==='KR') return this.krHoldings;
+      if (this.holdingsMarket==='US') return this.usHoldings;
+      return this.holdings;
+    },
+
+    async deleteHolding(id, label) {
+      if (!confirm(`보유주식 "${label}"을 삭제하시겠습니까?\n(거래 내역은 삭제되지 않습니다)`)) return;
+      const r = await fetch(`/api/holdings/${id}`, {method:'DELETE'});
+      if (r.ok) { this.toast('삭제됐습니다','success'); await this.loadHoldings(); await this.loadAccounts(); }
+      else this.toast('삭제 실패','error');
+    },
+
+    async refreshPrices() {
+      this.priceRefreshing=true;
+      try {
+        await fetch('/api/holdings/refresh-prices',{method:'POST'});
+        this.toast('현재가 업데이트 시작됨 (잠시 후 새로고침)','success');
+        setTimeout(async()=>{ await this.loadHoldings(); this.priceRefreshing=false; }, 8000);
+      } catch { this.priceRefreshing=false; this.toast('업데이트 실패','error'); }
+    },
+
+    // ── 감시 목록 ──
+    openAddWatch(result) {
+      this.watchForm = result
+        ? {ticker:result.ticker, name:result.name, market:result.market, buy_price:result.price}
+        : {market:'KR'};
+      this.showWatchModal=true;
+    },
+
+    async submitWatch() {
+      try {
+        const r = await fetch('/api/watchlist',{method:'POST',
+          headers:{'Content-Type':'application/json'},body:JSON.stringify(this.watchForm)});
+        if (r.ok) {
+          this.toast('감시 목록에 추가됐습니다','success');
+          this.showWatchModal=false; this.watchForm={market:'KR'};
+          await this.loadWatchList();
+        }
+      } catch { this.toast('추가 실패','error'); }
+    },
+
+    async removeWatch(ticker) {
+      if (!confirm(`${ticker}를 감시 목록에서 삭제하시겠습니까?`)) return;
+      try {
+        await fetch(`/api/watchlist/${ticker}`,{method:'DELETE'});
+        this.toast('삭제됐습니다','success'); await this.loadWatchList();
+      } catch { this.toast('삭제 실패','error'); }
+    },
+
+    async loadWatchList() {
+      try { this.watchList = await (await fetch('/api/watchlist')).json(); } catch{}
+    },
+
+    // ── 텔레그램 ──
+    async testTelegram() {
+      try {
+        const d = await (await fetch('/api/telegram/test')).json();
+        this.toast(d.message, d.status==='ok'?'success':'error');
+      } catch { this.toast('텔레그램 오류','error'); }
+    },
+
+    // ── 유틸 ──
+    fmtMoney(val, currency) {
+      if (val == null) return '-';
+      if (currency === 'USD')
+        return '$ ' + val.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+      return '₩ ' + Math.round(val).toLocaleString();
+    },
+
+    fmtDt(s) {
+      if (!s) return '-';
+      const d = new Date(s.endsWith('Z')?s:s+'Z');
+      return d.toLocaleString('ko-KR',{timeZone:'Asia/Seoul',
+        month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+    },
+
+    toast(message, type='info') {
+      const id=Date.now();
+      this.toasts.push({id,message,type});
+      setTimeout(()=>{ this.toasts=this.toasts.filter(t=>t.id!==id); }, 4000);
+    },
+
+    // ── 차트 (Phase 4) ──
+    openChart(r) {
+      this.chartModal.market = r.market;
+      this.chartModal.ticker = r.ticker;
+      this.chartModal.name = r.name || r.ticker;
+      this.chartModal.timeframe = 'daily';
+      this.chartModal.range = '1y';
+      this.chartModal.error = null;
+      this.chartModal.empty = false;
+      this.chartModal.open = true;
+      this.$nextTick(() => this.loadChart());
+    },
+
+    closeChart() {
+      this.chartModal.open = false;
+      this._destroyChart();
+    },
+
+    setChartTimeframe(tf) {
+      if (this.chartModal.timeframe === tf) return;
+      this.chartModal.timeframe = tf;
+      this.loadChart();
+    },
+
+    setChartRange(range) {
+      if (this.chartModal.range === range) return;
+      this.chartModal.range = range;
+      this.loadChart();
+    },
+
+    _destroyChart() {
+      if (this._chartResizeObs) {
+        try { this._chartResizeObs.disconnect(); } catch{}
+        this._chartResizeObs = null;
+      }
+      if (this._chart) {
+        try { this._chart.remove(); } catch{}
+        this._chart = null;
+      }
+      this._chartCandles = null;
+      this._chartVolume = null;
+      this._chartMa = null;
+    },
+
+    async loadChart() {
+      if (typeof LightweightCharts === 'undefined') {
+        this.chartModal.error = '차트 라이브러리 로딩 실패';
+        return;
+      }
+      this.chartModal.loading = true;
+      this.chartModal.error = null;
+      this.chartModal.empty = false;
+      const {market, ticker, timeframe, range} = this.chartModal;
+      try {
+        const url = `/api/chart/ohlcv?market=${encodeURIComponent(market)}`
+                  + `&ticker=${encodeURIComponent(ticker)}`
+                  + `&timeframe=${timeframe}&range=${range}`;
+        const resp = await fetch(url);
+        if (!resp.ok) {
+          let msg = `HTTP ${resp.status}`;
+          try { const j = await resp.json(); if (j.detail) msg = j.detail; } catch{}
+          throw new Error(msg);
+        }
+        const body = await resp.json();
+        const candles = body.candles || [];
+        if (candles.length === 0) {
+          this.chartModal.empty = true;
+          this._destroyChart();
+          return;
+        }
+        this._renderChart(candles, body.ma_period);
+      } catch (e) {
+        this.chartModal.error = (e && e.message) ? e.message : String(e);
+        this._destroyChart();
+      } finally {
+        this.chartModal.loading = false;
+      }
+    },
+
+    _renderChart(candles, maPeriod) {
+      const el = document.getElementById('chart-container');
+      if (!el) return;
+
+      this._destroyChart();
+
+      const chart = LightweightCharts.createChart(el, {
+        width: el.clientWidth,
+        height: el.clientHeight,
+        layout: {background: {color:'#ffffff'}, textColor:'#475569', fontSize:11},
+        grid: {vertLines:{color:'#f1f5f9'}, horzLines:{color:'#f1f5f9'}},
+        rightPriceScale: {borderColor:'#e2e8f0', scaleMargins:{top:0.05, bottom:0.25}},
+        timeScale: {borderColor:'#e2e8f0', timeVisible:false, secondsVisible:false},
+        crosshair: {mode: 1},
+      });
+
+      const candleSeries = chart.addCandlestickSeries({
+        upColor:'#16a34a', downColor:'#dc2626',
+        borderUpColor:'#16a34a', borderDownColor:'#dc2626',
+        wickUpColor:'#16a34a', wickDownColor:'#dc2626',
+      });
+      candleSeries.setData(candles.map(c => ({
+        time: c.t, open: c.o, high: c.h, low: c.l, close: c.c,
+      })));
+
+      const maData = candles
+        .filter(c => c.ma != null)
+        .map(c => ({time: c.t, value: c.ma}));
+      let maSeries = null;
+      if (maData.length > 0) {
+        maSeries = chart.addLineSeries({
+          color:'#6366f1', lineWidth:2, priceLineVisible:false,
+          lastValueVisible:true,
+          title: maPeriod ? `MA${maPeriod}` : 'MA',
+        });
+        maSeries.setData(maData);
+      }
+
+      const volumeSeries = chart.addHistogramSeries({
+        priceFormat:{type:'volume'},
+        priceScaleId:'volume',
+        color:'#94a3b8',
+      });
+      chart.priceScale('volume').applyOptions({
+        scaleMargins: {top: 0.78, bottom: 0},
+      });
+      volumeSeries.setData(candles.map(c => ({
+        time: c.t,
+        value: c.v,
+        color: c.c >= c.o ? 'rgba(22,163,74,0.45)' : 'rgba(220,38,38,0.45)',
+      })));
+
+      chart.timeScale().fitContent();
+
+      this._chart = chart;
+      this._chartCandles = candleSeries;
+      this._chartVolume = volumeSeries;
+      this._chartMa = maSeries;
+
+      if (typeof ResizeObserver !== 'undefined') {
+        this._chartResizeObs = new ResizeObserver(() => {
+          if (this._chart && el) {
+            this._chart.applyOptions({width: el.clientWidth, height: el.clientHeight});
+          }
+        });
+        this._chartResizeObs.observe(el);
+      }
+    },
+  };
+}
+</script>
+</body>
+</html>
