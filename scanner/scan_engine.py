@@ -569,7 +569,12 @@ def _notify(buys, sells, send_fn, slack_send_fn=None):
                         f"  • 시그널일: {s['signal_date']}\n\n")
             if len(mkt_list) > 10:
                 msg += f"  ... 외 {len(mkt_list) - 10}개\n\n"
-        _safe_send(send_fn, msg, "Telegram")
+        # Telegram legacy Markdown treats the underscore in RE_BREAKOUT as an
+        # emphasis delimiter and rejects the whole message when it is left
+        # unmatched.  Slack accepts the raw label, so escape it only for the
+        # Telegram copy.
+        telegram_msg = msg.replace("RE_BREAKOUT", r"RE\_BREAKOUT")
+        _safe_send(send_fn, telegram_msg, "Telegram")
         _safe_send(slack_send_fn, msg, "Slack")
 
     if sells:

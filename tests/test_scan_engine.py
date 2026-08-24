@@ -857,6 +857,20 @@ class TestStrictFilterFlow:
         assert len(telegram_messages) == 1
         assert slack_messages == telegram_messages
 
+    def test_rebreakout_notification_escapes_telegram_markdown_only(self):
+        from scanner.scan_engine import _notify
+
+        telegram_messages = []
+        slack_messages = []
+        sig = self._passing_signal()
+        sig["signal_type"] = "RE_BREAKOUT"
+
+        _notify([sig], [], telegram_messages.append, slack_messages.append)
+
+        assert "RE\\_BREAKOUT" in telegram_messages[0]
+        assert "RE_BREAKOUT" in slack_messages[0]
+        assert "RE\\_BREAKOUT" not in slack_messages[0]
+
     def test_sell_notification_remains_telegram_only(self):
         from scanner.scan_engine import _notify
 
