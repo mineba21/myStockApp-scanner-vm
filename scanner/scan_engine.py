@@ -135,6 +135,7 @@ def run_scan(market: str = "ALL", universe: str = None,
     from database.models import SessionLocal, ScanResult, ScanLog, Holding
     from scanner.weinstein import analyze_stock, check_sell_signal
     from notifications.telegram import send_telegram_message
+    from notifications.slack import send_slack_message
     from config import US_UNIVERSE
 
     # universe 파싱: KR 유니버스(kospi/kosdaq/kospi+kosdaq) vs US 유니버스 구분
@@ -181,7 +182,12 @@ def run_scan(market: str = "ALL", universe: str = None,
         sell_signals = _check_watchlist(db, kr_bench=kr_bench, us_bench=us_bench)
 
         if buy_signals or sell_signals:
-            _notify(buy_signals, sell_signals, send_telegram_message)
+            _notify(
+                buy_signals,
+                sell_signals,
+                send_telegram_message,
+                send_slack_message,
+            )
 
         log.finished_at   = datetime.utcnow()
         log.total_scanned = total_scanned
@@ -499,8 +505,8 @@ def _sector_summary(market: str) -> str:
         return ""
 
 
-def _notify(buys, sells, send_fn):
-    """매수/매도 시그널을 Telegram 메시지로 포맷.
+def _notify(buys, sells, send_fn, slack_send_fn=None):
+    """매수 시그널은 Telegram/Slack, 매도 시그널은 Telegram으로 전송.
 
     Phase 4 invariant: ``buys`` 는 *strict-pass* 만 들어오므로 본 함수는
     별도의 strict 거부 분기 없이 순수 포맷팅만 담당. 거부 시그널의
@@ -563,7 +569,8 @@ def _notify(buys, sells, send_fn):
                         f"  • 시그널일: {s['signal_date']}\n\n")
             if len(mkt_list) > 10:
                 msg += f"  ... 외 {len(mkt_list) - 10}개\n\n"
-        send_fn(msg)
+        _safe_send(send_fn, msg, "Telegram")
+        _safe_send(slack_send_fn, msg, "Slack")
 
     if sells:
         severity_icon = {"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡"}
@@ -575,4 +582,14 @@ def _notify(buys, sells, send_fn):
             msg += (f"{sev} *{s['name']}* ({s['ticker']})\n"
                     f"  • {s['sell_reason']}\n"
                     f"  • 현재가: {s['price']:,.4g} | 수익률: {pl}\n\n")
-        send_fn(msg)
+        _safe_send(send_fn, msg, "Telegram")
+
+
+def _safe_send(send_fn, message: str, channel: str) -> None:
+    """한 알림 채널의 실패가 다른 채널이나 스캔을 중단하지 않게 한다."""
+    if send_fn is None:
+        return
+    try:
+        send_fn(message)
+    except Exception as exc:
+        logger.error("%s 알림 오류: %s", channel, exc)

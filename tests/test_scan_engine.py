@@ -844,3 +844,34 @@ class TestStrictFilterFlow:
 
         _notify([sig], [], fake_send)
         assert "🛡 strict-pass" in captured.get("text", "")
+
+    def test_buy_notification_is_sent_to_telegram_and_slack(self):
+        from scanner.scan_engine import _notify
+
+        telegram_messages = []
+        slack_messages = []
+        sig = self._passing_signal()
+
+        _notify([sig], [], telegram_messages.append, slack_messages.append)
+
+        assert len(telegram_messages) == 1
+        assert slack_messages == telegram_messages
+
+    def test_sell_notification_remains_telegram_only(self):
+        from scanner.scan_engine import _notify
+
+        telegram_messages = []
+        slack_messages = []
+        sell = {
+            "name": "Apple",
+            "ticker": "AAPL",
+            "sell_reason": "테스트 매도 신호",
+            "price": 100.0,
+            "profit_pct": -3.0,
+            "severity": "HIGH",
+        }
+
+        _notify([], [sell], telegram_messages.append, slack_messages.append)
+
+        assert len(telegram_messages) == 1
+        assert slack_messages == []

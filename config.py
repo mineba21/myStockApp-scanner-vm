@@ -5,6 +5,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+SLACK_WEBHOOK_URL  = os.getenv("SLACK_WEBHOOK_URL", "")
 
 # ── Core MA / Scan ───────────────────────────────────────────────
 SCAN_LOOKBACK_DAYS  = int(os.getenv("SCAN_LOOKBACK_DAYS", "7"))
