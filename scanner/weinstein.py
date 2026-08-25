@@ -71,12 +71,15 @@ _FLAT_SLOPE   = 0.02
 # v4 — 주봉 / Mansfield RS / Base Pivot (신규 공개 API)
 # ══════════════════════════════════════════════════════════════════
 
-def to_weekly_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+def to_weekly_ohlcv(df: pd.DataFrame, scan_context=None) -> pd.DataFrame:
     """일봉 OHLCV → 주봉 OHLCV (금요일 기준).
 
     Open=첫날, High=max, Low=min, Close=마지막날, Volume=sum
     """
-    if df is None or len(df) < 5:
+    if scan_context is not None:
+        from scanner.time_context import normalize_ohlcv
+        df = normalize_ohlcv(df, scan_context)
+    if df is None or len(df) == 0 or (scan_context is None and len(df) < 5):
         return pd.DataFrame()
     idx = pd.to_datetime(df.index)
     weekly = df.copy()
@@ -88,6 +91,9 @@ def to_weekly_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         "Close":  "last",
         "Volume": "sum",
     }).dropna(how="any")
+    if scan_context is not None:
+        from scanner.time_context import finalize_weekly_ohlcv
+        agg = finalize_weekly_ohlcv(agg, scan_context)
     return agg
 
 
@@ -100,7 +106,8 @@ def compute_weekly_indicators(weekly_df: pd.DataFrame) -> Optional[Dict[str, Any
     vol   = weekly_df["Volume"]
     sma30 = close.rolling(WEEKLY_MA_LONG,  min_periods=WEEKLY_MA_LONG  // 2).mean()
     sma10 = close.rolling(WEEKLY_MA_SHORT, min_periods=WEEKLY_MA_SHORT // 2).mean()
-    vol_avg = vol.rolling(10, min_periods=5).mean()
+    # 평가 주의 거래량은 기준 평균에서 제외한다.
+    vol_avg = vol.shift(1).rolling(10, min_periods=5).mean()
 
     if pd.isna(sma30.iloc[-1]):
         return None
@@ -149,12 +156,10 @@ def classify_stage(weekly_ind: Optional[Dict], daily_ind: Optional[Dict]) -> str
       STAGE4: close < sma30w AND slope30w < -FLAT  (하락)
       STAGE1: 그 외 (기저 형성)
 
-    weekly_ind 이 None 이면 (데이터 부족) 일봉 기반 legacy 로 fallback.
+    weekly_ind 이 None 이면 Stage 1로 추정하지 않고 데이터 부족으로 분류.
     """
     if weekly_ind is None:
-        if daily_ind is None:
-            return "STAGE1"
-        return stage_of(daily_ind["cur_p"], daily_ind["cur_m150"], daily_ind["slope150"])
+        return "INSUFFICIENT_DATA"
 
     close  = weekly_ind["cur_close_w"]
     sma30  = weekly_ind["cur_sma30w"]
@@ -432,7 +437,8 @@ def detect_base_pivot(df: pd.DataFrame,
 
 def _daily_vol_ratio(df: pd.DataFrame, idx: int) -> float:
     vol = df["Volume"]
-    avg = vol.rolling(VOLUME_AVG_PERIOD, min_periods=10).mean()
+    # 신호 봉 자체가 분모를 끌어올리지 않도록 직전 봉까지만 평균한다.
+    avg = vol.shift(1).rolling(VOLUME_AVG_PERIOD, min_periods=10).mean()
     v = float(vol.iloc[idx])
     a = float(avg.iloc[idx]) if not pd.isna(avg.iloc[idx]) else 0.0
     return v / a if a > 0 else 0.0
@@ -440,7 +446,9 @@ def _daily_vol_ratio(df: pd.DataFrame, idx: int) -> float:
 
 def detect_stage2_breakout(df: pd.DataFrame,
                            weekly_ind: Optional[Dict],
-                           daily_ind: Optional[Dict]) -> Optional[Dict[str, Any]]:
+                           daily_ind: Optional[Dict],
+                           include_latest: bool = False,
+                           latest_only: bool = False) -> Optional[Dict[str, Any]]:
     """Stage1→Stage2 base pivot 상향 돌파 감지 (v4).
 
     조건:
@@ -467,8 +475,14 @@ def detect_stage2_breakout(df: pd.DataFrame,
     ma50  = daily_ind["ma50"]
     n     = len(close)
 
-    for i in range(1, min(SCAN_LOOKBACK_DAYS + 1, n)):
+    start_offset = 0 if include_latest else 1
+    stop_offset = min(SCAN_LOOKBACK_DAYS + 1, n)
+    offsets = range(start_offset, min(start_offset + 1, stop_offset)) \
+        if latest_only else range(start_offset, stop_offset)
+    for i in offsets:
         abs_i = n - i
+        if i == 0:
+            abs_i = n - 1
         if abs_i < 1:
             continue
 
@@ -528,14 +542,18 @@ def detect_stage2_breakout(df: pd.DataFrame,
 
 def detect_continuation_breakout(df: pd.DataFrame,
                                  weekly_ind: Optional[Dict],
-                                 daily_ind: Optional[Dict]) -> Optional[Dict[str, Any]]:
+                                 daily_ind: Optional[Dict],
+                                 include_latest: bool = False,
+                                 latest_only: bool = False) -> Optional[Dict[str, Any]]:
     """Stage2 진행 중 continuation base 돌파 감지 (v4)."""
     if daily_ind is None:
         return None
     stage = classify_stage(weekly_ind, daily_ind)
     if stage != "STAGE2":
         return None
-    sig = _find_rebreakout_signal(daily_ind)
+    sig = _find_rebreakout_signal(
+        daily_ind, include_latest=include_latest, latest_only=latest_only
+    )
     if sig is None:
         return None
 
@@ -549,7 +567,9 @@ def detect_continuation_breakout(df: pd.DataFrame,
 
 def detect_rebound_entry(df: pd.DataFrame,
                          weekly_ind: Optional[Dict],
-                         daily_ind: Optional[Dict]) -> Optional[Dict[str, Any]]:
+                         daily_ind: Optional[Dict],
+                         include_latest: bool = False,
+                         latest_only: bool = False) -> Optional[Dict[str, Any]]:
     """Stage2 MA50 눌림목 반등 감지 (시간순, v4).
 
     Strategy invariants:
@@ -566,7 +586,11 @@ def detect_rebound_entry(df: pd.DataFrame,
     if stage != "STAGE2":
         return None  # 일봉 fallback 제거 — 주봉 STAGE2 필수
 
-    sig = _find_rebound_signal_v4(df, daily_ind, weekly_ind)
+    sig = _find_rebound_signal_v4(
+        df, daily_ind, weekly_ind,
+        include_latest=include_latest,
+        latest_only=latest_only,
+    )
     if sig is None:
         return None
 
@@ -580,7 +604,9 @@ def detect_rebound_entry(df: pd.DataFrame,
 
 def _find_rebound_signal_v4(df: pd.DataFrame,
                             daily_ind: Dict,
-                            weekly_ind: Dict) -> Optional[Dict]:
+                            weekly_ind: Dict,
+                            include_latest: bool = False,
+                            latest_only: bool = False) -> Optional[Dict]:
     """v4 REBOUND: legacy MA50 touch+rebound + base/30w 재테스트 게이트.
 
     1. legacy `_find_rebound_signal` 으로 후보 시그널 추출.
@@ -590,7 +616,9 @@ def _find_rebound_signal_v4(df: pd.DataFrame,
        (b) 주봉 30-SMA 재테스트: 터치 일봉 종가가 cur_sma30w ±REBOUND_TOUCH_PCT
            이내 + 시그널 시점 종가가 cur_sma30w 위로 회복.
     """
-    legacy_sig = _find_rebound_signal(daily_ind)
+    legacy_sig = _find_rebound_signal(
+        daily_ind, include_latest=include_latest, latest_only=latest_only
+    )
     if legacy_sig is None:
         return None
 
@@ -750,7 +778,8 @@ def _build_indicators(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     vol     = df["Volume"]
     ma150   = close.rolling(MA_PERIOD,        min_periods=MA_PERIOD // 2).mean()
     ma50    = close.rolling(REBOUND_MA_PERIOD, min_periods=REBOUND_MA_PERIOD // 2).mean()
-    vol_avg = vol.rolling(VOLUME_AVG_PERIOD,  min_periods=10).mean()
+    # 현재 평가 봉을 거래량 기준 평균에서 제외한다.
+    vol_avg = vol.shift(1).rolling(VOLUME_AVG_PERIOD, min_periods=10).mean()
 
     if pd.isna(ma150.iloc[-1]):
         return None
@@ -856,7 +885,8 @@ def _find_breakout_signal(ind: Dict) -> Optional[Dict]:
     return None
 
 
-def _find_rebreakout_signal(ind: Dict) -> Optional[Dict]:
+def _find_rebreakout_signal(ind: Dict, include_latest: bool = False,
+                            latest_only: bool = False) -> Optional[Dict]:
     """Stage2 연속 돌파(재돌파) 감지 (legacy)."""
     if ind["stage"] != "STAGE2":
         return None
@@ -865,8 +895,16 @@ def _find_rebreakout_signal(ind: Dict) -> Optional[Dict]:
     ma150, ma50 = ind["ma150"], ind["ma50"]
     n = len(close)
 
-    for i in range(1, min(SCAN_LOOKBACK_DAYS + 1, n - REBREAKOUT_BASE_LOOKBACK_DAYS - 2)):
+    start_offset = 0 if include_latest else 1
+    stop_offset = min(
+        SCAN_LOOKBACK_DAYS + 1, n - REBREAKOUT_BASE_LOOKBACK_DAYS - 2
+    )
+    offsets = range(start_offset, min(start_offset + 1, stop_offset)) \
+        if latest_only else range(start_offset, stop_offset)
+    for i in offsets:
         abs_i = n - i
+        if i == 0:
+            abs_i = n - 1
 
         cp   = float(close.iloc[abs_i])
         cm   = float(ma150.iloc[abs_i]) if not pd.isna(ma150.iloc[abs_i]) else None
@@ -930,7 +968,8 @@ def _find_rebreakout_signal(ind: Dict) -> Optional[Dict]:
     return None
 
 
-def _find_rebound_signal(ind: Dict) -> Optional[Dict]:
+def _find_rebound_signal(ind: Dict, include_latest: bool = False,
+                         latest_only: bool = False) -> Optional[Dict]:
     """MA50 눌림목 반등 감지 (시간순, legacy)."""
     if ind["stage"] not in ("STAGE2", "STAGE3"):
         return None
@@ -948,7 +987,8 @@ def _find_rebound_signal(ind: Dict) -> Optional[Dict]:
     touch_ma50   = None
     latest_sig   = None
 
-    for j in range(win_start, n - 1):
+    scan_end = n if include_latest else n - 1
+    for j in range(win_start, scan_end):
         p   = float(close.iloc[j])
         l   = float(low.iloc[j])
         if pd.isna(ma50.iloc[j]) or pd.isna(ma150.iloc[j]):
@@ -989,7 +1029,7 @@ def _find_rebound_signal(ind: Dict) -> Optional[Dict]:
                     continue
 
                 days_ago = (n - 1) - j
-                if days_ago < SCAN_LOOKBACK_DAYS:
+                if (days_ago == 0 if latest_only else days_ago < SCAN_LOOKBACK_DAYS):
                     latest_sig = {
                         "signal_type":   "REBOUND",
                         "signal_date":   str(close.index[j].date()),
@@ -1043,9 +1083,50 @@ def _signal_quality(vol_ratio: float, slope: float,
 # 공개 API — analyze_stock / check_sell_signal
 # ══════════════════════════════════════════════════════════════════
 
+def _detect_signal_point_in_time(df: pd.DataFrame, scan_context):
+    """최근 후보 봉을 각각 독립된 당시 스냅샷으로 평가한다.
+
+    과거 후보를 오늘의 주봉 Stage나 거래량으로 평가하지 않으며, 각 후보의
+    일봉·완료 주봉 계산 마지막 날짜가 곧 평가 시점이 된다.
+    """
+    max_candidates = min(SCAN_LOOKBACK_DAYS, len(df))
+    for offset in range(max_candidates):
+        snapshot = df.iloc[: len(df) - offset]
+        if len(snapshot) == 0:
+            continue
+        candidate_context = scan_context.for_session(snapshot.index[-1])
+        daily_ind = _build_indicators(snapshot)
+        if daily_ind is None:
+            continue
+        weekly_df = to_weekly_ohlcv(snapshot, candidate_context)
+        weekly_ind = (
+            compute_weekly_indicators(weekly_df) if len(weekly_df) > 0 else None
+        )
+        sig = (
+            detect_stage2_breakout(
+                snapshot, weekly_ind, daily_ind,
+                include_latest=True, latest_only=True,
+            )
+            or detect_continuation_breakout(
+                snapshot, weekly_ind, daily_ind,
+                include_latest=True, latest_only=True,
+            )
+            or detect_rebound_entry(
+                snapshot, weekly_ind, daily_ind,
+                include_latest=True, latest_only=True,
+            )
+        )
+        if sig is None:
+            continue
+        if pd.Timestamp(sig["signal_date"]).normalize() != snapshot.index[-1].normalize():
+            continue
+        return sig, snapshot, daily_ind, weekly_ind, candidate_context
+    return None, None, None, None, None
+
 def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
                   benchmark_close: pd.Series = None,
-                  market_condition: str = None) -> Optional[dict]:
+                  market_condition: str = None,
+                  scan_context=None) -> Optional[dict]:
     """주식 하나에 대해 Weinstein 매수 시그널을 탐지 (v4 강화).
 
     반환 dict:
@@ -1056,6 +1137,11 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
       v4 신규: sma30w, sma10w, weekly_stage, rs_value (Mansfield),
               rs_trend, weekly_volume_ratio, base_weeks, warning_flags
     """
+    if scan_context is not None:
+        from scanner.time_context import normalize_close_series, normalize_ohlcv
+        df = normalize_ohlcv(df, scan_context)
+        benchmark_close = normalize_close_series(benchmark_close, scan_context)
+
     if df is None or len(df) < MA_PERIOD + BREAKOUT_BASE_LOOKBACK_DAYS + 10:
         return None
 
@@ -1066,7 +1152,7 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
     if daily_ind is None:
         return None
 
-    weekly_df  = to_weekly_ohlcv(df)
+    weekly_df  = to_weekly_ohlcv(df, scan_context)
     weekly_ind = compute_weekly_indicators(weekly_df) if len(weekly_df) > 0 else None
     v4_stage   = classify_stage(weekly_ind, daily_ind)
 
@@ -1075,11 +1161,18 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
         return None
 
     # 시그널 탐지 — v4 detector 우선, legacy 로직 그대로 위임
-    sig = (
-        detect_stage2_breakout(df, weekly_ind, daily_ind)
-        or detect_continuation_breakout(df, weekly_ind, daily_ind)
-        or detect_rebound_entry(df, weekly_ind, daily_ind)
-    )
+    signal_context = None
+    if scan_context is not None:
+        (sig, df_at_signal, daily_at_signal,
+         weekly_at_signal, signal_context) = _detect_signal_point_in_time(
+            df, scan_context
+        )
+    else:
+        sig = (
+            detect_stage2_breakout(df, weekly_ind, daily_ind)
+            or detect_continuation_breakout(df, weekly_ind, daily_ind)
+            or detect_rebound_entry(df, weekly_ind, daily_ind)
+        )
     if sig is None:
         return None
 
@@ -1098,18 +1191,19 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
     # 모두 *signal 발생 시점* 의 시리즈로 산출해야 한다 (CLAUDE.md "Stage 2
     # candidates ... no look-ahead pivot"). DB 에 기록되는 rs_value/rs_trend
     # 도 이 신호의 RS 스냅샷이지, 스캔 직전 마지막 bar 의 RS 가 아니다.
-    df_at_signal     = df.loc[: sig["signal_date"]]
-    daily_at_signal  = daily_ind
-    weekly_at_signal = weekly_ind
-    if len(df_at_signal) >= MA_PERIOD:
-        d_signal = _build_indicators(df_at_signal)
-        if d_signal is not None:
-            daily_at_signal = d_signal
-        w_signal_df = to_weekly_ohlcv(df_at_signal)
-        if len(w_signal_df) > 0:
-            w_signal = compute_weekly_indicators(w_signal_df)
-            if w_signal is not None:
-                weekly_at_signal = w_signal
+    if scan_context is None:
+        df_at_signal     = df.loc[: sig["signal_date"]]
+        daily_at_signal  = daily_ind
+        weekly_at_signal = weekly_ind
+        if len(df_at_signal) >= MA_PERIOD:
+            d_signal = _build_indicators(df_at_signal)
+            if d_signal is not None:
+                daily_at_signal = d_signal
+            w_signal_df = to_weekly_ohlcv(df_at_signal)
+            if len(w_signal_df) > 0:
+                w_signal = compute_weekly_indicators(w_signal_df)
+                if w_signal is not None:
+                    weekly_at_signal = w_signal
 
     # signal 시점 close — stop_loss sanity 비교 (stop < price) 가 일관되도록.
     sig_close = float(df_at_signal["Close"].iloc[-1]) if len(df_at_signal) else cur_p
@@ -1162,7 +1256,10 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
     )
 
     # signal_quality 는 Mansfield RS (rs_value/rs_trend) 기준
-    qual = _signal_quality(sig["vol_ratio"], slope, rs_value, rs_trend, sig["signal_type"])
+    quality_slope = daily_at_signal["slope150"]
+    qual = _signal_quality(
+        sig["vol_ratio"], quality_slope, rs_value, rs_trend, sig["signal_type"]
+    )
 
     # warning_flags 축적
     warning_flags: List[str] = list(sig.get("warning_flags") or [])
@@ -1232,6 +1329,13 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
         result["sma10w"] = round(weekly_ind["cur_sma10w"], 4)
         result["weekly_volume_ratio"] = weekly_ind.get("weekly_volume_ratio")
         result["slope30w"] = round(weekly_ind["slope30w"], 6)
+    if scan_context is not None:
+        result.update({
+            "strategy_version": scan_context.strategy_version,
+            "as_of": scan_context.as_of.isoformat(),
+            "session_date": scan_context.session_date.isoformat(),
+            "bar_status": "FINAL",
+        })
     return result
 
 
@@ -1274,13 +1378,20 @@ def _rs_deteriorating(close: pd.Series,
 def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
                       buy_price: float = None, stop_loss: float = None,
                       weekly_df: Optional[pd.DataFrame] = None,
-                      benchmark_close: Optional[pd.Series] = None) -> Optional[dict]:
+                      benchmark_close: Optional[pd.Series] = None,
+                      scan_context=None) -> Optional[dict]:
     """감시 종목 매도 시그널 체크 (severity: HIGH / MEDIUM / LOW).
 
     옵션 인자 weekly_df / benchmark_close 가 제공되면 30주 SMA 붕괴/슬로프
     반전/Mansfield RS 악화 분기를 추가로 평가한다. 인자가 None 이면 기존 결과를
     그대로 유지하므로 Phase 1 단독 머지 시 호출부 회귀가 없다.
     """
+    if scan_context is not None:
+        from scanner.time_context import normalize_close_series, normalize_ohlcv
+        df = normalize_ohlcv(df, scan_context)
+        benchmark_close = normalize_close_series(benchmark_close, scan_context)
+        weekly_df = to_weekly_ohlcv(df, scan_context)
+
     if df is None or len(df) < MA_PERIOD + 20:
         return None
 
@@ -1334,7 +1445,7 @@ def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
     if reason is None:
         return None
 
-    return {
+    result = {
         "ticker":      ticker,
         "name":        name,
         "market":      market,
@@ -1348,3 +1459,11 @@ def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
         "buy_price":   buy_price,
         "profit_pct":  round((cur_p - buy_price) / buy_price * 100, 2) if buy_price else None,
     }
+    if scan_context is not None:
+        result.update({
+            "strategy_version": scan_context.strategy_version,
+            "as_of": scan_context.as_of.isoformat(),
+            "session_date": scan_context.session_date.isoformat(),
+            "bar_status": "FINAL",
+        })
+    return result

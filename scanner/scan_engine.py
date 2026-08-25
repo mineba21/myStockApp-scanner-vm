@@ -122,7 +122,7 @@ def _grade(signal: dict) -> str:
 # ── 메인 스캔 ─────────────────────────────────────────────────────
 
 def run_scan(market: str = "ALL", universe: str = None,
-             triggered_by: str = "manual") -> dict:
+             triggered_by: str = "manual", as_of=None) -> dict:
     if scan_status["is_running"]:
         return {"status": "already_running"}
 
@@ -154,9 +154,15 @@ def run_scan(market: str = "ALL", universe: str = None,
     buy_signals, total_scanned = [], 0
 
     try:
+        from scanner.time_context import ScanContext
+        scan_contexts = {
+            "KR": ScanContext.create("KR", as_of=as_of),
+            "US": ScanContext.create("US", as_of=as_of),
+        }
+
         # 시장 지수 상태 로드 (Forest to Trees)
         from scanner.market_analysis import get_market_stages, get_benchmark_close
-        market_stages = get_market_stages()
+        market_stages = get_market_stages(scan_contexts=scan_contexts)
         kr_condition  = market_stages.get("KR_condition")
         us_condition  = market_stages.get("US_condition")
 
@@ -167,19 +173,31 @@ def run_scan(market: str = "ALL", universe: str = None,
                 Holding.quantity > 0,
             ).distinct().all()
         }
-        kr_bench = get_benchmark_close("KR") if market in ("KR", "ALL") or "KR" in holding_markets else None
-        us_bench = get_benchmark_close("US") if market in ("US", "ALL") or "US" in holding_markets else None
+        kr_bench = (get_benchmark_close("KR", scan_contexts["KR"])
+                    if market in ("KR", "ALL") or "KR" in holding_markets else None)
+        us_bench = (get_benchmark_close("US", scan_contexts["US"])
+                    if market in ("US", "ALL") or "US" in holding_markets else None)
 
         if market in ("KR", "ALL"):
-            sigs, cnt = _scan_kr(db, kr_bench, kr_condition, kr_universe)
+            sigs, cnt = _scan_kr(
+                db, kr_bench, kr_condition, kr_universe, scan_contexts["KR"]
+            )
             buy_signals.extend(sigs); total_scanned += cnt
 
         if market in ("US", "ALL"):
-            sigs, cnt = _scan_us(db, us_universe, us_bench, us_condition)
+            sigs, cnt = _scan_us(
+                db, us_universe, us_bench, us_condition, scan_contexts["US"]
+            )
             buy_signals.extend(sigs); total_scanned += cnt
 
-        holding_checks = _check_holdings(db, kr_bench=kr_bench, us_bench=us_bench)
-        sell_signals = _check_watchlist(db, kr_bench=kr_bench, us_bench=us_bench)
+        holding_checks = _check_holdings(
+            db, kr_bench=kr_bench, us_bench=us_bench,
+            scan_contexts=scan_contexts,
+        )
+        sell_signals = _check_watchlist(
+            db, kr_bench=kr_bench, us_bench=us_bench,
+            scan_contexts=scan_contexts,
+        )
 
         if buy_signals or sell_signals:
             _notify(
@@ -198,7 +216,12 @@ def run_scan(market: str = "ALL", universe: str = None,
         return {"status": "done", "total_scanned": total_scanned,
                 "signals_found": len(buy_signals),
                 "sell_signals": len(sell_signals),
-                "holding_checks": holding_checks}
+                "holding_checks": holding_checks,
+                "as_of": scan_contexts["KR"].as_of.isoformat(),
+                "session_dates": {
+                    code: ctx.session_date.isoformat()
+                    for code, ctx in scan_contexts.items()
+                }}
 
     except Exception as e:
         logger.error(f"스캔 오류: {e}", exc_info=True)
@@ -266,7 +289,8 @@ def _process_signal(db, res: dict, market_label: str,
     return True
 
 
-def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi+kosdaq"):
+def _scan_kr(db, benchmark_close=None, market_condition=None,
+             kr_universe="kospi+kosdaq", scan_context=None):
     from scanner.kr_stocks import get_all_kr_tickers, get_kr_ohlcv
     from scanner.weinstein import analyze_stock
     import time
@@ -276,11 +300,13 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
 
     for i, info in enumerate(tickers):
         _prog(i + 1, len(tickers), f"KR [{i+1}/{len(tickers)}] {info['name']}")
-        df = get_kr_ohlcv(info["ticker"])
+        df = (get_kr_ohlcv(info["ticker"]) if scan_context is None
+              else get_kr_ohlcv(info["ticker"], scan_context=scan_context))
         if df is None:
             continue
         res = analyze_stock(df, info["ticker"], info["name"], "KR",
-                            benchmark_close, market_condition)
+                            benchmark_close, market_condition,
+                            scan_context=scan_context)
         count += 1
         if res and _process_signal(db, res, "KR",
                                    market_condition, benchmark_close):
@@ -290,19 +316,24 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
     return signals, count
 
 
-def _scan_us(db, universe, benchmark_close=None, market_condition=None):
+def _scan_us(db, universe, benchmark_close=None, market_condition=None,
+             scan_context=None):
     from scanner.us_stocks import get_all_us_tickers, get_us_batch
     from scanner.weinstein import analyze_stock
 
     tickers = get_all_us_tickers(universe)
-    results = get_us_batch(tickers, progress_callback=_prog)
+    results = (get_us_batch(tickers, progress_callback=_prog)
+               if scan_context is None else
+               get_us_batch(tickers, progress_callback=_prog,
+                            scan_context=scan_context))
     signals, count = [], 0
 
     for info, df in results:
         if df is None:
             continue
         res = analyze_stock(df, info["ticker"], info["name"], "US",
-                            benchmark_close, market_condition)
+                            benchmark_close, market_condition,
+                            scan_context=scan_context)
         count += 1
         if res and _process_signal(db, res, "US",
                                    market_condition, benchmark_close):
@@ -311,7 +342,7 @@ def _scan_us(db, universe, benchmark_close=None, market_condition=None):
     return signals, count
 
 
-def _check_watchlist(db, kr_bench=None, us_bench=None):
+def _check_watchlist(db, kr_bench=None, us_bench=None, scan_contexts=None):
     """감시목록 매도 시그널 체크.
 
     Phase 2: 일봉(df) → 주봉(weekly_df)을 derive 해서 check_sell_signal에 전달.
@@ -327,16 +358,31 @@ def _check_watchlist(db, kr_bench=None, us_bench=None):
     sells = []
     for w in items:
         try:
-            df = get_kr_ohlcv(w.ticker) if w.market == "KR" else get_us_ohlcv(w.ticker)
+            context = (scan_contexts or {}).get(w.market)
+            if w.market == "KR":
+                df = (get_kr_ohlcv(w.ticker) if context is None else
+                      get_kr_ohlcv(w.ticker, scan_context=context))
+            else:
+                df = (get_us_ohlcv(w.ticker) if context is None else
+                      get_us_ohlcv(w.ticker, scan_context=context))
             if df is None:
                 continue
-            weekly_df = to_weekly_ohlcv(df)
+            weekly_df = (to_weekly_ohlcv(df) if context is None else
+                         to_weekly_ohlcv(df, context))
             if weekly_df is None or len(weekly_df) == 0:
                 weekly_df = None
             bench = kr_bench if w.market == "KR" else us_bench
-            sig = check_sell_signal(df, w.ticker, w.name, w.market,
-                                    buy_price=w.buy_price, stop_loss=w.stop_loss,
-                                    weekly_df=weekly_df, benchmark_close=bench)
+            sell_kwargs = {
+                "buy_price": w.buy_price,
+                "stop_loss": w.stop_loss,
+                "weekly_df": weekly_df,
+                "benchmark_close": bench,
+            }
+            if context is not None:
+                sell_kwargs["scan_context"] = context
+            sig = check_sell_signal(
+                df, w.ticker, w.name, w.market, **sell_kwargs
+            )
             if sig:
                 sells.append(sig)
         except Exception as e:
@@ -344,7 +390,7 @@ def _check_watchlist(db, kr_bench=None, us_bench=None):
     return sells
 
 
-def _check_holdings(db, kr_bench=None, us_bench=None):
+def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
     """활성 보유종목을 중복 티커 단위로 조회하고 현재 매도 상태를 저장한다."""
     from collections import defaultdict
     from database.models import Holding
@@ -372,21 +418,33 @@ def _check_holdings(db, kr_bench=None, us_bench=None):
     for (market, ticker), rows in grouped.items():
         checked_at = datetime.utcnow()
         try:
-            df = get_kr_ohlcv(ticker) if market == "KR" else get_us_ohlcv(ticker)
+            context = (scan_contexts or {}).get(market)
+            if market == "KR":
+                df = (get_kr_ohlcv(ticker) if context is None else
+                      get_kr_ohlcv(ticker, scan_context=context))
+            else:
+                df = (get_us_ohlcv(ticker) if context is None else
+                      get_us_ohlcv(ticker, scan_context=context))
             if df is None or len(df) < MA_PERIOD + 20:
                 raise ValueError("매도 판정에 필요한 시세 데이터가 부족합니다")
-            weekly_df = to_weekly_ohlcv(df)
+            weekly_df = (to_weekly_ohlcv(df) if context is None else
+                         to_weekly_ohlcv(df, context))
             if weekly_df is None or len(weekly_df) == 0:
                 weekly_df = None
             benchmark = kr_bench if market == "KR" else us_bench
             current_price = float(df["Close"].iloc[-1])
 
             for holding in rows:
+                sell_kwargs = {
+                    "buy_price": holding.avg_price,
+                    "weekly_df": weekly_df,
+                    "benchmark_close": benchmark,
+                }
+                if context is not None:
+                    sell_kwargs["scan_context"] = context
                 signal = check_sell_signal(
                     df, holding.ticker, holding.name, holding.market,
-                    buy_price=holding.avg_price,
-                    weekly_df=weekly_df,
-                    benchmark_close=benchmark,
+                    **sell_kwargs,
                 )
                 status = status_by_severity.get(signal.get("severity"), "CAUTION") if signal else "HOLD"
                 holding.current_price = current_price

@@ -6,6 +6,7 @@ import requests
 import logging
 import time
 from typing import Optional
+from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 _cache: dict = {}   # universe_key → list
@@ -175,18 +176,34 @@ def get_all_us_tickers(universe: str = "sp500+nasdaq100") -> list:
     return tickers
 
 
-def get_us_ohlcv(ticker: str, period: str = "2y") -> Optional[pd.DataFrame]:
+def get_us_ohlcv(ticker: str, period: str = "2y",
+                 scan_context=None) -> Optional[pd.DataFrame]:
     try:
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
+        history_kwargs = {"period": period, "auto_adjust": True}
+        if scan_context is not None:
+            years = int(period[:-1]) if period.endswith("y") and period[:-1].isdigit() else 2
+            local_as_of = scan_context.as_of.astimezone(scan_context.timezone)
+            end = local_as_of.date() + timedelta(days=1)  # yfinance end is exclusive
+            start = end - timedelta(days=years * 365 + 7)
+            history_kwargs = {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "auto_adjust": True,
+            }
+        df = yf.Ticker(ticker).history(**history_kwargs)
         if df is None or len(df) < 50: return None
         df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
         df.index = pd.to_datetime(df.index).tz_localize(None)
+        if scan_context is not None:
+            from scanner.time_context import normalize_ohlcv
+            df = normalize_ohlcv(df, scan_context)
         return df
     except Exception as e:
         logger.debug(f"US {ticker} 실패: {e}"); return None
 
 
-def fetch_ohlcv(ticker: str, lookback_days: int = 730) -> Optional[pd.DataFrame]:
+def fetch_ohlcv(ticker: str, lookback_days: int = 730,
+                scan_context=None) -> Optional[pd.DataFrame]:
     """Phase 2 통합 어댑터 — US 한정. lookback_days를 yfinance period 문자열로
     환산해 기존 get_us_ohlcv()를 호출한다.
 
@@ -200,27 +217,44 @@ def fetch_ohlcv(ticker: str, lookback_days: int = 730) -> Optional[pd.DataFrame]
     years = max(1, (lookback_days + 364) // 365)
     period = f"{years}y"
     try:
-        return get_us_ohlcv(ticker, period=period)
+        if scan_context is None:
+            return get_us_ohlcv(ticker, period=period)
+        return get_us_ohlcv(ticker, period=period, scan_context=scan_context)
     except Exception as e:
         from scanner.errors import DataFetchError
         logger.debug(f"US fetch_ohlcv {ticker} 실패: {e}")
         raise DataFetchError(f"US fetch failed for {ticker}: {e}") from e
 
 
-def get_us_batch(tickers: list, progress_callback=None, delay: float = 0.1) -> list:
+def get_us_batch(tickers: list, progress_callback=None, delay: float = 0.1,
+                 scan_context=None) -> list:
     results, total, bs = [], len(tickers), 50
     for start in range(0, total, bs):
         batch = tickers[start:start + bs]
         syms  = [t["ticker"] for t in batch]
         try:
-            raw = yf.download(syms, period="2y", auto_adjust=True,
-                              group_by="ticker", threads=True, progress=False)
+            download_kwargs = {
+                "period": "2y", "auto_adjust": True,
+                "group_by": "ticker", "threads": True, "progress": False,
+            }
+            if scan_context is not None:
+                local_as_of = scan_context.as_of.astimezone(scan_context.timezone)
+                end = local_as_of.date() + timedelta(days=1)
+                start_date = end - timedelta(days=2 * 365 + 7)
+                download_kwargs.pop("period")
+                download_kwargs.update(
+                    start=start_date.isoformat(), end=end.isoformat()
+                )
+            raw = yf.download(syms, **download_kwargs)
             for info in batch:
                 sym = info["ticker"]
                 try:
                     df = (raw[["Open","High","Low","Close","Volume"]] if len(syms)==1
                           else raw[sym][["Open","High","Low","Close","Volume"]]).dropna()
                     df.index = pd.to_datetime(df.index).tz_localize(None)
+                    if scan_context is not None:
+                        from scanner.time_context import normalize_ohlcv
+                        df = normalize_ohlcv(df, scan_context)
                     results.append((info, df if len(df) >= 50 else None))
                 except Exception:
                     results.append((info, None))

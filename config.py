@@ -7,12 +7,25 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 SLACK_WEBHOOK_URL  = os.getenv("SLACK_WEBHOOK_URL", "")
 
+# ── Strategy rollout ────────────────────────────────────────────
+# Phase 1 baseline: the v1 engine is not wired into scan execution yet.
+# Keeping the switch OFF guarantees that introducing the rollout scaffold
+# does not change legacy_v4 scan, persistence, or notification behavior.
+STRATEGY_VERSION   = os.getenv("STRATEGY_VERSION", "legacy_v4").strip() or "legacy_v4"
+WEINSTEIN_V1_MODE  = os.getenv("WEINSTEIN_V1_MODE", "off").strip().lower()
+
+if WEINSTEIN_V1_MODE not in {"off", "shadow", "primary"}:
+    raise ValueError(
+        "WEINSTEIN_V1_MODE must be one of: off, shadow, primary"
+    )
+
 # ── Core MA / Scan ───────────────────────────────────────────────
 SCAN_LOOKBACK_DAYS  = int(os.getenv("SCAN_LOOKBACK_DAYS", "7"))
 MA_PERIOD           = int(os.getenv("MA_PERIOD", "150"))       # Weinstein 30주(150일) MA
 MA_SLOPE_PERIOD     = int(os.getenv("MA_SLOPE_PERIOD", "10"))
 VOLUME_SURGE_RATIO  = float(os.getenv("VOLUME_SURGE_RATIO", "1.5"))  # legacy (used as fallback)
 VOLUME_AVG_PERIOD   = int(os.getenv("VOLUME_AVG_PERIOD", "20"))
+FINAL_BAR_DELAY_MINUTES = int(os.getenv("FINAL_BAR_DELAY_MINUTES", "15"))
 
 # ── BREAKOUT (돌파) ─────────────────────────────────────────────
 # pivot/base 기반 돌파: 최근 base 기간 고점을 거래량과 함께 돌파

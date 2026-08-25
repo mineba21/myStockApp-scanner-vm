@@ -35,10 +35,10 @@ KR_SECTOR_ETFS = [
 ]
 
 
-def get_market_stages(force: bool = False) -> Dict:
+def get_market_stages(force: bool = False, scan_contexts=None) -> Dict:
     """미국·한국 주요 지수의 Weinstein Stage를 반환합니다."""
     global _cache, _cache_time
-    if (not force and _cache_time
+    if (scan_contexts is None and not force and _cache_time
             and (datetime.now() - _cache_time) < timedelta(minutes=CACHE_MINUTES)):
         return _cache
 
@@ -54,33 +54,40 @@ def get_market_stages(force: bool = False) -> Dict:
     }
 
     for idx in US_INDICES:
-        _analyze_index(idx, "US", get_us_ohlcv, MA_PERIOD, stage_of, _slope, result["US"])
+        _analyze_index(idx, "US", get_us_ohlcv, MA_PERIOD, stage_of, _slope,
+                       result["US"], (scan_contexts or {}).get("US"))
     for idx in KR_INDICES:
-        _analyze_index(idx, "KR", get_kr_ohlcv, MA_PERIOD, stage_of, _slope, result["KR"])
+        _analyze_index(idx, "KR", get_kr_ohlcv, MA_PERIOD, stage_of, _slope,
+                       result["KR"], (scan_contexts or {}).get("KR"))
 
     # 섹터 ETF 분석 (실패해도 무시)
     for idx in US_SECTOR_ETFS:
-        _analyze_index(idx, "US", get_us_ohlcv, MA_PERIOD, stage_of, _slope, result["US_SECTORS"])
+        _analyze_index(idx, "US", get_us_ohlcv, MA_PERIOD, stage_of, _slope,
+                       result["US_SECTORS"], (scan_contexts or {}).get("US"))
     for idx in KR_SECTOR_ETFS:
-        _analyze_index(idx, "KR", get_kr_ohlcv, MA_PERIOD, stage_of, _slope, result["KR_SECTORS"])
+        _analyze_index(idx, "KR", get_kr_ohlcv, MA_PERIOD, stage_of, _slope,
+                       result["KR_SECTORS"], (scan_contexts or {}).get("KR"))
 
     result["US_condition"] = _condition(result["US"])
     result["KR_condition"] = _condition(result["KR"])
 
-    _cache = result
-    _cache_time = datetime.now()
+    if scan_contexts is None:
+        _cache = result
+        _cache_time = datetime.now()
     return result
 
 
-def get_benchmark_close(market: str = "US") -> "pd.Series | None":
+def get_benchmark_close(market: str = "US", scan_context=None) -> "pd.Series | None":
     """스캔 엔진에서 RS 계산용 벤치마크 종가 시리즈를 반환합니다."""
     try:
         if market == "US":
             from scanner.us_stocks import get_us_ohlcv
-            df = get_us_ohlcv("SPY")
+            df = (get_us_ohlcv("SPY") if scan_context is None
+                  else get_us_ohlcv("SPY", scan_context=scan_context))
         else:
             from scanner.kr_stocks import get_kr_ohlcv
-            df = get_kr_ohlcv("069500")
+            df = (get_kr_ohlcv("069500") if scan_context is None
+                  else get_kr_ohlcv("069500", scan_context=scan_context))
         return df["Close"] if df is not None else None
     except Exception as e:
         logger.error(f"벤치마크 로드 실패: {e}")
@@ -89,10 +96,12 @@ def get_benchmark_close(market: str = "US") -> "pd.Series | None":
 
 # ── 내부 헬퍼 ────────────────────────────────────────────────
 
-def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list):
+def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list,
+                   scan_context=None):
     try:
         import pandas as pd
-        df = fetch_fn(idx["ticker"])
+        df = (fetch_fn(idx["ticker"]) if scan_context is None
+              else fetch_fn(idx["ticker"], scan_context=scan_context))
         if df is None or len(df) < MA_PERIOD:
             return
         close = df["Close"]

@@ -105,9 +105,17 @@ def get_all_kr_tickers(market_filter: str = "kospi+kosdaq") -> list:
     return tickers
 
 
-def get_kr_ohlcv(ticker: str, period_years: int = 2) -> Optional[pd.DataFrame]:
-    end   = datetime.now()
+def get_kr_ohlcv(ticker: str, period_years: int = 2,
+                 scan_context=None) -> Optional[pd.DataFrame]:
+    end = (scan_context.as_of.astimezone(scan_context.timezone).replace(tzinfo=None)
+           if scan_context is not None else datetime.now())
     start = end - timedelta(days=period_years * 365)
+
+    def _finalize(frame: pd.DataFrame) -> pd.DataFrame:
+        if scan_context is None:
+            return frame
+        from scanner.time_context import normalize_ohlcv
+        return normalize_ohlcv(frame, scan_context)
 
     # FinanceDataReader 먼저 시도
     try:
@@ -116,7 +124,7 @@ def get_kr_ohlcv(ticker: str, period_years: int = 2) -> Optional[pd.DataFrame]:
         if df is not None and len(df) > 50:
             df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
             df.index = pd.to_datetime(df.index)
-            return df
+            return _finalize(df)
     except Exception:
         pass
 
@@ -129,14 +137,15 @@ def get_kr_ohlcv(ticker: str, period_years: int = 2) -> Optional[pd.DataFrame]:
                                     "종가": "Close", "거래량": "Volume"})
             df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
             df.index = pd.to_datetime(df.index)
-            return df
+            return _finalize(df)
     except Exception as e:
         logger.debug(f"KR {ticker} 조회 실패: {e}")
 
     return None
 
 
-def fetch_ohlcv(ticker: str, lookback_days: int = 730) -> Optional[pd.DataFrame]:
+def fetch_ohlcv(ticker: str, lookback_days: int = 730,
+                scan_context=None) -> Optional[pd.DataFrame]:
     """Phase 2 통합 어댑터 — KR 한정. lookback_days를 period_years로 환산해
     기존 get_kr_ohlcv()를 호출한다.
 
@@ -149,7 +158,11 @@ def fetch_ohlcv(ticker: str, lookback_days: int = 730) -> Optional[pd.DataFrame]
         return None
     period_years = max(1, (lookback_days + 364) // 365)
     try:
-        return get_kr_ohlcv(ticker, period_years=period_years)
+        if scan_context is None:
+            return get_kr_ohlcv(ticker, period_years=period_years)
+        return get_kr_ohlcv(
+            ticker, period_years=period_years, scan_context=scan_context
+        )
     except Exception as e:
         from scanner.errors import DataFetchError
         logger.debug(f"KR fetch_ohlcv {ticker} 실패: {e}")
