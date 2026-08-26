@@ -490,6 +490,7 @@ class TestVolumeGate:
 
         reasons = []
         _check_volume({"signal_type": "BREAKOUT",
+                       "strategy_version": "weinstein_breakout_v1",
                        "volume_ratio": 1.5,
                        "strict_weekly_volume_ratio": 2.5}, reasons)
         assert reasons == []
@@ -502,6 +503,7 @@ class TestVolumeGate:
 
         reasons = []
         _check_volume({"signal_type": "BREAKOUT",
+                       "strategy_version": "weinstein_breakout_v1",
                        "volume_ratio": 3.5,
                        "strict_weekly_volume_ratio": 1.0}, reasons)
         assert reasons == []
@@ -548,9 +550,22 @@ class TestVolumeGate:
 
         reasons = []
         _check_volume({"signal_type": "BREAKOUT",
+                       "strategy_version": "weinstein_breakout_v1",
                        "volume_ratio": 5.0,
                        "strict_weekly_volume_ratio": None}, reasons)
         assert BREAKOUT_WEEKLY_VOLUME not in reasons
+
+    def test_legacy_daily_only_does_not_pass(self, monkeypatch):
+        from scanner.strict_filter import _check_volume, BREAKOUT_WEEKLY_VOLUME
+        _force_strict_flag(monkeypatch, "STRICT_REQUIRE_BREAKOUT_VOLUME", True)
+
+        reasons = []
+        _check_volume({"signal_type": "BREAKOUT",
+                       "strategy_version": "legacy_v4",
+                       "volume_ratio": 5.0,
+                       "strict_breakout_weekly_volume_ratio": 1.0}, reasons)
+
+        assert BREAKOUT_WEEKLY_VOLUME in reasons
 
 
 # ══════════════════════════════════════════════════════════════════

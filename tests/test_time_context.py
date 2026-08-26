@@ -297,3 +297,26 @@ def test_analyze_stock_is_invariant_to_rows_after_as_of(monkeypatch):
         key: with_future[key] for key in keys
     }
     assert with_future["bar_status"] == "FINAL"
+
+
+def test_sell_check_reuses_normalized_daily_and_supplied_weekly(monkeypatch):
+    from scanner import time_context, weinstein as module
+
+    context = ScanContext.create("US", "2026-08-25T20:16:00Z")
+    idx = _session_index("US", "2025-01-02", "2026-08-25")
+    normalized = normalize_ohlcv(
+        _ohlcv(idx, close=[80.0 + i * 0.1 for i in range(len(idx))]),
+        context,
+    )
+    weekly = to_weekly_ohlcv(normalized, context)
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("already normalized input was recomputed")
+
+    monkeypatch.setattr(time_context, "normalize_ohlcv", should_not_run)
+    monkeypatch.setattr(module, "to_weekly_ohlcv", should_not_run)
+
+    module.check_sell_signal(
+        normalized, "TEST", "Test", "US",
+        weekly_df=weekly, scan_context=context, current_price=100.0,
+    )

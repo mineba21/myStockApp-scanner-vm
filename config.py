@@ -12,7 +12,7 @@ SLACK_WEBHOOK_URL  = os.getenv("SLACK_WEBHOOK_URL", "")
 # Keeping the switch OFF guarantees that introducing the rollout scaffold
 # does not change legacy_v4 scan, persistence, or notification behavior.
 STRATEGY_VERSION   = os.getenv("STRATEGY_VERSION", "legacy_v4").strip() or "legacy_v4"
-WEINSTEIN_V1_MODE  = os.getenv("WEINSTEIN_V1_MODE", "off").strip().lower()
+WEINSTEIN_V1_MODE  = os.getenv("WEINSTEIN_V1_MODE", "off").strip().lower() or "off"
 
 if WEINSTEIN_V1_MODE not in {"off", "shadow", "primary"}:
     raise ValueError(

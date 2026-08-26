@@ -144,23 +144,6 @@ class ScanContext:
     def timezone(self) -> ZoneInfo:
         return ZoneInfo(_TIMEZONE_NAMES[self.market])
 
-    def for_session(self, session_date: Union[date, str, pd.Timestamp]) -> "ScanContext":
-        """Create an as-of context immediately after a specific session closes."""
-        label = pd.Timestamp(session_date).normalize()
-        cal = _calendar(self.market)
-        if not cal.is_session(label):
-            label = cal.date_to_session(label, direction="previous")
-        as_of = cal.session_close(label) + pd.Timedelta(
-            minutes=self.final_bar_delay_minutes
-        )
-        return ScanContext.create(
-            self.market,
-            as_of=as_of,
-            strategy_version=self.strategy_version,
-            final_bar_delay_minutes=self.final_bar_delay_minutes,
-        )
-
-
 def normalize_ohlcv(df: Optional[pd.DataFrame], context: ScanContext) -> pd.DataFrame:
     """Normalize daily index to local session dates and remove non-final rows."""
     if df is None or len(df) == 0:

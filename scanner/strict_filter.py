@@ -264,8 +264,8 @@ def _check_volume(signal: Dict[str, Any],
                   reasons: List[str]) -> None:
     """Gate 5 — Breakout volume.
 
-    BREAKOUT 한정 — 일봉 ≥ ``BREAKOUT_DAILY_VOL_RATIO`` 또는 완료 주봉 ≥
-    ``BREAKOUT_WEEKLY_VOL_RATIO`` 중 하나를 만족하면 통과한다.
+    BREAKOUT 한정 — legacy_v4는 일봉과 주봉을 모두 요구한다. 명시적인
+    weinstein_breakout_v1 신호만 일봉 또는 완료 주봉 중 하나로 통과한다.
 
     ``volume_ratio`` 는 detect_* 가 신호 시점 비율을 반환하므로 그대로 사용.
     ``weekly_volume_ratio`` 는 last-bar 의 공개 필드 vs signal-date 스냅샷이
@@ -281,15 +281,29 @@ def _check_volume(signal: Dict[str, Any],
         return
 
     vol_ratio = signal.get("volume_ratio")
-    wvr = signal.get("strict_weekly_volume_ratio")
+    wvr = signal.get(
+        "strict_breakout_weekly_volume_ratio",
+        signal.get("strict_weekly_volume_ratio"),
+    )
     daily_passed = (
         vol_ratio is not None and vol_ratio >= BREAKOUT_DAILY_VOL_RATIO
     )
     weekly_passed = (
         wvr is not None and wvr >= BREAKOUT_WEEKLY_VOL_RATIO
     )
-    if not (daily_passed or weekly_passed):
+    use_volume_or = (
+        signal.get("breakout_volume_rule") == "OR"
+        or signal.get("strategy_version") == "weinstein_breakout_v1"
+    )
+    if use_volume_or:
+        if not (daily_passed or weekly_passed):
+            reasons.append(BREAKOUT_DAILY_VOLUME)
+            reasons.append(BREAKOUT_WEEKLY_VOLUME)
+        return
+
+    if not daily_passed:
         reasons.append(BREAKOUT_DAILY_VOLUME)
+    if not weekly_passed:
         reasons.append(BREAKOUT_WEEKLY_VOLUME)
 
 

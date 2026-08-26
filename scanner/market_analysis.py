@@ -71,6 +71,11 @@ def get_market_stages(force: bool = False, scan_contexts=None) -> Dict:
             )
             if not force:
                 cached = _context_cache.get(cache_key)
+                if (cached is not None
+                        and (datetime.now() - cached["cached_at"])
+                        >= timedelta(minutes=CACHE_MINUTES)):
+                    _context_cache.pop(cache_key, None)
+                    cached = None
 
         if cached is not None:
             # 새 list 로 복사해 condition 계산/호출자 변경이 캐시를 오염시키지 않게 한다.
@@ -95,15 +100,12 @@ def get_market_stages(force: bool = False, scan_contexts=None) -> Dict:
         result[market] = market_rows
         result[f"{market}_SECTORS"] = sector_rows
 
-        cache_complete = (
-            len(market_rows) == len(indices)
-            and len(sector_rows) == len(sectors)
-        )
-        if cache_key is not None and cache_complete:
+        if cache_key is not None:
             _context_cache.pop(cache_key, None)
             _context_cache[cache_key] = {
                 "indices": [dict(item) for item in market_rows],
                 "sectors": [dict(item) for item in sector_rows],
+                "cached_at": datetime.now(),
             }
             while len(_context_cache) > CONTEXT_CACHE_MAX_ENTRIES:
                 oldest = next(iter(_context_cache))
@@ -111,6 +113,12 @@ def get_market_stages(force: bool = False, scan_contexts=None) -> Dict:
 
     result["US_condition"] = _condition(result["US"])
     result["KR_condition"] = _condition(result["KR"])
+    result["data_quality"] = {
+        market: _data_quality(
+            result[market] + result[f"{market}_SECTORS"]
+        )
+        for market in ("US", "KR")
+    }
 
     if scan_contexts is None:
         _cache = result
@@ -138,8 +146,9 @@ def get_benchmark_close(market: str = "US", scan_context=None) -> "pd.Series | N
                 df.attrs.get("last_bar_date"),
                 df.attrs.get("staleness_sessions"),
             )
-            return None
-        return df["Close"]
+        close = df["Close"].copy()
+        close.attrs.update(df.attrs)
+        return close
     except Exception as e:
         logger.error(f"벤치마크 로드 실패: {e}")
         return None
@@ -154,8 +163,18 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list,
         df = (fetch_fn(idx["ticker"]) if scan_context is None
               else fetch_fn(idx["ticker"], scan_context=scan_context))
         if df is None or len(df) < MA_PERIOD:
+            if scan_context is not None:
+                out_list.append(_unavailable_row(
+                    idx, market, "INSUFFICIENT_DATA", df
+                ))
             return
         if scan_context is not None and df.attrs.get("data_status") != "FINAL":
+            logger.warning(
+                "지수/섹터 최신 확정 봉 누락: market=%s ticker=%s last=%s stale=%s",
+                market, idx["ticker"], df.attrs.get("last_bar_date"),
+                df.attrs.get("staleness_sessions"),
+            )
+            out_list.append(_unavailable_row(idx, market, "STALE", df))
             return
         close = df["Close"]
         ma    = close.rolling(MA_PERIOD, min_periods=MA_PERIOD // 2).mean()
@@ -180,16 +199,60 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list,
             "pct_vs_ma": round(pct, 2),
             "pos52w":  pos52,       # 52주 고저 사이 위치 (%)
             "slope":  round(slope, 4),
+            "data_status": df.attrs.get("data_status", "FINAL"),
+            "last_bar_date": df.attrs.get("last_bar_date"),
+            "staleness_sessions": df.attrs.get("staleness_sessions", 0),
         })
     except Exception as e:
         logger.error(f"지수 분석 실패 {idx['ticker']}: {e}")
+        if scan_context is not None:
+            out_list.append(_unavailable_row(
+                idx, market, "INSUFFICIENT_DATA", None,
+                error=str(e),
+            ))
+
+
+def _unavailable_row(idx, market, status, df=None, error=None) -> Dict:
+    row = {
+        "ticker": idx["ticker"],
+        "name": idx["name"],
+        "market": market,
+        "stage": "INSUFFICIENT_DATA",
+        "data_status": status,
+        "last_bar_date": (
+            df.attrs.get("last_bar_date") if df is not None else None
+        ),
+        "staleness_sessions": (
+            df.attrs.get("staleness_sessions") if df is not None else None
+        ),
+    }
+    if error:
+        row["error"] = error
+    return row
+
+
+def _data_quality(rows: list) -> Dict:
+    unavailable = [
+        row for row in rows if row.get("data_status", "FINAL") != "FINAL"
+    ]
+    return {
+        "status": "FINAL" if not unavailable else "INSUFFICIENT_DATA",
+        "unavailable_count": len(unavailable),
+        "stale_count": sum(
+            row.get("data_status") == "STALE" for row in unavailable
+        ),
+        "unavailable_tickers": [row["ticker"] for row in unavailable],
+    }
 
 
 def _condition(indices: list) -> str:
     """지수 리스트로 전체 시장 상태 판단"""
     if not indices:
         return "UNKNOWN"
-    stages = [i["stage"] for i in indices]
+    stages = [i.get("stage") for i in indices]
+    if any(stage not in {"STAGE1", "STAGE2", "STAGE3", "STAGE4"}
+           for stage in stages):
+        return "UNKNOWN"
     if all(s == "STAGE4" for s in stages):  return "BEAR"      # 완전 하락장 🔴
     if any(s == "STAGE4" for s in stages):  return "CAUTION"   # 혼조세 주의 🟡
     if all(s == "STAGE2" for s in stages):  return "BULL"      # 완전 상승장 🟢

@@ -195,8 +195,8 @@ def test_intraday_position_price_is_separate_from_final_strategy_bar(db, monkeyp
     assert counts["SELL_REQUIRED"] == 1
 
 
-def test_missing_intraday_quote_does_not_overwrite_price_as_current(db, monkeypatch):
-    from scanner import kr_stocks, scan_engine
+def test_missing_intraday_quote_uses_final_close_fallback(db, monkeypatch):
+    from scanner import kr_stocks, scan_engine, weinstein
     from scanner.time_context import ScanContext
 
     _buy(db, account_id=1, market="KR", ticker="005930", price=100)
@@ -215,16 +215,70 @@ def test_missing_intraday_quote_does_not_overwrite_price_as_current(db, monkeypa
     monkeypatch.setattr(
         kr_stocks, "get_kr_ohlcv", lambda ticker, **kwargs: raw
     )
-    before = db.query(Holding).filter(Holding.ticker == "005930").one()
-    previous_price = before.current_price
-    previous_updated_at = before.price_updated_at
+    captured = {}
+
+    def fake_check(*args, **kwargs):
+        captured["current_price"] = kwargs.get("current_price")
+        captured["quote_status"] = kwargs.get("quote_status")
+        return None
+
+    monkeypatch.setattr(weinstein, "check_sell_signal", fake_check)
 
     counts = scan_engine._check_holdings(
         db, scan_contexts={"KR": context}
     )
 
     holding = db.query(Holding).filter(Holding.ticker == "005930").one()
-    assert holding.current_price == previous_price
-    assert holding.price_updated_at == previous_updated_at
-    assert holding.sell_status == "CHECK_FAILED"
-    assert counts["CHECK_FAILED"] == 1
+    assert captured == {
+        "current_price": 120.0,
+        "quote_status": "FINAL_FALLBACK",
+    }
+    assert holding.current_price == 120.0
+    assert holding.price_updated_at is not None
+    assert holding.sell_status == "HOLD"
+    assert counts["CHECK_FAILED"] == 0
+    assert counts["QUOTE_FALLBACK"] == 1
+    assert counts["quote_fallback_tickers"] == ["005930"]
+
+
+def test_kr_open_scan_uses_previous_close_until_intraday_quote_arrives(
+        db, monkeypatch):
+    from scanner import kr_stocks, scan_engine, weinstein
+    from scanner.time_context import ScanContext
+
+    _buy(db, account_id=1, market="KR", ticker="005930", price=100)
+    context = ScanContext.create("KR", "2026-08-25T00:00:00Z")  # 09:00 KST
+    sessions = xcals.get_calendar("XKRX").sessions_in_range(
+        "2025-08-01", "2026-08-24"
+    )
+    idx = pd.DatetimeIndex(sessions).tz_localize(None)
+    raw = pd.DataFrame({
+        "Open": [120.0] * len(idx),
+        "High": [121.0] * len(idx),
+        "Low": [119.0] * len(idx),
+        "Close": [120.0] * len(idx),
+        "Volume": [1_000_000] * len(idx),
+    }, index=idx)
+    monkeypatch.setattr(
+        kr_stocks, "get_kr_ohlcv", lambda ticker, **kwargs: raw
+    )
+    captured = {}
+
+    def fake_check(*args, **kwargs):
+        captured.update({
+            "current_price": kwargs.get("current_price"),
+            "quote_status": kwargs.get("quote_status"),
+        })
+        return None
+
+    monkeypatch.setattr(weinstein, "check_sell_signal", fake_check)
+    counts = scan_engine._check_holdings(
+        db, scan_contexts={"KR": context}
+    )
+
+    holding = db.query(Holding).filter(Holding.ticker == "005930").one()
+    assert captured["current_price"] == 120.0
+    assert captured["quote_status"] == "FINAL_FALLBACK"
+    assert holding.sell_status == "HOLD"
+    assert counts["CHECK_FAILED"] == 0
+    assert counts["QUOTE_FALLBACK"] == 1

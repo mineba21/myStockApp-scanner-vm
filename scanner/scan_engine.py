@@ -74,6 +74,9 @@ def _get_market_filter_decision(market_condition: Optional[str],
     if BLOCK_NEW_BUYS_IN_BEAR and market_condition == "BEAR":
         return False, "BEAR 장세 필터"
 
+    if market_condition == "UNKNOWN":
+        return False, "시장 지수 데이터 부족"
+
     if market_condition == "CAUTION":
         if CAUTION_MODE == "block_breakout" and signal_type == "BREAKOUT":
             return False, "CAUTION: 돌파 차단"
@@ -154,6 +157,7 @@ def run_scan(market: str = "ALL", universe: str = None,
     db.add(log); db.commit(); db.refresh(log)
 
     buy_signals, total_scanned = [], 0
+    stock_data_quality = {}
 
     try:
         from scanner.time_context import ScanContext
@@ -181,16 +185,18 @@ def run_scan(market: str = "ALL", universe: str = None,
                     if market in ("US", "ALL") or "US" in holding_markets else None)
 
         if market in ("KR", "ALL"):
-            sigs, cnt = _scan_kr(
+            sigs, cnt, quality = _scan_kr(
                 db, kr_bench, kr_condition, kr_universe, scan_contexts["KR"]
             )
             buy_signals.extend(sigs); total_scanned += cnt
+            stock_data_quality["KR"] = quality
 
         if market in ("US", "ALL"):
-            sigs, cnt = _scan_us(
+            sigs, cnt, quality = _scan_us(
                 db, us_universe, us_bench, us_condition, scan_contexts["US"]
             )
             buy_signals.extend(sigs); total_scanned += cnt
+            stock_data_quality["US"] = quality
 
         holding_checks = _check_holdings(
             db, kr_bench=kr_bench, us_bench=us_bench,
@@ -219,6 +225,14 @@ def run_scan(market: str = "ALL", universe: str = None,
                 "signals_found": len(buy_signals),
                 "sell_signals": len(sell_signals),
                 "holding_checks": holding_checks,
+                "data_quality": {
+                    "stocks": stock_data_quality,
+                    "market": market_stages.get("data_quality", {}),
+                    "benchmarks": {
+                        "KR": _series_data_quality(kr_bench),
+                        "US": _series_data_quality(us_bench),
+                    },
+                },
                 "as_of": scan_contexts["KR"].as_of.isoformat(),
                 "session_dates": {
                     code: ctx.session_date.isoformat()
@@ -299,23 +313,32 @@ def _scan_kr(db, benchmark_close=None, market_condition=None,
 
     tickers = get_all_kr_tickers(market_filter=kr_universe)
     signals, count = [], 0
+    quality = _new_scan_quality(len(tickers))
 
     for i, info in enumerate(tickers):
         _prog(i + 1, len(tickers), f"KR [{i+1}/{len(tickers)}] {info['name']}")
         df = (get_kr_ohlcv(info["ticker"]) if scan_context is None
               else get_kr_ohlcv(info["ticker"], scan_context=scan_context))
         if df is None:
+            quality["insufficient_count"] += 1
+            quality["insufficient_tickers"].append(info["ticker"])
+            continue
+        count += 1
+        if (scan_context is not None
+                and df.attrs.get("data_status") != "FINAL"):
+            quality["stale_count"] += 1
+            quality["stale_tickers"].append(info["ticker"])
             continue
         res = analyze_stock(df, info["ticker"], info["name"], "KR",
                             benchmark_close, market_condition,
                             scan_context=scan_context)
-        count += 1
         if res and _process_signal(db, res, "KR",
                                    market_condition, benchmark_close):
             signals.append(res)
         time.sleep(0.05)
 
-    return signals, count
+    quality["scanned_count"] = count
+    return signals, count, quality
 
 
 def _scan_us(db, universe, benchmark_close=None, market_condition=None,
@@ -329,19 +352,49 @@ def _scan_us(db, universe, benchmark_close=None, market_condition=None,
                get_us_batch(tickers, progress_callback=_prog,
                             scan_context=scan_context))
     signals, count = [], 0
+    quality = _new_scan_quality(len(tickers))
 
     for info, df in results:
         if df is None:
+            quality["insufficient_count"] += 1
+            quality["insufficient_tickers"].append(info["ticker"])
+            continue
+        count += 1
+        if (scan_context is not None
+                and df.attrs.get("data_status") != "FINAL"):
+            quality["stale_count"] += 1
+            quality["stale_tickers"].append(info["ticker"])
             continue
         res = analyze_stock(df, info["ticker"], info["name"], "US",
                             benchmark_close, market_condition,
                             scan_context=scan_context)
-        count += 1
         if res and _process_signal(db, res, "US",
                                    market_condition, benchmark_close):
             signals.append(res)
 
-    return signals, count
+    quality["scanned_count"] = count
+    return signals, count, quality
+
+
+def _new_scan_quality(requested_count):
+    return {
+        "requested_count": requested_count,
+        "scanned_count": 0,
+        "stale_count": 0,
+        "stale_tickers": [],
+        "insufficient_count": 0,
+        "insufficient_tickers": [],
+    }
+
+
+def _series_data_quality(series):
+    if series is None:
+        return {"data_status": "INSUFFICIENT_DATA"}
+    return {
+        "data_status": series.attrs.get("data_status", "FINAL"),
+        "last_bar_date": series.attrs.get("last_bar_date"),
+        "staleness_sessions": series.attrs.get("staleness_sessions", 0),
+    }
 
 
 def _fetch_position_frames(market, ticker, scan_context=None):
@@ -358,7 +411,11 @@ def _fetch_position_frames(market, ticker, scan_context=None):
         return (
             raw_df,
             float(raw_df["Close"].iloc[-1]),
-            pd.Timestamp(raw_df.index[-1]).date(),
+            {
+                "quote_date": pd.Timestamp(raw_df.index[-1]).date().isoformat(),
+                "quote_status": "LATEST_AVAILABLE",
+                "is_intraday": False,
+            },
         )
 
     raw_df = fetch_fn(
@@ -391,11 +448,22 @@ def _fetch_position_frames(market, ticker, scan_context=None):
     expected_quote_date = last_started_session(
         market, scan_context.as_of
     )
-    current_price = (
-        float(observed["Close"].iloc[-1])
-        if quote_date >= expected_quote_date else None
-    )
-    return strategy_df, current_price, quote_date
+    current_price = float(observed["Close"].iloc[-1])
+    is_intraday = quote_date > scan_context.session_date
+    is_current_session = quote_date >= expected_quote_date
+    if is_intraday:
+        quote_status = "INTRADAY"
+    elif is_current_session:
+        quote_status = "FINAL"
+    else:
+        quote_status = "FINAL_FALLBACK"
+    quote_meta = {
+        "quote_date": quote_date.isoformat(),
+        "expected_quote_date": expected_quote_date.isoformat(),
+        "quote_status": quote_status,
+        "is_intraday": is_intraday,
+    }
+    return strategy_df, current_price, quote_meta
 
 
 def _check_watchlist(db, kr_bench=None, us_bench=None, scan_contexts=None):
@@ -413,7 +481,7 @@ def _check_watchlist(db, kr_bench=None, us_bench=None, scan_contexts=None):
     for w in items:
         try:
             context = (scan_contexts or {}).get(w.market)
-            df, current_price, _ = _fetch_position_frames(
+            df, current_price, quote_meta = _fetch_position_frames(
                 w.market, w.ticker, context
             )
             if df is None:
@@ -432,6 +500,7 @@ def _check_watchlist(db, kr_bench=None, us_bench=None, scan_contexts=None):
             if context is not None:
                 sell_kwargs["scan_context"] = context
                 sell_kwargs["current_price"] = current_price
+                sell_kwargs["quote_status"] = quote_meta.get("quote_status")
             sig = check_sell_signal(
                 df, w.ticker, w.name, w.market, **sell_kwargs
             )
@@ -458,7 +527,8 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
         grouped[(holding.market, holding.ticker)].append(holding)
 
     counts = {"total": len(holdings), "SELL_REQUIRED": 0, "REVIEW": 0,
-              "CAUTION": 0, "HOLD": 0, "CHECK_FAILED": 0}
+              "CAUTION": 0, "HOLD": 0, "CHECK_FAILED": 0,
+              "QUOTE_FALLBACK": 0, "quote_fallback_tickers": []}
     status_by_severity = {
         "HIGH": "SELL_REQUIRED",
         "MEDIUM": "REVIEW",
@@ -469,7 +539,7 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
         checked_at = datetime.utcnow()
         try:
             context = (scan_contexts or {}).get(market)
-            df, current_price, quote_date = _fetch_position_frames(
+            df, current_price, quote_meta = _fetch_position_frames(
                 market, ticker, context
             )
             if df is None or len(df) < MA_PERIOD + 20:
@@ -481,10 +551,10 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
                     f"stale={df.attrs.get('staleness_sessions')})"
                 )
             if current_price is None:
-                raise ValueError(
-                    f"현재가가 최신 거래 세션까지 갱신되지 않았습니다 "
-                    f"(last_quote={quote_date})"
-                )
+                raise ValueError("사용 가능한 최근 종가가 없습니다")
+            if quote_meta.get("quote_status") == "FINAL_FALLBACK":
+                counts["QUOTE_FALLBACK"] += len(rows)
+                counts["quote_fallback_tickers"].append(ticker)
             weekly_df = (to_weekly_ohlcv(df) if context is None else
                          to_weekly_ohlcv(df, context))
             if weekly_df is None or len(weekly_df) == 0:
@@ -500,6 +570,7 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
                 if context is not None:
                     sell_kwargs["scan_context"] = context
                     sell_kwargs["current_price"] = current_price
+                    sell_kwargs["quote_status"] = quote_meta.get("quote_status")
                 signal = check_sell_signal(
                     df, holding.ticker, holding.name, holding.market,
                     **sell_kwargs,

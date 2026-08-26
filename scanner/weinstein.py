@@ -470,7 +470,10 @@ def detect_stage2_breakout(df: pd.DataFrame,
                            weekly_ind: Optional[Dict],
                            daily_ind: Optional[Dict],
                            include_latest: bool = True,
-                           latest_only: bool = False) -> Optional[Dict[str, Any]]:
+                           latest_only: bool = False,
+                           use_volume_or: bool = False,
+                           progressing_week_volume_ratio: Optional[float] = None,
+                           ) -> Optional[Dict[str, Any]]:
     """Stage1→Stage2 base pivot 상향 돌파 감지 (v4).
 
     조건:
@@ -478,8 +481,9 @@ def detect_stage2_breakout(df: pd.DataFrame,
       - Stage == STAGE1 or STAGE2 (30w SMA 위 + 상승)
       - detect_base_pivot 으로 5주+ 이상 tight/loose base(폭 ≤15%) 확인
       - 최근 SCAN_LOOKBACK_DAYS 내 pivot 상향 돌파
-      - 일봉 거래량 ≥ BREAKOUT_DAILY_VOL_RATIO OR
-        완료 주봉 거래량 ≥ BREAKOUT_WEEKLY_VOL_RATIO
+      - legacy_v4: 일봉 거래량 ≥ BREAKOUT_DAILY_VOL_RATIO AND
+        평가 시점 진행 주봉 거래량 ≥ BREAKOUT_WEEKLY_VOL_RATIO
+      - weinstein_breakout_v1: 일봉 또는 완료 주봉 거래량 중 하나 충족
       - MA150 대비 과매수 < BREAKOUT_MAX_EXTENDED_PCT
     """
     if daily_ind is None or weekly_ind is None:
@@ -488,7 +492,11 @@ def detect_stage2_breakout(df: pd.DataFrame,
     if stage not in ("STAGE1", "STAGE2"):
         return None
 
-    wvr = float(weekly_ind.get("weekly_volume_ratio", 0.0) or 0.0)
+    completed_wvr = float(weekly_ind.get("weekly_volume_ratio", 0.0) or 0.0)
+    gate_wvr = (
+        float(progressing_week_volume_ratio)
+        if progressing_week_volume_ratio is not None else completed_wvr
+    )
 
     close = df["Close"]
     ma150 = daily_ind["ma150"]
@@ -523,8 +531,13 @@ def detect_stage2_breakout(df: pd.DataFrame,
             continue
 
         dvr = _daily_vol_ratio(df, abs_i)
-        if (dvr < BREAKOUT_DAILY_VOL_RATIO
-                and wvr < BREAKOUT_WEEKLY_VOL_RATIO):
+        daily_passed = dvr >= BREAKOUT_DAILY_VOL_RATIO
+        weekly_passed = gate_wvr >= BREAKOUT_WEEKLY_VOL_RATIO
+        volume_passed = (
+            daily_passed or weekly_passed
+            if use_volume_or else daily_passed and weekly_passed
+        )
+        if not volume_passed:
             continue
 
         cm50_raw = ma50.iloc[abs_i]
@@ -541,6 +554,8 @@ def detect_stage2_breakout(df: pd.DataFrame,
             "signal_type":     "BREAKOUT",
             "signal_date":     str(close.index[abs_i].date()),
             "vol_ratio":       round(dvr, 2),
+            "breakout_weekly_volume_ratio": round(gate_wvr, 4),
+            "breakout_volume_rule": "OR" if use_volume_or else "AND",
             "pivot_price":     round(pivot_price, 4),
             "support_level":   round(cm50, 4),
             "base_quality":    legacy_quality,
@@ -1120,6 +1135,17 @@ def _signal_quality(vol_ratio: float, slope: float,
 # 공개 API — analyze_stock / check_sell_signal
 # ══════════════════════════════════════════════════════════════════
 
+def _matches_scan_context(data, scan_context) -> bool:
+    """Return whether a frame/series already carries this PIT normalization."""
+    if data is None:
+        return False
+    return (
+        data.attrs.get("market") == scan_context.market
+        and data.attrs.get("session_date")
+        == scan_context.session_date.isoformat()
+    )
+
+
 def _detect_signal_point_in_time(df: pd.DataFrame, scan_context):
     """최근 후보 봉을 각각 독립된 당시 스냅샷으로 평가한다.
 
@@ -1133,6 +1159,9 @@ def _detect_signal_point_in_time(df: pd.DataFrame, scan_context):
     weekly_all = _resample_weekly_ohlcv(df)
     weekly_cache = {}
     candidates = []
+    use_volume_or = (
+        scan_context.strategy_version == "weinstein_breakout_v1"
+    )
 
     for offset in range(max_candidates):
         end = len(df) - offset
@@ -1155,8 +1184,29 @@ def _detect_signal_point_in_time(df: pd.DataFrame, scan_context):
                 if len(weekly_df) > 0 else None
             )
             weekly_cache[week_label] = weekly_ind
+        # legacy_v4의 주봉 거래량 게이트는 평가 봉이 속한 진행 주의 누적
+        # 거래량을 사용했다. 완료 주봉만 보존하는 PIT 경로에서도 이 계약을
+        # 유지하되, 분모는 평가 주 이전의 완료 주만 사용한다.
+        progressing_wvr = None
+        if not use_volume_or:
+            current_week_label = (
+                snapshot.index[-1].to_period("W-FRI").end_time.normalize()
+            )
+            week_start = current_week_label - pd.Timedelta(days=4)
+            current_week_volume = float(
+                snapshot.loc[snapshot.index >= week_start, "Volume"].sum()
+            )
+            prior_weekly_volumes = weekly_all.loc[
+                weekly_all.index < current_week_label, "Volume"
+            ]
+            if len(prior_weekly_volumes) >= 5:
+                prior_average = float(prior_weekly_volumes.iloc[-10:].mean())
+                if prior_average > 0:
+                    progressing_wvr = current_week_volume / prior_average
+
         candidates.append((
-            snapshot, daily_ind, weekly_cache[week_label], candidate_context
+            snapshot, daily_ind, weekly_cache[week_label], candidate_context,
+            progressing_wvr,
         ))
 
     # 기존 계약 유지: 유형 우선(BREAKOUT → RE_BREAKOUT → REBOUND),
@@ -1167,10 +1217,19 @@ def _detect_signal_point_in_time(df: pd.DataFrame, scan_context):
         detect_rebound_entry,
     )
     for detector in detectors:
-        for snapshot, daily_ind, weekly_ind, candidate_context in candidates:
+        for (snapshot, daily_ind, weekly_ind, candidate_context,
+             progressing_wvr) in candidates:
+            detector_kwargs = {
+                "include_latest": True,
+                "latest_only": True,
+            }
+            if detector is detect_stage2_breakout:
+                detector_kwargs.update({
+                    "use_volume_or": use_volume_or,
+                    "progressing_week_volume_ratio": progressing_wvr,
+                })
             sig = detector(
-                snapshot, weekly_ind, daily_ind,
-                include_latest=True, latest_only=True,
+                snapshot, weekly_ind, daily_ind, **detector_kwargs
             )
             if sig is None:
                 continue
@@ -1196,8 +1255,13 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
     """
     if scan_context is not None:
         from scanner.time_context import normalize_close_series, normalize_ohlcv
-        df = normalize_ohlcv(df, scan_context)
-        benchmark_close = normalize_close_series(benchmark_close, scan_context)
+        if not _matches_scan_context(df, scan_context):
+            df = normalize_ohlcv(df, scan_context)
+        if (benchmark_close is not None
+                and not _matches_scan_context(benchmark_close, scan_context)):
+            benchmark_close = normalize_close_series(
+                benchmark_close, scan_context
+            )
         if df.attrs.get("data_status") != "FINAL":
             return None
 
@@ -1285,6 +1349,9 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
         strict_slope30w            = round(weekly_at_signal["slope30w"],   6)
         wvr_sig                    = weekly_at_signal.get("weekly_volume_ratio")
         strict_weekly_volume_ratio = float(wvr_sig) if wvr_sig is not None else None
+    strict_breakout_weekly_volume_ratio = sig.get(
+        "breakout_weekly_volume_ratio", strict_weekly_volume_ratio
+    )
 
     # ── Mansfield RS (v4) + legacy ratio RS — signal 시점까지의 시리즈로 산출 ──
     rs_value, rs_trend = (None, None)
@@ -1321,6 +1388,16 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
 
     # warning_flags 축적
     warning_flags: List[str] = list(sig.get("warning_flags") or [])
+    benchmark_status = (
+        benchmark_close.attrs.get("data_status", "FINAL")
+        if benchmark_close is not None else "INSUFFICIENT_DATA"
+    )
+    if benchmark_close is not None and benchmark_status != "FINAL":
+        warning_flags.append(
+            "BENCHMARK_STALE"
+            f"(last={benchmark_close.attrs.get('last_bar_date')},"
+            f" sessions={benchmark_close.attrs.get('staleness_sessions')})"
+        )
     if rs_value is not None and rs_value < 0:
         warning_flags.append(f"Mansfield RS < 0 ({rs_value:+.1f})")
     if rs_trend == "FALLING":
@@ -1358,6 +1435,15 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
         "signal_quality":  qual,
         "rs_passed":       (rs_value is not None and rs_value >= 0.0),
         "warning_flags":   warning_flags,
+        "benchmark_data_status": benchmark_status,
+        "benchmark_last_bar_date": (
+            benchmark_close.attrs.get("last_bar_date")
+            if benchmark_close is not None else None
+        ),
+        "benchmark_staleness_sessions": (
+            benchmark_close.attrs.get("staleness_sessions")
+            if benchmark_close is not None else None
+        ),
         # ── Strict Weinstein filter ──
         # stop_loss            : Phase 2 — compute_stop_loss() 로 계산 (price 미만 후보 없으면 None)
         # rs_zero_crossed      : Phase 2 — detect_rs_zero_cross() (벤치마크 없으면 None)
@@ -1380,6 +1466,8 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
         "strict_sma30w":              strict_sma30w,
         "strict_slope30w":            strict_slope30w,
         "strict_weekly_volume_ratio": strict_weekly_volume_ratio,
+        "strict_breakout_weekly_volume_ratio": strict_breakout_weekly_volume_ratio,
+        "breakout_volume_rule":       sig.get("breakout_volume_rule", "AND"),
     }
     if weekly_ind is not None:
         # 공개 필드 — last-bar 기준 (display/persist 의미 보존)
@@ -1443,7 +1531,8 @@ def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
                       weekly_df: Optional[pd.DataFrame] = None,
                       benchmark_close: Optional[pd.Series] = None,
                       scan_context=None,
-                      current_price: Optional[float] = None) -> Optional[dict]:
+                      current_price: Optional[float] = None,
+                      quote_status: Optional[str] = None) -> Optional[dict]:
     """감시 종목 매도 시그널 체크 (severity: HIGH / MEDIUM / LOW).
 
     옵션 인자 weekly_df / benchmark_close 가 제공되면 30주 SMA 붕괴/슬로프
@@ -1451,10 +1540,20 @@ def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
     그대로 유지하므로 Phase 1 단독 머지 시 호출부 회귀가 없다.
     """
     if scan_context is not None:
-        from scanner.time_context import normalize_close_series, normalize_ohlcv
-        df = normalize_ohlcv(df, scan_context)
-        benchmark_close = normalize_close_series(benchmark_close, scan_context)
-        weekly_df = to_weekly_ohlcv(df, scan_context)
+        from scanner.time_context import (
+            finalize_weekly_ohlcv, normalize_close_series, normalize_ohlcv,
+        )
+        if not _matches_scan_context(df, scan_context):
+            df = normalize_ohlcv(df, scan_context)
+        if (benchmark_close is not None
+                and not _matches_scan_context(benchmark_close, scan_context)):
+            benchmark_close = normalize_close_series(
+                benchmark_close, scan_context
+            )
+        if weekly_df is None:
+            weekly_df = to_weekly_ohlcv(df, scan_context)
+        elif not _matches_scan_context(weekly_df, scan_context):
+            weekly_df = finalize_weekly_ohlcv(weekly_df, scan_context)
         if df.attrs.get("data_status") != "FINAL":
             return None
 
@@ -1539,5 +1638,7 @@ def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
                 "last_bar_date", df.index[-1].date().isoformat()
             ),
             "staleness_sessions": df.attrs.get("staleness_sessions", 0),
+            "quote_status": quote_status or "FINAL",
+            "price_is_intraday": quote_status == "INTRADAY",
         })
     return result

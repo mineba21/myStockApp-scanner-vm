@@ -1016,8 +1016,8 @@ class TestStage2BreakoutV4:
         if res is not None:
             assert res["signal_type"] != "BREAKOUT", "일봉 거래량 미달인데 BREAKOUT 발생"
 
-    def test_v4_daily_volume_can_confirm_when_weekly_volume_is_low(self):
-        """일봉 3배 또는 완료 주봉 2배 중 일봉 조건만으로도 통과."""
+    def test_legacy_requires_daily_and_weekly_volume(self):
+        """legacy_v4는 일봉만 통과해도 BREAKOUT으로 완화되지 않는다."""
         from scanner.weinstein import analyze_stock
 
         # 일봉 ratio 는 통과시키되 주봉 합이 2.0x 미만이 되도록 spike 크기 조절
@@ -1025,9 +1025,8 @@ class TestStage2BreakoutV4:
         df = self._stage2_setup(breakout_vol=1_900_000)
         res = analyze_stock(df, "TEST", "테스트", "US")
 
-        assert res is not None
-        assert res["signal_type"] == "BREAKOUT"
-        assert res["volume_ratio"] >= 3.0
+        if res is not None:
+            assert res["signal_type"] != "BREAKOUT"
 
     def test_monday_breakout_uses_daily_confirmation_with_scan_context(self):
         """월요일에는 이전 완료 주가 조용해도 일봉 3배로 돌파가 살아야 함."""
@@ -1036,7 +1035,10 @@ class TestStage2BreakoutV4:
         from scanner.weinstein import analyze_stock
 
         df = self._stage2_setup(breakout_vol=6_000_000)
-        context = ScanContext.create("US", "2026-08-24T20:16:00Z")
+        context = ScanContext.create(
+            "US", "2026-08-24T20:16:00Z",
+            strategy_version="weinstein_breakout_v1",
+        )
         calendar = xcals.get_calendar("XNYS")
         end_pos = calendar.sessions.get_loc(pd.Timestamp("2026-08-24"))
         sessions = calendar.sessions[end_pos - len(df) + 1:end_pos + 1]
@@ -1048,6 +1050,7 @@ class TestStage2BreakoutV4:
         assert res["signal_type"] == "BREAKOUT"
         assert res["volume_ratio"] >= 3.0
         assert res["strict_weekly_volume_ratio"] < 2.0
+        assert res["breakout_volume_rule"] == "OR"
 
     def test_v4_rejects_wide_base(self):
         """폭 > 15% wide base → BREAKOUT 차단."""

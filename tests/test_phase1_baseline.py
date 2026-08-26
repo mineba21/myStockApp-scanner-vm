@@ -3,6 +3,7 @@
 import importlib
 from datetime import date, timedelta
 
+import exchange_calendars as xcals
 import numpy as np
 import pandas as pd
 import pytest
@@ -69,6 +70,15 @@ def test_strategy_rollout_defaults_are_legacy_and_off(monkeypatch):
     assert reloaded.WEINSTEIN_V1_MODE == "off"
 
 
+def test_blank_strategy_rollout_mode_is_treated_as_off(monkeypatch):
+    monkeypatch.setenv("WEINSTEIN_V1_MODE", "   ")
+
+    import config
+
+    reloaded = importlib.reload(config)
+    assert reloaded.WEINSTEIN_V1_MODE == "off"
+
+
 def test_strategy_rollout_rejects_unknown_mode(monkeypatch):
     monkeypatch.setenv("WEINSTEIN_V1_MODE", "unexpected")
 
@@ -79,3 +89,35 @@ def test_strategy_rollout_rejects_unknown_mode(monkeypatch):
 
     monkeypatch.setenv("WEINSTEIN_V1_MODE", "off")
     importlib.reload(config)
+
+
+@pytest.mark.parametrize(
+    ("market", "ticker", "price_scale", "calendar_name", "as_of"),
+    (
+        ("KR", "000000", 1_000.0, "XKRX", "2026-08-25T06:46:00Z"),
+        ("US", "TEST", 1.0, "XNYS", "2026-08-25T20:16:00Z"),
+    ),
+)
+def test_pit_legacy_fixture_uses_real_exchange_sessions(
+        market, ticker, price_scale, calendar_name, as_of):
+    from scanner.time_context import ScanContext
+    from scanner.weinstein import analyze_stock
+
+    df = _make_breakout_df(price_scale)
+    context = ScanContext.create(
+        market, as_of, strategy_version="legacy_v4"
+    )
+    calendar = xcals.get_calendar(calendar_name)
+    end = calendar.sessions.get_loc(pd.Timestamp(context.session_date))
+    sessions = calendar.sessions[end - len(df) + 1:end + 1]
+    df.index = pd.DatetimeIndex(sessions).tz_localize(None)
+
+    result = analyze_stock(
+        df, ticker, "PIT Phase 1 baseline", market, scan_context=context
+    )
+
+    assert result is not None
+    assert result["signal_type"] == "BREAKOUT"
+    assert result["strategy_version"] == "legacy_v4"
+    assert result["breakout_volume_rule"] == "AND"
+    assert result["last_bar_date"] == context.session_date.isoformat()

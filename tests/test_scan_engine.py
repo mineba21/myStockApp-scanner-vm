@@ -891,3 +891,51 @@ class TestStrictFilterFlow:
 
         assert len(telegram_messages) == 1
         assert slack_messages == []
+
+
+def test_kr_scan_reports_stale_and_insufficient_tickers(monkeypatch):
+    from scanner import kr_stocks, scan_engine, weinstein
+    from scanner.time_context import ScanContext
+
+    tickers = [
+        {"ticker": "FINAL", "name": "Final"},
+        {"ticker": "STALE", "name": "Stale"},
+        {"ticker": "MISSING", "name": "Missing"},
+    ]
+    idx = pd.bdate_range("2025-01-02", periods=230)
+    values = [100.0 + i * 0.1 for i in range(len(idx))]
+
+    def frame(status):
+        result = pd.DataFrame({
+            "Open": values,
+            "High": [value + 1 for value in values],
+            "Low": [value - 1 for value in values],
+            "Close": values,
+            "Volume": [1_000_000] * len(values),
+        }, index=idx)
+        result.attrs["data_status"] = status
+        return result
+
+    monkeypatch.setattr(
+        kr_stocks, "get_all_kr_tickers", lambda **kwargs: tickers
+    )
+    monkeypatch.setattr(
+        kr_stocks, "get_kr_ohlcv",
+        lambda ticker, **kwargs: (
+            None if ticker == "MISSING"
+            else frame("STALE" if ticker == "STALE" else "FINAL")
+        ),
+    )
+    monkeypatch.setattr(weinstein, "analyze_stock", lambda *a, **k: None)
+    context = ScanContext.create("KR", "2026-08-25T06:46:00Z")
+
+    signals, count, quality = scan_engine._scan_kr(
+        None, scan_context=context
+    )
+
+    assert signals == []
+    assert count == 2
+    assert quality["stale_count"] == 1
+    assert quality["stale_tickers"] == ["STALE"]
+    assert quality["insufficient_count"] == 1
+    assert quality["insufficient_tickers"] == ["MISSING"]
