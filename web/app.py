@@ -103,7 +103,14 @@ async def start_scan(background_tasks: BackgroundTasks, market: str = "ALL", uni
         return JSONResponse({"status": "already_running", "message": "스캔이 이미 진행 중입니다."})
 
     def _run():
-        run_scan(market=market, universe=universe, triggered_by="manual")
+        result = run_scan(
+            market=market, universe=universe, triggered_by="manual"
+        )
+        logger.info(
+            "수동 스캔 종료: status=%s scanned=%s signals=%s",
+            result.get("status"), result.get("total_scanned"),
+            result.get("signals_found"),
+        )
 
     background_tasks.add_task(_run)
     return {"status": "started", "market": market, "message": f"{market} 스캔을 시작했습니다."}

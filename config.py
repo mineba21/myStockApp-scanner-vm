@@ -14,6 +14,11 @@ SLACK_WEBHOOK_URL  = os.getenv("SLACK_WEBHOOK_URL", "")
 STRATEGY_VERSION   = os.getenv("STRATEGY_VERSION", "legacy_v4").strip() or "legacy_v4"
 WEINSTEIN_V1_MODE  = os.getenv("WEINSTEIN_V1_MODE", "off").strip().lower() or "off"
 
+if STRATEGY_VERSION not in {"legacy_v4", "weinstein_breakout_v1"}:
+    raise ValueError(
+        "STRATEGY_VERSION must be one of: legacy_v4, weinstein_breakout_v1"
+    )
+
 if WEINSTEIN_V1_MODE not in {"off", "shadow", "primary"}:
     raise ValueError(
         "WEINSTEIN_V1_MODE must be one of: off, shadow, primary"

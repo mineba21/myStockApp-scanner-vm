@@ -171,6 +171,17 @@ def run_scan(market: str = "ALL", universe: str = None,
         market_stages = get_market_stages(scan_contexts=scan_contexts)
         kr_condition  = market_stages.get("KR_condition")
         us_condition  = market_stages.get("US_condition")
+        market_filter_quality = {
+            "KR": _market_filter_quality("KR", kr_condition),
+            "US": _market_filter_quality("US", us_condition),
+        }
+        for code in ("KR", "US"):
+            block = market_filter_quality[code]
+            if (market in (code, "ALL") and block["buy_blocked"]):
+                logger.warning(
+                    "[%s] BUY 스캔 차단: condition=%s reason=%s",
+                    code, block["condition"], block["reason"],
+                )
 
         # 벤치마크 로드 (RS 계산용)
         holding_markets = {
@@ -207,6 +218,17 @@ def run_scan(market: str = "ALL", universe: str = None,
             scan_contexts=scan_contexts,
         )
 
+        data_quality = {
+            "stocks": stock_data_quality,
+            "market": market_stages.get("data_quality", {}),
+            "market_filter": market_filter_quality,
+            "benchmarks": {
+                "KR": _series_data_quality(kr_bench),
+                "US": _series_data_quality(us_bench),
+            },
+        }
+        _log_scan_data_quality(data_quality)
+
         if buy_signals or sell_signals:
             _notify(
                 buy_signals,
@@ -225,14 +247,7 @@ def run_scan(market: str = "ALL", universe: str = None,
                 "signals_found": len(buy_signals),
                 "sell_signals": len(sell_signals),
                 "holding_checks": holding_checks,
-                "data_quality": {
-                    "stocks": stock_data_quality,
-                    "market": market_stages.get("data_quality", {}),
-                    "benchmarks": {
-                        "KR": _series_data_quality(kr_bench),
-                        "US": _series_data_quality(us_bench),
-                    },
-                },
+                "data_quality": data_quality,
                 "as_of": scan_contexts["KR"].as_of.isoformat(),
                 "session_dates": {
                     code: ctx.session_date.isoformat()
@@ -276,9 +291,12 @@ def _process_signal(db, res: dict, market_label: str,
 
     # 1) legacy market filter — CAUTION 표시용. BEAR fast-path 는 비용 절약.
     allow, flag = _get_market_filter_decision(market_condition, res["signal_type"])
-    if not allow and not STRICT_PERSIST_REJECTED:
-        logger.debug(f"[{market_label}] {ticker} legacy market filter: {flag}")
-        return False
+    if not allow:
+        res["_market_blocked_reason"] = flag
+        log_fn = logger.warning if market_condition == "UNKNOWN" else logger.debug
+        log_fn("[%s] %s BUY 후보 차단: %s", market_label, ticker, flag)
+        if not STRICT_PERSIST_REJECTED:
+            return False
     if flag:
         res["_market_flag"] = flag
 
@@ -323,18 +341,24 @@ def _scan_kr(db, benchmark_close=None, market_condition=None,
             quality["insufficient_count"] += 1
             quality["insufficient_tickers"].append(info["ticker"])
             continue
-        count += 1
         if (scan_context is not None
                 and df.attrs.get("data_status") != "FINAL"):
             quality["stale_count"] += 1
             quality["stale_tickers"].append(info["ticker"])
             continue
+        count += 1
         res = analyze_stock(df, info["ticker"], info["name"], "KR",
                             benchmark_close, market_condition,
                             scan_context=scan_context)
-        if res and _process_signal(db, res, "KR",
-                                   market_condition, benchmark_close):
-            signals.append(res)
+        if res:
+            accepted = _process_signal(
+                db, res, "KR", market_condition, benchmark_close
+            )
+            if res.get("_market_blocked_reason"):
+                quality["market_blocked_count"] += 1
+                quality["market_blocked_tickers"].append(info["ticker"])
+            if accepted:
+                signals.append(res)
         time.sleep(0.05)
 
     quality["scanned_count"] = count
@@ -359,18 +383,24 @@ def _scan_us(db, universe, benchmark_close=None, market_condition=None,
             quality["insufficient_count"] += 1
             quality["insufficient_tickers"].append(info["ticker"])
             continue
-        count += 1
         if (scan_context is not None
                 and df.attrs.get("data_status") != "FINAL"):
             quality["stale_count"] += 1
             quality["stale_tickers"].append(info["ticker"])
             continue
+        count += 1
         res = analyze_stock(df, info["ticker"], info["name"], "US",
                             benchmark_close, market_condition,
                             scan_context=scan_context)
-        if res and _process_signal(db, res, "US",
-                                   market_condition, benchmark_close):
-            signals.append(res)
+        if res:
+            accepted = _process_signal(
+                db, res, "US", market_condition, benchmark_close
+            )
+            if res.get("_market_blocked_reason"):
+                quality["market_blocked_count"] += 1
+                quality["market_blocked_tickers"].append(info["ticker"])
+            if accepted:
+                signals.append(res)
 
     quality["scanned_count"] = count
     return signals, count, quality
@@ -384,6 +414,8 @@ def _new_scan_quality(requested_count):
         "stale_tickers": [],
         "insufficient_count": 0,
         "insufficient_tickers": [],
+        "market_blocked_count": 0,
+        "market_blocked_tickers": [],
     }
 
 
@@ -395,6 +427,34 @@ def _series_data_quality(series):
         "last_bar_date": series.attrs.get("last_bar_date"),
         "staleness_sessions": series.attrs.get("staleness_sessions", 0),
     }
+
+
+def _market_filter_quality(market, condition):
+    allow, reason = _get_market_filter_decision(condition, "BREAKOUT")
+    return {
+        "market": market,
+        "condition": condition,
+        "buy_blocked": not allow,
+        "reason": reason,
+    }
+
+
+def _log_scan_data_quality(data_quality):
+    """Persist scan observability even when API/scheduler discards the result."""
+    logger.info(
+        "스캔 데이터 품질: %s",
+        json.dumps(data_quality, ensure_ascii=False, default=str),
+    )
+    for market, quality in data_quality.get("stocks", {}).items():
+        if quality.get("stale_count") or quality.get("insufficient_count"):
+            logger.warning(
+                "[%s] 종목 데이터 제외: stale=%s %s insufficient=%s %s",
+                market,
+                quality.get("stale_count", 0),
+                quality.get("stale_tickers", []),
+                quality.get("insufficient_count", 0),
+                quality.get("insufficient_tickers", []),
+            )
 
 
 def _fetch_position_frames(market, ticker, scan_context=None):
@@ -450,10 +510,9 @@ def _fetch_position_frames(market, ticker, scan_context=None):
     )
     current_price = float(observed["Close"].iloc[-1])
     is_intraday = quote_date > scan_context.session_date
-    is_current_session = quote_date >= expected_quote_date
     if is_intraday:
         quote_status = "INTRADAY"
-    elif is_current_session:
+    elif quote_date >= scan_context.session_date:
         quote_status = "FINAL"
     else:
         quote_status = "FINAL_FALLBACK"
@@ -528,7 +587,7 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
 
     counts = {"total": len(holdings), "SELL_REQUIRED": 0, "REVIEW": 0,
               "CAUTION": 0, "HOLD": 0, "CHECK_FAILED": 0,
-              "QUOTE_FALLBACK": 0, "quote_fallback_tickers": []}
+              "QUOTE_FALLBACK": 0}
     status_by_severity = {
         "HIGH": "SELL_REQUIRED",
         "MEDIUM": "REVIEW",
@@ -554,7 +613,12 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
                 raise ValueError("사용 가능한 최근 종가가 없습니다")
             if quote_meta.get("quote_status") == "FINAL_FALLBACK":
                 counts["QUOTE_FALLBACK"] += len(rows)
-                counts["quote_fallback_tickers"].append(ticker)
+                logger.warning(
+                    "보유종목 확정 종가 지연: market=%s ticker=%s "
+                    "quote=%s expected_final=%s",
+                    market, ticker, quote_meta.get("quote_date"),
+                    context.session_date.isoformat() if context else None,
+                )
             weekly_df = (to_weekly_ohlcv(df) if context is None else
                          to_weekly_ohlcv(df, context))
             if weekly_df is None or len(weekly_df) == 0:

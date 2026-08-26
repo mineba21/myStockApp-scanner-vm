@@ -79,6 +79,18 @@ def test_blank_strategy_rollout_mode_is_treated_as_off(monkeypatch):
     assert reloaded.WEINSTEIN_V1_MODE == "off"
 
 
+def test_strategy_version_rejects_unknown_value(monkeypatch):
+    monkeypatch.setenv("STRATEGY_VERSION", "weinstein-breakout-v1")
+
+    import config
+
+    with pytest.raises(ValueError, match="legacy_v4, weinstein_breakout_v1"):
+        importlib.reload(config)
+
+    monkeypatch.setenv("STRATEGY_VERSION", "legacy_v4")
+    importlib.reload(config)
+
+
 def test_strategy_rollout_rejects_unknown_mode(monkeypatch):
     monkeypatch.setenv("WEINSTEIN_V1_MODE", "unexpected")
 

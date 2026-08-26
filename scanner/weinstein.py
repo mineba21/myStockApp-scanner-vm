@@ -1202,7 +1202,11 @@ def _detect_signal_point_in_time(df: pd.DataFrame, scan_context):
             if len(prior_weekly_volumes) >= 5:
                 prior_average = float(prior_weekly_volumes.iloc[-10:].mean())
                 if prior_average > 0:
-                    progressing_wvr = current_week_volume / prior_average
+                    # legacy compute_weekly_indicators()가 게이트 전에 2자리로
+                    # 반올림하므로 PIT 경로도 경계값 판정을 동일하게 맞춘다.
+                    progressing_wvr = round(
+                        current_week_volume / prior_average, 2
+                    )
 
         candidates.append((
             snapshot, daily_ind, weekly_cache[week_label], candidate_context,

@@ -231,14 +231,14 @@ def test_missing_intraday_quote_uses_final_close_fallback(db, monkeypatch):
     holding = db.query(Holding).filter(Holding.ticker == "005930").one()
     assert captured == {
         "current_price": 120.0,
-        "quote_status": "FINAL_FALLBACK",
+        "quote_status": "FINAL",
     }
     assert holding.current_price == 120.0
     assert holding.price_updated_at is not None
     assert holding.sell_status == "HOLD"
     assert counts["CHECK_FAILED"] == 0
-    assert counts["QUOTE_FALLBACK"] == 1
-    assert counts["quote_fallback_tickers"] == ["005930"]
+    assert counts["QUOTE_FALLBACK"] == 0
+    assert all(isinstance(value, int) for value in counts.values())
 
 
 def test_kr_open_scan_uses_previous_close_until_intraday_quote_arrives(
@@ -278,7 +278,36 @@ def test_kr_open_scan_uses_previous_close_until_intraday_quote_arrives(
 
     holding = db.query(Holding).filter(Holding.ticker == "005930").one()
     assert captured["current_price"] == 120.0
-    assert captured["quote_status"] == "FINAL_FALLBACK"
+    assert captured["quote_status"] == "FINAL"
     assert holding.sell_status == "HOLD"
     assert counts["CHECK_FAILED"] == 0
-    assert counts["QUOTE_FALLBACK"] == 1
+    assert counts["QUOTE_FALLBACK"] == 0
+
+
+def test_quote_older_than_completed_session_is_true_fallback(monkeypatch):
+    from scanner import kr_stocks, scan_engine
+    from scanner.time_context import ScanContext
+
+    context = ScanContext.create("KR", "2026-08-25T06:46:00Z")
+    sessions = xcals.get_calendar("XKRX").sessions_in_range(
+        "2025-08-01", "2026-08-24"
+    )
+    idx = pd.DatetimeIndex(sessions).tz_localize(None)
+    raw = pd.DataFrame({
+        "Open": [120.0] * len(idx),
+        "High": [121.0] * len(idx),
+        "Low": [119.0] * len(idx),
+        "Close": [120.0] * len(idx),
+        "Volume": [1_000_000] * len(idx),
+    }, index=idx)
+    monkeypatch.setattr(
+        kr_stocks, "get_kr_ohlcv", lambda ticker, **kwargs: raw
+    )
+
+    _, current_price, quote_meta = scan_engine._fetch_position_frames(
+        "KR", "005930", context
+    )
+
+    assert current_price == 120.0
+    assert quote_meta["quote_date"] == "2026-08-24"
+    assert quote_meta["quote_status"] == "FINAL_FALLBACK"

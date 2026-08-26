@@ -934,8 +934,62 @@ def test_kr_scan_reports_stale_and_insufficient_tickers(monkeypatch):
     )
 
     assert signals == []
-    assert count == 2
+    assert count == 1
+    assert quality["scanned_count"] == 1
     assert quality["stale_count"] == 1
     assert quality["stale_tickers"] == ["STALE"]
     assert quality["insufficient_count"] == 1
     assert quality["insufficient_tickers"] == ["MISSING"]
+
+
+def test_unknown_market_block_is_visible_in_warning_and_metrics(
+        monkeypatch, caplog):
+    from scanner import scan_engine
+
+    monkeypatch.setattr(scan_engine, "_save", lambda *args, **kwargs: None)
+    caplog.set_level("WARNING", logger="scanner.scan_engine")
+    signal = {
+        "ticker": "TEST",
+        "name": "Test",
+        "signal_type": "BREAKOUT",
+    }
+
+    accepted = scan_engine._process_signal(
+        None, signal, "KR", "UNKNOWN", benchmark_close=None
+    )
+    quality = scan_engine._market_filter_quality("KR", "UNKNOWN")
+
+    assert accepted is False
+    assert signal["_market_blocked_reason"] == "시장 지수 데이터 부족"
+    assert quality == {
+        "market": "KR",
+        "condition": "UNKNOWN",
+        "buy_blocked": True,
+        "reason": "시장 지수 데이터 부족",
+    }
+    assert "BUY 후보 차단" in caplog.text
+
+
+def test_scan_data_quality_is_logged_for_discarding_callers(caplog):
+    from scanner.scan_engine import _log_scan_data_quality
+
+    quality = {
+        "stocks": {
+            "KR": {
+                "stale_count": 1,
+                "stale_tickers": ["STALE"],
+                "insufficient_count": 1,
+                "insufficient_tickers": ["MISSING"],
+            },
+        },
+        "market": {},
+        "market_filter": {},
+        "benchmarks": {},
+    }
+    caplog.set_level("INFO", logger="scanner.scan_engine")
+
+    _log_scan_data_quality(quality)
+
+    assert "스캔 데이터 품질" in caplog.text
+    assert "STALE" in caplog.text
+    assert "MISSING" in caplog.text

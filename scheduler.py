@@ -16,7 +16,12 @@ def _run():
     from scanner.scan_engine import run_scan
     logger.info("[스케줄러] 자동 스캔 시작")
     try:
-        run_scan(market="ALL", triggered_by="scheduler")
+        result = run_scan(market="ALL", triggered_by="scheduler")
+        logger.info(
+            "[스케줄러] 자동 스캔 종료: status=%s scanned=%s signals=%s",
+            result.get("status"), result.get("total_scanned"),
+            result.get("signals_found"),
+        )
     except Exception as e:
         logger.error(f"[스케줄러] 오류: {e}", exc_info=True)
 
