@@ -6,10 +6,10 @@ delay.  Weekly rows are retained only after the final exchange session of that
 calendar week has completed, including holiday-shortened weeks.
 """
 
+import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Union
-import warnings
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -34,9 +34,10 @@ def _as_utc(value: Optional[Union[datetime, pd.Timestamp]]) -> datetime:
         return datetime.now(timezone.utc)
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    else:
-        ts = ts.tz_convert("UTC")
+        raise ValueError(
+            "as_of must include an explicit timezone (for example, +09:00 or Z)"
+        )
+    ts = ts.tz_convert("UTC")
     return ts.to_pydatetime()
 
 
@@ -52,6 +53,31 @@ def _calendar(market: str):
         return xcals.get_calendar(_CALENDAR_NAMES[_market_code(market)])
 
 
+def _freshness_metadata(index: pd.DatetimeIndex, context: "ScanContext") -> dict:
+    """Describe whether the latest available row reaches the scan session."""
+    if len(index) == 0:
+        return {
+            "bar_status": "INSUFFICIENT_DATA",
+            "data_status": "INSUFFICIENT_DATA",
+            "last_bar_date": None,
+            "staleness_sessions": None,
+        }
+
+    last_bar_date = pd.Timestamp(index[-1]).date()
+    cal = _calendar(context.market)
+    sessions = cal.sessions_in_range(
+        pd.Timestamp(last_bar_date), pd.Timestamp(context.session_date)
+    )
+    staleness = max(len(sessions) - 1, 0)
+    status = "FINAL" if staleness == 0 else "STALE"
+    return {
+        "bar_status": status,
+        "data_status": status,
+        "last_bar_date": last_bar_date.isoformat(),
+        "staleness_sessions": staleness,
+    }
+
+
 def last_completed_session(
     market: str,
     as_of: Optional[Union[datetime, pd.Timestamp]] = None,
@@ -65,6 +91,21 @@ def last_completed_session(
     effective = pd.Timestamp(_as_utc(as_of)) - pd.Timedelta(minutes=delay_minutes)
     session = cal.minute_to_session(effective, direction="previous")
     if cal.session_close(session) > effective:
+        session = cal.previous_session(session)
+    return pd.Timestamp(session).date()
+
+
+def last_started_session(
+    market: str,
+    as_of: Optional[Union[datetime, pd.Timestamp]] = None,
+) -> date:
+    """Return the latest session that has opened by ``as_of``."""
+    code = _market_code(market)
+    utc_as_of = pd.Timestamp(_as_utc(as_of))
+    local_date = utc_as_of.tz_convert(_TIMEZONE_NAMES[code]).date()
+    cal = _calendar(code)
+    session = cal.date_to_session(pd.Timestamp(local_date), direction="previous")
+    if cal.session_open(session) > utc_as_of:
         session = cal.previous_session(session)
     return pd.Timestamp(session).date()
 
@@ -123,7 +164,14 @@ class ScanContext:
 def normalize_ohlcv(df: Optional[pd.DataFrame], context: ScanContext) -> pd.DataFrame:
     """Normalize daily index to local session dates and remove non-final rows."""
     if df is None or len(df) == 0:
-        return pd.DataFrame()
+        normalized = pd.DataFrame()
+        normalized.attrs.update(_freshness_metadata(normalized.index, context))
+        normalized.attrs.update({
+            "market": context.market,
+            "as_of": context.as_of.isoformat(),
+            "session_date": context.session_date.isoformat(),
+        })
+        return normalized
 
     required = ["Open", "High", "Low", "Close", "Volume"]
     missing = [column for column in required if column not in df.columns]
@@ -150,14 +198,12 @@ def normalize_ohlcv(df: Optional[pd.DataFrame], context: ScanContext) -> pd.Data
             [value in session_ns for value in normalized.index.asi8]
         ]
     normalized = normalized.dropna(how="any")
-    normalized.attrs.update(
-        {
-            "bar_status": "FINAL",
-            "market": context.market,
-            "as_of": context.as_of.isoformat(),
-            "session_date": context.session_date.isoformat(),
-        }
-    )
+    normalized.attrs.update(_freshness_metadata(normalized.index, context))
+    normalized.attrs.update({
+        "market": context.market,
+        "as_of": context.as_of.isoformat(),
+        "session_date": context.session_date.isoformat(),
+    })
     return normalized
 
 
@@ -168,7 +214,14 @@ def normalize_close_series(
     if series is None:
         return None
     if len(series) == 0:
-        return series.copy()
+        normalized = series.copy()
+        normalized.attrs.update(_freshness_metadata(normalized.index, context))
+        normalized.attrs.update({
+            "market": context.market,
+            "as_of": context.as_of.isoformat(),
+            "session_date": context.session_date.isoformat(),
+        })
+        return normalized
 
     normalized = series.copy()
     idx = pd.DatetimeIndex(pd.to_datetime(normalized.index))
@@ -189,6 +242,12 @@ def normalize_close_series(
         normalized = normalized.loc[
             [value in session_ns for value in normalized.index.asi8]
         ]
+    normalized.attrs.update(_freshness_metadata(normalized.index, context))
+    normalized.attrs.update({
+        "market": context.market,
+        "as_of": context.as_of.isoformat(),
+        "session_date": context.session_date.isoformat(),
+    })
     return normalized
 
 
@@ -221,9 +280,13 @@ def finalize_weekly_ohlcv(
     finalized.attrs.update(
         {
             "bar_status": "FINAL",
+            "data_status": "FINAL",
             "market": context.market,
             "as_of": context.as_of.isoformat(),
             "session_date": context.session_date.isoformat(),
+            "last_bar_date": (
+                finalized.index[-1].date().isoformat() if len(finalized) else None
+            ),
         }
     )
     return finalized

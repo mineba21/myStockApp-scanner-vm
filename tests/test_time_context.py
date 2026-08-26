@@ -3,16 +3,19 @@ from datetime import date
 
 import exchange_calendars as xcals
 import pandas as pd
+import pytest
 
 from scanner.time_context import (
     ScanContext,
     completed_week_label,
+    last_started_session,
     normalize_close_series,
     normalize_ohlcv,
 )
 from scanner.weinstein import (
     _build_indicators,
     _daily_vol_ratio,
+    _scan_offsets,
     classify_stage,
     compute_weekly_indicators,
     detect_base_pivot,
@@ -52,6 +55,17 @@ def test_close_delay_uses_last_final_session_for_both_markets():
     assert ScanContext.create("US", "2026-08-25T20:16:00Z").session_date == date(2026, 8, 25)
 
 
+def test_naive_as_of_is_rejected_instead_of_assumed_utc():
+    with pytest.raises(ValueError, match="explicit timezone"):
+        ScanContext.create("KR", "2026-08-25 15:00:00")
+
+
+def test_latest_started_session_distinguishes_open_and_preopen_markets():
+    assert last_started_session("KR", "2026-08-25T05:00:00Z") == date(2026, 8, 25)
+    # 22:00 KST is 09:00 ET during DST, before the NYSE 09:30 open.
+    assert last_started_session("US", "2026-08-25T13:00:00Z") == date(2026, 8, 24)
+
+
 def test_us_holiday_early_close_and_dst_are_calendar_driven():
     # 7/3 is the observed Independence Day holiday in 2026.
     holiday = ScanContext.create("US", "2026-07-03T22:00:00Z")
@@ -78,6 +92,33 @@ def test_daily_normalization_drops_future_weekend_and_holiday_rows():
 
     benchmark = normalize_close_series(raw["Close"], context)
     assert list(benchmark.index.date) == list(final.index.date)
+
+
+def test_stale_daily_data_is_not_labelled_final():
+    context = ScanContext.create("US", "2026-08-25T20:16:00Z")
+    idx = _session_index("US", "2026-08-10", "2026-08-21")
+    stale = normalize_ohlcv(_ohlcv(idx), context)
+
+    assert stale.attrs["bar_status"] == "STALE"
+    assert stale.attrs["data_status"] == "STALE"
+    assert stale.attrs["last_bar_date"] == "2026-08-21"
+    assert stale.attrs["staleness_sessions"] == 2
+
+
+def test_stale_daily_data_cannot_emit_a_current_buy_signal(monkeypatch):
+    from scanner import weinstein as module
+
+    context = ScanContext.create("US", "2026-08-25T20:16:00Z")
+    idx = _session_index("US", "2025-06-02", "2026-08-21")
+    frame = _ohlcv(idx, close=[80.0 + i * 0.1 for i in range(len(idx))])
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("stale data reached a signal detector")
+
+    monkeypatch.setattr(module, "detect_stage2_breakout", should_not_run)
+    assert module.analyze_stock(
+        frame, "TEST", "Test", "US", scan_context=context
+    ) is None
 
 
 def test_partial_week_is_excluded_but_holiday_short_week_is_final():
@@ -112,6 +153,13 @@ def test_evaluation_bar_is_excluded_from_volume_baselines_and_pivot():
     assert pivot["pivot_price"] < 150.0
 
 
+def test_latest_candidate_offsets_are_unique_and_flag_is_consistent():
+    assert list(_scan_offsets(20, include_latest=True, latest_only=False)) == list(range(7))
+    assert list(_scan_offsets(20, include_latest=False, latest_only=False)) == list(range(1, 7))
+    assert list(_scan_offsets(20, include_latest=True, latest_only=True)) == [0]
+    assert list(_scan_offsets(20, include_latest=False, latest_only=True)) == [1]
+
+
 def test_missing_weekly_history_is_not_silently_stage1():
     daily = {
         "cur_p": 100.0,
@@ -140,6 +188,70 @@ def test_us_replay_fetch_uses_as_of_history_window(monkeypatch):
     assert "period" not in captured
     assert captured["end"] == "2025-08-26"
     assert result.index[-1].date() == context.session_date
+
+
+def test_us_fetch_applies_minimum_length_after_normalization(monkeypatch):
+    from scanner import us_stocks
+
+    context = ScanContext.create("US", "2025-08-25T20:16:00Z")
+    # Raw provider frame is long enough, but only a small prefix is <= as_of.
+    idx = _session_index("US", "2025-08-01", "2025-11-15")
+    source = _ohlcv(idx)
+
+    class FakeTicker:
+        def history(self, **kwargs):
+            return source
+
+    monkeypatch.setattr(us_stocks.yf, "Ticker", lambda ticker: FakeTicker())
+    assert us_stocks.get_us_ohlcv("TEST", scan_context=context) is None
+
+
+def test_point_in_time_selection_preserves_type_priority_and_reuses_work(monkeypatch):
+    from scanner import weinstein as module
+
+    context = ScanContext.create("US", "2026-08-21T20:16:00Z")
+    idx = _session_index("US", "2025-07-01", "2026-08-21")
+    frame = _ohlcv(idx, close=[80.0 + i * 0.1 for i in range(len(idx))])
+    older_breakout_date = idx[-3].date()
+    newest_rebound_date = idx[-1].date()
+    calls = {"prepare": 0, "weekly": 0}
+
+    real_prepare = module._prepare_daily_indicators
+    real_weekly = module.compute_weekly_indicators
+
+    def counted_prepare(df):
+        calls["prepare"] += 1
+        return real_prepare(df)
+
+    def counted_weekly(df):
+        calls["weekly"] += 1
+        return real_weekly(df)
+
+    def breakout(snapshot, weekly_ind, daily_ind, **kwargs):
+        if snapshot.index[-1].date() == older_breakout_date:
+            return {"signal_type": "BREAKOUT",
+                    "signal_date": str(older_breakout_date)}
+        return None
+
+    def rebound(snapshot, weekly_ind, daily_ind, **kwargs):
+        if snapshot.index[-1].date() == newest_rebound_date:
+            return {"signal_type": "REBOUND",
+                    "signal_date": str(newest_rebound_date)}
+        return None
+
+    monkeypatch.setattr(module, "_prepare_daily_indicators", counted_prepare)
+    monkeypatch.setattr(module, "compute_weekly_indicators", counted_weekly)
+    monkeypatch.setattr(module, "detect_stage2_breakout", breakout)
+    monkeypatch.setattr(module, "detect_continuation_breakout", lambda *a, **k: None)
+    monkeypatch.setattr(module, "detect_rebound_entry", rebound)
+
+    signal, *_ = module._detect_signal_point_in_time(frame, context)
+
+    assert signal["signal_type"] == "BREAKOUT"
+    assert signal["signal_date"] == str(older_breakout_date)
+    assert calls["prepare"] == 1
+    # 금요일 기준 최근 7세션은 최대 3개의 완료 주 라벨에 걸칠 수 있다.
+    assert calls["weekly"] <= 3
 
 
 def test_analyze_stock_is_invariant_to_rows_after_as_of(monkeypatch):

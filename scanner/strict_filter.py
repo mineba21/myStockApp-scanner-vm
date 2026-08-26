@@ -264,9 +264,8 @@ def _check_volume(signal: Dict[str, Any],
                   reasons: List[str]) -> None:
     """Gate 5 — Breakout volume.
 
-    BREAKOUT 한정 — 일봉 ≥ ``BREAKOUT_DAILY_VOL_RATIO``,
-    주봉 ≥ ``BREAKOUT_WEEKLY_VOL_RATIO``. 주봉 비율이 None(데이터 부족)
-    이면 차단하지 않음 (Gate 3 의 weekly_data_missing 으로 흡수).
+    BREAKOUT 한정 — 일봉 ≥ ``BREAKOUT_DAILY_VOL_RATIO`` 또는 완료 주봉 ≥
+    ``BREAKOUT_WEEKLY_VOL_RATIO`` 중 하나를 만족하면 통과한다.
 
     ``volume_ratio`` 는 detect_* 가 신호 시점 비율을 반환하므로 그대로 사용.
     ``weekly_volume_ratio`` 는 last-bar 의 공개 필드 vs signal-date 스냅샷이
@@ -282,11 +281,15 @@ def _check_volume(signal: Dict[str, Any],
         return
 
     vol_ratio = signal.get("volume_ratio")
-    if vol_ratio is not None and vol_ratio < BREAKOUT_DAILY_VOL_RATIO:
-        reasons.append(BREAKOUT_DAILY_VOLUME)
-
     wvr = signal.get("strict_weekly_volume_ratio")
-    if wvr is not None and wvr < BREAKOUT_WEEKLY_VOL_RATIO:
+    daily_passed = (
+        vol_ratio is not None and vol_ratio >= BREAKOUT_DAILY_VOL_RATIO
+    )
+    weekly_passed = (
+        wvr is not None and wvr >= BREAKOUT_WEEKLY_VOL_RATIO
+    )
+    if not (daily_passed or weekly_passed):
+        reasons.append(BREAKOUT_DAILY_VOLUME)
         reasons.append(BREAKOUT_WEEKLY_VOLUME)
 
 

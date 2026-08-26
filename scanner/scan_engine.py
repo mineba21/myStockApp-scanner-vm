@@ -4,6 +4,8 @@ import logging
 from datetime import datetime
 from typing import Optional, Tuple
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
 
 
@@ -342,6 +344,60 @@ def _scan_us(db, universe, benchmark_close=None, market_condition=None,
     return signals, count
 
 
+def _fetch_position_frames(market, ticker, scan_context=None):
+    """Return finalized strategy bars plus the latest observed position price."""
+    if market == "KR":
+        from scanner.kr_stocks import get_kr_ohlcv as fetch_fn
+    else:
+        from scanner.us_stocks import get_us_ohlcv as fetch_fn
+
+    if scan_context is None:
+        raw_df = fetch_fn(ticker)
+        if raw_df is None or len(raw_df) == 0:
+            return None, None, None
+        return (
+            raw_df,
+            float(raw_df["Close"].iloc[-1]),
+            pd.Timestamp(raw_df.index[-1]).date(),
+        )
+
+    raw_df = fetch_fn(
+        ticker, scan_context=scan_context, final_only=False
+    )
+    if raw_df is None or len(raw_df) == 0:
+        return None, None, None
+
+    # Provider 일봉은 거래소 현지 세션 날짜 라벨이다. as_of 현지 날짜보다
+    # 뒤의 행이 섞여 들어오면 현재가에서도 제외한다.
+    observed = raw_df.copy().sort_index()
+    observed_idx = pd.DatetimeIndex(pd.to_datetime(observed.index))
+    if observed_idx.tz is not None:
+        observed_idx = observed_idx.tz_convert(
+            scan_context.timezone
+        ).tz_localize(None)
+    observed.index = observed_idx.normalize()
+    local_as_of_date = scan_context.as_of.astimezone(
+        scan_context.timezone
+    ).date()
+    observed = observed.loc[
+        observed.index <= pd.Timestamp(local_as_of_date)
+    ]
+    if len(observed) == 0:
+        return None, None, None
+
+    from scanner.time_context import last_started_session, normalize_ohlcv
+    strategy_df = normalize_ohlcv(observed, scan_context)
+    quote_date = observed.index[-1].date()
+    expected_quote_date = last_started_session(
+        market, scan_context.as_of
+    )
+    current_price = (
+        float(observed["Close"].iloc[-1])
+        if quote_date >= expected_quote_date else None
+    )
+    return strategy_df, current_price, quote_date
+
+
 def _check_watchlist(db, kr_bench=None, us_bench=None, scan_contexts=None):
     """감시목록 매도 시그널 체크.
 
@@ -351,20 +407,15 @@ def _check_watchlist(db, kr_bench=None, us_bench=None, scan_contexts=None):
     """
     from database.models import WatchList
     from scanner.weinstein import check_sell_signal, to_weekly_ohlcv
-    from scanner.kr_stocks import get_kr_ohlcv
-    from scanner.us_stocks import get_us_ohlcv
 
     items = db.query(WatchList).filter(WatchList.is_active == True).all()
     sells = []
     for w in items:
         try:
             context = (scan_contexts or {}).get(w.market)
-            if w.market == "KR":
-                df = (get_kr_ohlcv(w.ticker) if context is None else
-                      get_kr_ohlcv(w.ticker, scan_context=context))
-            else:
-                df = (get_us_ohlcv(w.ticker) if context is None else
-                      get_us_ohlcv(w.ticker, scan_context=context))
+            df, current_price, _ = _fetch_position_frames(
+                w.market, w.ticker, context
+            )
             if df is None:
                 continue
             weekly_df = (to_weekly_ohlcv(df) if context is None else
@@ -380,6 +431,7 @@ def _check_watchlist(db, kr_bench=None, us_bench=None, scan_contexts=None):
             }
             if context is not None:
                 sell_kwargs["scan_context"] = context
+                sell_kwargs["current_price"] = current_price
             sig = check_sell_signal(
                 df, w.ticker, w.name, w.market, **sell_kwargs
             )
@@ -395,8 +447,6 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
     from collections import defaultdict
     from database.models import Holding
     from scanner.weinstein import check_sell_signal, to_weekly_ohlcv
-    from scanner.kr_stocks import get_kr_ohlcv
-    from scanner.us_stocks import get_us_ohlcv
     from config import MA_PERIOD
 
     holdings = db.query(Holding).filter(
@@ -419,20 +469,27 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
         checked_at = datetime.utcnow()
         try:
             context = (scan_contexts or {}).get(market)
-            if market == "KR":
-                df = (get_kr_ohlcv(ticker) if context is None else
-                      get_kr_ohlcv(ticker, scan_context=context))
-            else:
-                df = (get_us_ohlcv(ticker) if context is None else
-                      get_us_ohlcv(ticker, scan_context=context))
+            df, current_price, quote_date = _fetch_position_frames(
+                market, ticker, context
+            )
             if df is None or len(df) < MA_PERIOD + 20:
                 raise ValueError("매도 판정에 필요한 시세 데이터가 부족합니다")
+            if context is not None and df.attrs.get("data_status") != "FINAL":
+                raise ValueError(
+                    f"최신 확정 시세가 없습니다 "
+                    f"(last={df.attrs.get('last_bar_date')}, "
+                    f"stale={df.attrs.get('staleness_sessions')})"
+                )
+            if current_price is None:
+                raise ValueError(
+                    f"현재가가 최신 거래 세션까지 갱신되지 않았습니다 "
+                    f"(last_quote={quote_date})"
+                )
             weekly_df = (to_weekly_ohlcv(df) if context is None else
                          to_weekly_ohlcv(df, context))
             if weekly_df is None or len(weekly_df) == 0:
                 weekly_df = None
             benchmark = kr_bench if market == "KR" else us_bench
-            current_price = float(df["Close"].iloc[-1])
 
             for holding in rows:
                 sell_kwargs = {
@@ -442,6 +499,7 @@ def _check_holdings(db, kr_bench=None, us_bench=None, scan_contexts=None):
                 }
                 if context is not None:
                     sell_kwargs["scan_context"] = context
+                    sell_kwargs["current_price"] = current_price
                 signal = check_sell_signal(
                     df, holding.ticker, holding.name, holding.market,
                     **sell_kwargs,

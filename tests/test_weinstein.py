@@ -601,6 +601,22 @@ class TestSellSignal:
         assert res is not None
         assert "손절가" in res["sell_reason"]
 
+    def test_intraday_price_can_trigger_stop_without_polluting_indicators(self):
+        """기술지표는 확정 봉, 손절·손익은 별도 장중 가격을 사용."""
+        from scanner.weinstein import check_sell_signal
+
+        df = _make_df([100.0] * 200, [500_000] * 200)
+        res = check_sell_signal(
+            df, "TEST", "테스트", "US",
+            buy_price=100.0, stop_loss=90.0, current_price=80.0,
+        )
+
+        assert res is not None
+        assert res["severity"] == "HIGH"
+        assert res["price"] == 80.0
+        assert res["ma150"] == 100.0
+        assert res["profit_pct"] == -20.0
+
     def test_no_sell_in_stage2(self):
         """Stage2 강세 중에는 SELL 시그널 없어야 함."""
         from scanner.weinstein import check_sell_signal
@@ -1000,8 +1016,8 @@ class TestStage2BreakoutV4:
         if res is not None:
             assert res["signal_type"] != "BREAKOUT", "일봉 거래량 미달인데 BREAKOUT 발생"
 
-    def test_v4_blocked_by_low_weekly_volume(self):
-        """주봉 거래량 < BREAKOUT_WEEKLY_VOL_RATIO(2.0x) → 신호 없음 (hard block)."""
+    def test_v4_daily_volume_can_confirm_when_weekly_volume_is_low(self):
+        """일봉 3배 또는 완료 주봉 2배 중 일봉 조건만으로도 통과."""
         from scanner.weinstein import analyze_stock
 
         # 일봉 ratio 는 통과시키되 주봉 합이 2.0x 미만이 되도록 spike 크기 조절
@@ -1009,8 +1025,29 @@ class TestStage2BreakoutV4:
         df = self._stage2_setup(breakout_vol=1_900_000)
         res = analyze_stock(df, "TEST", "테스트", "US")
 
-        if res is not None:
-            assert res["signal_type"] != "BREAKOUT", "주봉 거래량 미달인데 BREAKOUT 발생"
+        assert res is not None
+        assert res["signal_type"] == "BREAKOUT"
+        assert res["volume_ratio"] >= 3.0
+
+    def test_monday_breakout_uses_daily_confirmation_with_scan_context(self):
+        """월요일에는 이전 완료 주가 조용해도 일봉 3배로 돌파가 살아야 함."""
+        import exchange_calendars as xcals
+        from scanner.time_context import ScanContext
+        from scanner.weinstein import analyze_stock
+
+        df = self._stage2_setup(breakout_vol=6_000_000)
+        context = ScanContext.create("US", "2026-08-24T20:16:00Z")
+        calendar = xcals.get_calendar("XNYS")
+        end_pos = calendar.sessions.get_loc(pd.Timestamp("2026-08-24"))
+        sessions = calendar.sessions[end_pos - len(df) + 1:end_pos + 1]
+        df.index = pd.DatetimeIndex(sessions).tz_localize(None)
+
+        res = analyze_stock(df, "TEST", "테스트", "US", scan_context=context)
+
+        assert res is not None
+        assert res["signal_type"] == "BREAKOUT"
+        assert res["volume_ratio"] >= 3.0
+        assert res["strict_weekly_volume_ratio"] < 2.0
 
     def test_v4_rejects_wide_base(self):
         """폭 > 15% wide base → BREAKOUT 차단."""
@@ -1582,7 +1619,13 @@ class TestNoLookAhead:
         if res is None or res["signal_type"] != "BREAKOUT":
             pytest.skip("BREAKOUT 시그널이 5일 전에 발생하지 않음 (픽스처 의존)")
 
-        # 결과 rs_value 는 signal 시점(음수) 이지 last bar(양수) 이면 안 됨
+        # 결과 rs_value 는 실제 선택된 signal 시점 기준이어야 한다. 거래량 OR
+        # 규칙에서는 원래 spike 다음 날이 새 pivot 돌파로 선택될 수도 있으므로
+        # 고정 breakout_idx가 아니라 반환된 signal_date로 기대값을 계산한다.
+        actual_signal_date = pd.Timestamp(res["signal_date"])
+        rs_selected_view, _ = compute_relative_performance(
+            df["Close"].loc[:actual_signal_date], bench.loc[:actual_signal_date]
+        )
         assert res["rs_value"] is not None
         assert res["rs_value"] < 0, (
             f"analyze_stock 가 last bar RS 를 기록함 (look-ahead). "
@@ -1590,9 +1633,10 @@ class TestNoLookAhead:
             f"last_view={rs_last_bar}"
         )
         # 부호만 검증 — 정확한 수치는 cur_ratio/cur_sma 계산 미세차로 변동 가능
-        assert abs(res["rs_value"] - rs_sig_view) < 0.5, (
+        assert rs_selected_view is not None
+        assert abs(res["rs_value"] - rs_selected_view) < 0.5, (
             f"rs_value 가 signal 시점 RS 와 일치하지 않음. "
-            f"got={res['rs_value']}, expected≈{rs_sig_view}"
+            f"got={res['rs_value']}, expected≈{rs_selected_view}"
         )
 
     def test_rs_zero_cross_does_not_look_ahead(self):

@@ -9,7 +9,9 @@ logger = logging.getLogger(__name__)
 
 _cache: Dict = {}
 _cache_time: datetime = None
+_context_cache: Dict = {}
 CACHE_MINUTES = 60
+CONTEXT_CACHE_MAX_ENTRIES = 64
 
 US_INDICES = [
     {"ticker": "SPY",  "name": "S&P500"},
@@ -53,20 +55,59 @@ def get_market_stages(force: bool = False, scan_contexts=None) -> Dict:
         "updated_at": datetime.now().isoformat(),
     }
 
-    for idx in US_INDICES:
-        _analyze_index(idx, "US", get_us_ohlcv, MA_PERIOD, stage_of, _slope,
-                       result["US"], (scan_contexts or {}).get("US"))
-    for idx in KR_INDICES:
-        _analyze_index(idx, "KR", get_kr_ohlcv, MA_PERIOD, stage_of, _slope,
-                       result["KR"], (scan_contexts or {}).get("KR"))
+    market_specs = {
+        "US": (US_INDICES, US_SECTOR_ETFS, get_us_ohlcv),
+        "KR": (KR_INDICES, KR_SECTOR_ETFS, get_kr_ohlcv),
+    }
+    for market, (indices, sectors, fetch_fn) in market_specs.items():
+        context = (scan_contexts or {}).get(market)
+        cache_key = None
+        cached = None
+        if context is not None:
+            cache_key = (
+                market,
+                context.session_date.isoformat(),
+                context.strategy_version,
+            )
+            if not force:
+                cached = _context_cache.get(cache_key)
 
-    # 섹터 ETF 분석 (실패해도 무시)
-    for idx in US_SECTOR_ETFS:
-        _analyze_index(idx, "US", get_us_ohlcv, MA_PERIOD, stage_of, _slope,
-                       result["US_SECTORS"], (scan_contexts or {}).get("US"))
-    for idx in KR_SECTOR_ETFS:
-        _analyze_index(idx, "KR", get_kr_ohlcv, MA_PERIOD, stage_of, _slope,
-                       result["KR_SECTORS"], (scan_contexts or {}).get("KR"))
+        if cached is not None:
+            # 새 list 로 복사해 condition 계산/호출자 변경이 캐시를 오염시키지 않게 한다.
+            result[market] = [dict(item) for item in cached["indices"]]
+            result[f"{market}_SECTORS"] = [
+                dict(item) for item in cached["sectors"]
+            ]
+            continue
+
+        market_rows = []
+        sector_rows = []
+        for idx in indices:
+            _analyze_index(
+                idx, market, fetch_fn, MA_PERIOD, stage_of, _slope,
+                market_rows, context,
+            )
+        for idx in sectors:
+            _analyze_index(
+                idx, market, fetch_fn, MA_PERIOD, stage_of, _slope,
+                sector_rows, context,
+            )
+        result[market] = market_rows
+        result[f"{market}_SECTORS"] = sector_rows
+
+        cache_complete = (
+            len(market_rows) == len(indices)
+            and len(sector_rows) == len(sectors)
+        )
+        if cache_key is not None and cache_complete:
+            _context_cache.pop(cache_key, None)
+            _context_cache[cache_key] = {
+                "indices": [dict(item) for item in market_rows],
+                "sectors": [dict(item) for item in sector_rows],
+            }
+            while len(_context_cache) > CONTEXT_CACHE_MAX_ENTRIES:
+                oldest = next(iter(_context_cache))
+                _context_cache.pop(oldest)
 
     result["US_condition"] = _condition(result["US"])
     result["KR_condition"] = _condition(result["KR"])
@@ -88,7 +129,17 @@ def get_benchmark_close(market: str = "US", scan_context=None) -> "pd.Series | N
             from scanner.kr_stocks import get_kr_ohlcv
             df = (get_kr_ohlcv("069500") if scan_context is None
                   else get_kr_ohlcv("069500", scan_context=scan_context))
-        return df["Close"] if df is not None else None
+        if df is None:
+            return None
+        if scan_context is not None and df.attrs.get("data_status") != "FINAL":
+            logger.warning(
+                "벤치마크 최신 확정 봉 누락: market=%s last=%s stale=%s",
+                market,
+                df.attrs.get("last_bar_date"),
+                df.attrs.get("staleness_sessions"),
+            )
+            return None
+        return df["Close"]
     except Exception as e:
         logger.error(f"벤치마크 로드 실패: {e}")
         return None
@@ -103,6 +154,8 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list,
         df = (fetch_fn(idx["ticker"]) if scan_context is None
               else fetch_fn(idx["ticker"], scan_context=scan_context))
         if df is None or len(df) < MA_PERIOD:
+            return
+        if scan_context is not None and df.attrs.get("data_status") != "FINAL":
             return
         close = df["Close"]
         ma    = close.rolling(MA_PERIOD, min_periods=MA_PERIOD // 2).mean()

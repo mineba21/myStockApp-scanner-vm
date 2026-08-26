@@ -482,8 +482,8 @@ class TestBaseGate:
 # ══════════════════════════════════════════════════════════════════
 
 class TestVolumeGate:
-    def test_low_daily_volume_blocks_breakout(self, monkeypatch):
-        from scanner.strict_filter import _check_volume, BREAKOUT_DAILY_VOLUME
+    def test_weekly_volume_can_confirm_low_daily_volume(self, monkeypatch):
+        from scanner.strict_filter import _check_volume
         _force_strict_flag(monkeypatch, "STRICT_REQUIRE_BREAKOUT_VOLUME", True)
         _force_strict_flag(monkeypatch, "BREAKOUT_DAILY_VOL_RATIO",  3.0)
         _force_strict_flag(monkeypatch, "BREAKOUT_WEEKLY_VOL_RATIO", 2.0)
@@ -492,10 +492,10 @@ class TestVolumeGate:
         _check_volume({"signal_type": "BREAKOUT",
                        "volume_ratio": 1.5,
                        "strict_weekly_volume_ratio": 2.5}, reasons)
-        assert BREAKOUT_DAILY_VOLUME in reasons
+        assert reasons == []
 
-    def test_low_weekly_volume_blocks_breakout(self, monkeypatch):
-        from scanner.strict_filter import _check_volume, BREAKOUT_WEEKLY_VOLUME
+    def test_daily_volume_can_confirm_low_weekly_volume(self, monkeypatch):
+        from scanner.strict_filter import _check_volume
         _force_strict_flag(monkeypatch, "STRICT_REQUIRE_BREAKOUT_VOLUME", True)
         _force_strict_flag(monkeypatch, "BREAKOUT_DAILY_VOL_RATIO",  3.0)
         _force_strict_flag(monkeypatch, "BREAKOUT_WEEKLY_VOL_RATIO", 2.0)
@@ -504,6 +504,21 @@ class TestVolumeGate:
         _check_volume({"signal_type": "BREAKOUT",
                        "volume_ratio": 3.5,
                        "strict_weekly_volume_ratio": 1.0}, reasons)
+        assert reasons == []
+
+    def test_both_volume_confirmations_low_blocks_breakout(self, monkeypatch):
+        from scanner.strict_filter import (
+            _check_volume, BREAKOUT_DAILY_VOLUME, BREAKOUT_WEEKLY_VOLUME,
+        )
+        _force_strict_flag(monkeypatch, "STRICT_REQUIRE_BREAKOUT_VOLUME", True)
+        _force_strict_flag(monkeypatch, "BREAKOUT_DAILY_VOL_RATIO",  3.0)
+        _force_strict_flag(monkeypatch, "BREAKOUT_WEEKLY_VOL_RATIO", 2.0)
+
+        reasons = []
+        _check_volume({"signal_type": "BREAKOUT",
+                       "volume_ratio": 1.5,
+                       "strict_weekly_volume_ratio": 1.0}, reasons)
+        assert BREAKOUT_DAILY_VOLUME in reasons
         assert BREAKOUT_WEEKLY_VOLUME in reasons
 
     def test_volume_gate_skips_rebound(self, monkeypatch):
@@ -681,7 +696,8 @@ class TestApplyStrictFilter:
 
         # Market BEAR + RS 음수 + stop_loss 누락 + 거래량 부족
         sig = _full_passing_breakout_signal(
-            rs_value=-2.0, stop_loss=None, volume_ratio=0.5)
+            rs_value=-2.0, stop_loss=None, volume_ratio=0.5,
+            strict_weekly_volume_ratio=1.0)
         ctx = _full_passing_ctx(market_condition="BEAR")
 
         passed, reasons = apply_strict_filter(sig, ctx)

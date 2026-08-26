@@ -2,6 +2,7 @@
 import asyncio
 from datetime import date, datetime, timedelta
 
+import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from fastapi import HTTPException
@@ -149,3 +150,81 @@ def test_holding_fetch_failure_is_saved(db, monkeypatch):
     assert holding.sell_status == "CHECK_FAILED"
     assert counts["CHECK_FAILED"] == 1
     assert "확인하지 못했습니다" in holding.sell_reason
+
+
+def test_intraday_position_price_is_separate_from_final_strategy_bar(db, monkeypatch):
+    from scanner import kr_stocks, scan_engine, weinstein
+    from scanner.time_context import ScanContext
+
+    _buy(db, account_id=1, market="KR", ticker="005930", price=100)
+    context = ScanContext.create("KR", "2026-08-25T05:00:00Z")  # 14:00 KST
+    sessions = xcals.get_calendar("XKRX").sessions_in_range(
+        "2025-08-01", "2026-08-25"
+    )
+    idx = pd.DatetimeIndex(sessions).tz_localize(None)
+    values = [120.0] * len(idx)
+    values[-1] = 80.0  # 8/25 장중 관측가; 마지막 확정 세션은 8/24
+    raw = pd.DataFrame({
+        "Open": values,
+        "High": [value + 1 for value in values],
+        "Low": [value - 1 for value in values],
+        "Close": values,
+        "Volume": [1_000_000] * len(values),
+    }, index=idx)
+
+    monkeypatch.setattr(
+        kr_stocks, "get_kr_ohlcv", lambda ticker, **kwargs: raw
+    )
+    captured = {}
+
+    def fake_check(*args, **kwargs):
+        captured["strategy_last"] = float(args[0]["Close"].iloc[-1])
+        captured["current_price"] = kwargs.get("current_price")
+        return {"severity": "HIGH", "sell_reason": "장중 손절 테스트"}
+
+    monkeypatch.setattr(weinstein, "check_sell_signal", fake_check)
+    counts = scan_engine._check_holdings(
+        db, scan_contexts={"KR": context}
+    )
+
+    holding = db.query(Holding).filter(Holding.ticker == "005930").one()
+    assert captured["strategy_last"] == 120.0
+    assert captured["current_price"] == 80.0
+    assert holding.current_price == 80.0
+    assert holding.sell_status == "SELL_REQUIRED"
+    assert counts["SELL_REQUIRED"] == 1
+
+
+def test_missing_intraday_quote_does_not_overwrite_price_as_current(db, monkeypatch):
+    from scanner import kr_stocks, scan_engine
+    from scanner.time_context import ScanContext
+
+    _buy(db, account_id=1, market="KR", ticker="005930", price=100)
+    context = ScanContext.create("KR", "2026-08-25T05:00:00Z")  # 장중
+    sessions = xcals.get_calendar("XKRX").sessions_in_range(
+        "2025-08-01", "2026-08-24"
+    )
+    idx = pd.DatetimeIndex(sessions).tz_localize(None)
+    raw = pd.DataFrame({
+        "Open": [120.0] * len(idx),
+        "High": [121.0] * len(idx),
+        "Low": [119.0] * len(idx),
+        "Close": [120.0] * len(idx),
+        "Volume": [1_000_000] * len(idx),
+    }, index=idx)
+    monkeypatch.setattr(
+        kr_stocks, "get_kr_ohlcv", lambda ticker, **kwargs: raw
+    )
+    before = db.query(Holding).filter(Holding.ticker == "005930").one()
+    previous_price = before.current_price
+    previous_updated_at = before.price_updated_at
+
+    counts = scan_engine._check_holdings(
+        db, scan_contexts={"KR": context}
+    )
+
+    holding = db.query(Holding).filter(Holding.ticker == "005930").one()
+    assert holding.current_price == previous_price
+    assert holding.price_updated_at == previous_updated_at
+    assert holding.sell_status == "CHECK_FAILED"
+    assert counts["CHECK_FAILED"] == 1

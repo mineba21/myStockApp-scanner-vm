@@ -177,7 +177,7 @@ def get_all_us_tickers(universe: str = "sp500+nasdaq100") -> list:
 
 
 def get_us_ohlcv(ticker: str, period: str = "2y",
-                 scan_context=None) -> Optional[pd.DataFrame]:
+                 scan_context=None, final_only: bool = True) -> Optional[pd.DataFrame]:
     try:
         history_kwargs = {"period": period, "auto_adjust": True}
         if scan_context is not None:
@@ -191,13 +191,14 @@ def get_us_ohlcv(ticker: str, period: str = "2y",
                 "auto_adjust": True,
             }
         df = yf.Ticker(ticker).history(**history_kwargs)
-        if df is None or len(df) < 50: return None
+        if df is None:
+            return None
         df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
         df.index = pd.to_datetime(df.index).tz_localize(None)
-        if scan_context is not None:
+        if scan_context is not None and final_only:
             from scanner.time_context import normalize_ohlcv
             df = normalize_ohlcv(df, scan_context)
-        return df
+        return df if len(df) >= 50 else None
     except Exception as e:
         logger.debug(f"US {ticker} 실패: {e}"); return None
 

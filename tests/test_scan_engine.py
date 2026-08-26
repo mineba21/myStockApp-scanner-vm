@@ -786,8 +786,10 @@ class TestStrictFilterFlow:
 
         db  = self._fresh_db()
         # 여러 게이트 동시 실패 — RS 음수 + 거래량 부족 + stop 없음
-        sig = self._passing_signal(rs_value=-3.0, volume_ratio=0.5,
-                                   stop_loss=None)
+        sig = self._passing_signal(
+            rs_value=-3.0, volume_ratio=0.5,
+            strict_weekly_volume_ratio=1.0, stop_loss=None,
+        )
         try:
             _process_signal(db, sig, "US",
                             market_condition="BULL",

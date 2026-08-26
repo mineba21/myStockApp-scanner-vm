@@ -106,13 +106,13 @@ def get_all_kr_tickers(market_filter: str = "kospi+kosdaq") -> list:
 
 
 def get_kr_ohlcv(ticker: str, period_years: int = 2,
-                 scan_context=None) -> Optional[pd.DataFrame]:
+                 scan_context=None, final_only: bool = True) -> Optional[pd.DataFrame]:
     end = (scan_context.as_of.astimezone(scan_context.timezone).replace(tzinfo=None)
            if scan_context is not None else datetime.now())
     start = end - timedelta(days=period_years * 365)
 
     def _finalize(frame: pd.DataFrame) -> pd.DataFrame:
-        if scan_context is None:
+        if scan_context is None or not final_only:
             return frame
         from scanner.time_context import normalize_ohlcv
         return normalize_ohlcv(frame, scan_context)
@@ -124,7 +124,9 @@ def get_kr_ohlcv(ticker: str, period_years: int = 2,
         if df is not None and len(df) > 50:
             df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
             df.index = pd.to_datetime(df.index)
-            return _finalize(df)
+            df = _finalize(df)
+            if len(df) > 50:
+                return df
     except Exception:
         pass
 
@@ -137,7 +139,9 @@ def get_kr_ohlcv(ticker: str, period_years: int = 2,
                                     "종가": "Close", "거래량": "Volume"})
             df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
             df.index = pd.to_datetime(df.index)
-            return _finalize(df)
+            df = _finalize(df)
+            if len(df) > 50:
+                return df
     except Exception as e:
         logger.debug(f"KR {ticker} 조회 실패: {e}")
 
