@@ -49,6 +49,26 @@ class ScanResult(Base):
     signal_quality   = Column(String(10),  nullable=True)   # STRONG/MODERATE/WEAK
     rs_value         = Column(Float,       nullable=True)   # Mansfield RS (v4)
     grade            = Column(String(5),   nullable=True)   # S/A/B 종합 등급
+    # ── Scanner decision snapshot (chart overlay) ───────────────
+    # 날짜로 저장해야 차트 조회 range가 달라져도 signal-date 당시 판정 구간이
+    # 이동하지 않는다. v1 및 기존 행은 tight_*가 NULL이다.
+    base_start_date   = Column(String(10),  nullable=True)
+    base_end_date     = Column(String(10),  nullable=True)
+    tight_start_date  = Column(String(10),  nullable=True)
+    base_high         = Column(Float,       nullable=True)
+    base_low          = Column(Float,       nullable=True)
+    tight_high        = Column(Float,       nullable=True)
+    tight_low         = Column(Float,       nullable=True)
+    base_width_pct    = Column(Float,       nullable=True)
+    tight_width_pct   = Column(Float,       nullable=True)
+    contraction_ratio = Column(Float,       nullable=True)
+    base_mode         = Column(String(5),   nullable=True)
+    # ── Step 4 entry-control observations ───────────────────────
+    pivot_ext_pct     = Column(Float,       nullable=True)
+    upthrust_failed   = Column(Boolean,     nullable=True)  # None = D+N 미도래
+    cur_ext_pct       = Column(Float,       nullable=True)
+    cur_stop_pct      = Column(Float,       nullable=True)
+    entry_warnings    = Column(Text,        nullable=True)  # JSON 배열
     # ── Strict Weinstein filter (Phase 1 scaffold) ──────────────
     stop_loss            = Column(Float,       nullable=True)              # Gate 8: BUY 시그널 손절가
     sector_name          = Column(String(50),  nullable=True)              # Gate 2: 종목 sector (후속 plan)
@@ -71,6 +91,23 @@ class ScanLog(Base):
     status = Column(String(20), default="RUNNING")  # RUNNING / DONE / ERROR
     error_msg = Column(Text, default="")
     triggered_by = Column(String(20), default="manual")
+
+
+class UpthrustCooldown(Base):
+    """확정된 돌파 실패의 쿨다운 만료 시각.
+
+    ScanResult.scan_time 은 같은 신호를 재스캔할 때 갱신되므로 쿨다운 기준으로
+    쓰면 만료가 계속 밀린다. 최초 실패 봉 날짜를 별도 보존해 그 문제를 막는다.
+    """
+    __tablename__ = "upthrust_cooldowns"
+
+    id = Column(Integer, primary_key=True, index=True)
+    market = Column(String(10), nullable=False, index=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    source_signal_date = Column(String(10), nullable=False)
+    failed_date = Column(String(10), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 # ── 계좌 및 거래 관리 ────────────────────────────────────────────
@@ -208,6 +245,25 @@ def _migrate():
     """기존 DB에 새 컬럼이 없으면 추가한다 (SQLite / PostgreSQL)."""
     from sqlalchemy import text as _text
 
+    scan_result_ddls = [
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_start_date VARCHAR(10)",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_end_date VARCHAR(10)",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS tight_start_date VARCHAR(10)",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_high DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_low DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS tight_high DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS tight_low DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_width_pct DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS tight_width_pct DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS contraction_ratio DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_mode VARCHAR(5)",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS pivot_ext_pct DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS upthrust_failed BOOLEAN",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS cur_ext_pct DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS cur_stop_pct DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS entry_warnings TEXT",
+    ]
+
     if engine.dialect.name != "sqlite":
         holding_ddls = [
             "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_status VARCHAR(20) DEFAULT 'PENDING'",
@@ -216,7 +272,7 @@ def _migrate():
             "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_checked_at TIMESTAMP",
         ]
         with engine.begin() as conn:
-            for ddl in holding_ddls:
+            for ddl in scan_result_ddls + holding_ddls:
                 conn.execute(_text(ddl))
         return
 
@@ -245,6 +301,24 @@ def _migrate():
             ("signal_quality",       "ALTER TABLE scan_results ADD COLUMN signal_quality VARCHAR(10)"),
             ("rs_value",             "ALTER TABLE scan_results ADD COLUMN rs_value REAL"),
             ("grade",                "ALTER TABLE scan_results ADD COLUMN grade VARCHAR(5)"),
+            # Scanner decision snapshot (chart overlay)
+            ("base_start_date",      "ALTER TABLE scan_results ADD COLUMN base_start_date VARCHAR(10)"),
+            ("base_end_date",        "ALTER TABLE scan_results ADD COLUMN base_end_date VARCHAR(10)"),
+            ("tight_start_date",     "ALTER TABLE scan_results ADD COLUMN tight_start_date VARCHAR(10)"),
+            ("base_high",            "ALTER TABLE scan_results ADD COLUMN base_high REAL"),
+            ("base_low",             "ALTER TABLE scan_results ADD COLUMN base_low REAL"),
+            ("tight_high",           "ALTER TABLE scan_results ADD COLUMN tight_high REAL"),
+            ("tight_low",            "ALTER TABLE scan_results ADD COLUMN tight_low REAL"),
+            ("base_width_pct",       "ALTER TABLE scan_results ADD COLUMN base_width_pct REAL"),
+            ("tight_width_pct",      "ALTER TABLE scan_results ADD COLUMN tight_width_pct REAL"),
+            ("contraction_ratio",    "ALTER TABLE scan_results ADD COLUMN contraction_ratio REAL"),
+            ("base_mode",            "ALTER TABLE scan_results ADD COLUMN base_mode VARCHAR(5)"),
+            # Step 4 entry-control observations
+            ("pivot_ext_pct",        "ALTER TABLE scan_results ADD COLUMN pivot_ext_pct REAL"),
+            ("upthrust_failed",      "ALTER TABLE scan_results ADD COLUMN upthrust_failed BOOLEAN"),
+            ("cur_ext_pct",          "ALTER TABLE scan_results ADD COLUMN cur_ext_pct REAL"),
+            ("cur_stop_pct",         "ALTER TABLE scan_results ADD COLUMN cur_stop_pct REAL"),
+            ("entry_warnings",       "ALTER TABLE scan_results ADD COLUMN entry_warnings TEXT"),
             # Strict Weinstein filter (Phase 1)
             ("stop_loss",            "ALTER TABLE scan_results ADD COLUMN stop_loss REAL"),
             ("sector_name",          "ALTER TABLE scan_results ADD COLUMN sector_name VARCHAR(50)"),

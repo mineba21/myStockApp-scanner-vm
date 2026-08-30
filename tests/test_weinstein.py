@@ -35,7 +35,16 @@ def _make_stage2_base(n_total=260, base_price=100.0):
     """
     Stage2 상황 합성 데이터:
       - 0~149일: 50→95 선형 상승 (MA150/MA50 충분히 상승)
-      - 150~(n_total-1)일: base_price 근처 횡보
+      - 150~(n_total-1)일: base_price 근처 횡보, 진폭이 신호일에 가까울수록
+        선형으로 수축(±2.5 → ±0.3)한다.
+
+    Step 2(2단 base, BASE_MODE="v2" 기본값) 이 detect_base_pivot_v2 로
+    "최근 tight 구간이 그 앞의 자격 구간보다 좁아졌는가" 를 요구하므로,
+    등폭 진동으로는(과거 실제로 이 fixture 가 그랬음) 이 조건을 만족하지
+    못한다 — sin 주기가 정확히 TIGHT_LOOKBACK_DAYS(10)와 같아 어떤 10일
+    구간을 잘라도 진폭이 그대로 재현되기 때문. 진폭을 선형으로 줄여 v1
+    (폭 ≤15%) 과 v2(자격폭 ≤25%, tight 폭 ≤10~12%, 수축 ≥15%) 양쪽 다
+    통과하는 base 를 만든다.
     """
     prices  = []
     volumes = []
@@ -43,10 +52,13 @@ def _make_stage2_base(n_total=260, base_price=100.0):
     for i in range(150):
         prices.append(50.0 + (base_price - 5 - 50) * i / 149)
         volumes.append(500_000)
-    # Phase 2: 횡보 base
-    for i in range(n_total - 150):
-        # ±2% 진동
-        prices.append(base_price + 2 * np.sin(i * np.pi / 5))
+    # Phase 2: 횡보 base — 진폭 수축 (과거→신호일: 2.5 → 0.3)
+    sideways_days = n_total - 150
+    amp_start, amp_end = 2.5, 0.3
+    for i in range(sideways_days):
+        frac = i / max(sideways_days - 1, 1)
+        amp = amp_start + (amp_end - amp_start) * frac
+        prices.append(base_price + amp * np.sin(i * np.pi / 5))
         volumes.append(500_000)
     return prices, volumes
 
@@ -990,23 +1002,36 @@ class TestStage2BreakoutV4:
         assert res["base_quality"] in ("STRONG", "WEAK")            # legacy 매핑
 
     def test_v4_blocked_by_low_daily_volume(self):
-        """일봉 거래량 < BREAKOUT_DAILY_VOL_RATIO(3.0x) → 신호 없음 (hard block)."""
+        """일봉 거래량 < BREAKOUT_DAILY_VOL_RATIO(Step 2: 1.5x) → 신호 없음 (hard block)."""
         from scanner.weinstein import analyze_stock
 
-        # 일봉 ratio ≈ 1.8x — 3.0x 미만
-        df = self._stage2_setup(breakout_vol=900_000)
+        # 일봉 ratio ≈ 0.8x — 1.5x 미만 (Step 2 이전엔 3.0x 기준으로 900K 를 썼으나
+        # 임계값이 1.5x 로 낮아져 그 값은 더 이상 차단되지 않는다)
+        df = self._stage2_setup(breakout_vol=400_000)
         res = analyze_stock(df, "TEST", "테스트", "US")
 
         if res is not None:
             assert res["signal_type"] != "BREAKOUT", "일봉 거래량 미달인데 BREAKOUT 발생"
 
     def test_v4_blocked_by_low_weekly_volume(self):
-        """주봉 거래량 < BREAKOUT_WEEKLY_VOL_RATIO(2.0x) → 신호 없음 (hard block)."""
+        """주봉 거래량 < BREAKOUT_WEEKLY_VOL_RATIO(Step 2: 0.5x) → 신호 없음 (hard block)."""
         from scanner.weinstein import analyze_stock
 
-        # 일봉 ratio 는 통과시키되 주봉 합이 2.0x 미만이 되도록 spike 크기 조절
-        # base_vol=500K → weekly_avg=2.5M; spike=1.9M 이면 weekly = 4*500K+1.9M = 3.9M / 2.5M = 1.56x
-        df = self._stage2_setup(breakout_vol=1_900_000)
+        # 일봉 rolling 평균(20일)은 주 경계를 타지 않으므로, 돌파일 자체의
+        # 거래량만으로는 "일봉은 통과 + 주봉만 미달"을 만들 수 없다(돌파일
+        # 거래량이 곧 그 주 합계의 대부분을 차지해 버림 — 0.5x 임계값에서는
+        # breakout_vol 을 아무리 낮춰도 weekly_ratio 가 최저 ~0.89x 까지만
+        # 내려간다). 그래서 돌파일 직전 5일의 거래량을 별도로 낮춰 "그 주"
+        # 합계만 미달로 만든다 — 일봉 ratio 는 20일 평균 기준이라 영향 없음.
+        prices, volumes = _make_stage2_base(n_total=230, base_price=100.0)
+        for i in range(len(volumes)):
+            volumes[i] = 500_000
+        for k in range(1, 6):
+            volumes[-1 - k] = 20_000
+        prices[-1]  = 104.0
+        volumes[-1] = 900_000
+        df = _make_df(prices, volumes)
+
         res = analyze_stock(df, "TEST", "테스트", "US")
 
         if res is not None:
@@ -1682,12 +1707,14 @@ class TestNoLookAhead:
         df_sig     = df.loc[:sig_date]
         d_sig      = _build_indicators(df_sig)
         w_sig_df   = to_weekly_ohlcv(df_sig)
-        w_sig      = compute_weekly_indicators(w_sig_df) if len(w_sig_df) > 0 else None
+        # Step 1 — 주봉 거래량 basis 정책이 daily_df 를 보므로, 레퍼런스도
+        # analyze_stock 과 동일한 일봉을 넘겨야 같은 기준으로 비교된다.
+        w_sig      = compute_weekly_indicators(w_sig_df, df_sig) if len(w_sig_df) > 0 else None
         stage_sig  = classify_stage(w_sig, d_sig)
 
         # ── last-bar 기준 indicator (공개 필드가 매칭되어야 함) ──
         d_last     = _build_indicators(df)
-        w_last     = compute_weekly_indicators(to_weekly_ohlcv(df))
+        w_last     = compute_weekly_indicators(to_weekly_ohlcv(df), df)
         stage_last = classify_stage(w_last, d_last)
 
         # 픽스처가 의도대로 차이를 만들었는지 — 셋 중 하나라도 차이 있으면 OK

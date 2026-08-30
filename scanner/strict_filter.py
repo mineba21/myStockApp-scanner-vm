@@ -64,7 +64,16 @@ from config import (
     STRICT_REQUIRE_RS_RISING,
     STRICT_REQUIRE_RS_ZERO_CROSS_FOR_BREAKOUT,
     STRICT_REQUIRE_STOP_LOSS,
+    MAX_PIVOT_EXT_PCT,
+    PIVOT_EXT_AS_GATE,
+    UPTHRUST_AS_GATE,
 )
+
+# Step 1 — 주봉 거래량을 hard gate 로 쓸지 warning 으로만 쓸지 (backward compat)
+try:
+    from config import BREAKOUT_WEEKLY_VOL_AS_GATE
+except ImportError:
+    BREAKOUT_WEEKLY_VOL_AS_GATE = True
 
 
 # ── Reason enum 상수 ───────────────────────────────────────────────
@@ -107,6 +116,11 @@ EXTENDED_ABOVE_30W         = "extended_above_30w"
 # Gate 8 — Stop-loss
 STOP_LOSS_MISSING          = "stop_loss_missing"
 STOP_LOSS_ABOVE_PRICE      = "stop_loss_above_price"
+
+# Step 4 — opt-in entry timing gates
+PIVOT_EXTENSION_TOO_HIGH   = "pivot_extension_too_high"
+UPTHRUST_FAILED            = "upthrust_failed"
+UPTHRUST_COOLDOWN          = "upthrust_cooldown"
 
 
 # ── Gate 1 — Market ────────────────────────────────────────────────
@@ -235,21 +249,36 @@ def _check_base(signal: Dict[str, Any],
     sanity 차원 재검증. REBOUND 는 v4 retest gate 통과 여부 확인.
 
     검사 항목 (BREAKOUT):
-      - pivot_price is None or base_weeks < BASE_MIN_WEEKS → "base_insufficient"
+      - pivot_price is None or base_weeks is None          → "base_insufficient"
+      - (base_mode != "v2" 일 때만) base_weeks < BASE_MIN_WEEKS
+                                                            → "base_insufficient"
       - base_quality_v4 == "WIDE"                          → "base_too_wide"
     검사 항목 (REBOUND):
       - v4_gate not in {BASE_RETEST, 30W_RETEST}           → "rebound_no_retest"
 
+    Step 2 — v2(2단 base, detect_base_pivot_v2) 시그널은 base_weeks 가
+    BASE_LOOKBACK_DAYS 로 고정된 상수(round(BASE_LOOKBACK_DAYS/5, 1))라
+    BASE_MIN_WEEKS(v1 전용 파라미터) 와 비교하는 게 무의미하다 — 배포에서
+    BASE_LOOKBACK_DAYS 를 5주 미만으로 줄이면 base_weeks 가 항상 그 상수라
+    이 검사를 절대 통과 못 해 모든 v2 BREAKOUT 이 차단된다(Codex 리뷰 P2).
+    v2 의 base 기간 자격은 detect_base_pivot_v2 자체(자격 구간 폭/tight 폭/
+    수축)가 이미 hard-block 하므로 여기서 BASE_MIN_WEEKS 로 재검증하지
+    않는다 — signal dict 에 ``base_mode`` 가 없는(레거시 v1 픽스처 등)
+    경우는 하위 호환을 위해 기존대로 BASE_MIN_WEEKS 검사를 받는다.
+
     Args:
         signal: 필요 키: signal_type, pivot_price, base_weeks,
-                base_quality_v4, v4_gate.
+                base_quality_v4, v4_gate, base_mode(선택 — v2 시그널만).
     """
     sig_type = signal.get("signal_type")
 
     if sig_type == "BREAKOUT":
         pivot      = signal.get("pivot_price")
         base_weeks = signal.get("base_weeks")
-        if pivot is None or base_weeks is None or base_weeks < BASE_MIN_WEEKS:
+        is_v2      = signal.get("base_mode") == "v2"
+        if pivot is None or base_weeks is None:
+            reasons.append(BASE_INSUFFICIENT)
+        elif not is_v2 and base_weeks < BASE_MIN_WEEKS:
             reasons.append(BASE_INSUFFICIENT)
         if signal.get("base_quality_v4") == "WIDE":
             reasons.append(BASE_TOO_WIDE)
@@ -268,6 +297,12 @@ def _check_volume(signal: Dict[str, Any],
     주봉 ≥ ``BREAKOUT_WEEKLY_VOL_RATIO``. 주봉 비율이 None(데이터 부족)
     이면 차단하지 않음 (Gate 3 의 weekly_data_missing 으로 흡수).
 
+    **주봉 조건은 ``BREAKOUT_WEEKLY_VOL_AS_GATE=True`` 일 때만 평가한다.**
+    detect_stage2_breakout 의 주봉 게이트와 같은 토글을 공유해야, env 하나만
+    바꿔 "주봉 거래량 게이트 유무" 를 A/B 로 비교할 수 있다. 토글이 여기까지
+    닿지 않으면 탐지기를 통과시켜도 strict filter 가 같은 임계값으로 다시
+    잘라내 실험이 성립하지 않는다 (Codex 리뷰 P1). 일봉 조건은 토글과 무관.
+
     ``volume_ratio`` 는 detect_* 가 신호 시점 비율을 반환하므로 그대로 사용.
     ``weekly_volume_ratio`` 는 last-bar 의 공개 필드 vs signal-date 스냅샷이
     다르므로 ``strict_weekly_volume_ratio`` 사용.
@@ -285,9 +320,10 @@ def _check_volume(signal: Dict[str, Any],
     if vol_ratio is not None and vol_ratio < BREAKOUT_DAILY_VOL_RATIO:
         reasons.append(BREAKOUT_DAILY_VOLUME)
 
-    wvr = signal.get("strict_weekly_volume_ratio")
-    if wvr is not None and wvr < BREAKOUT_WEEKLY_VOL_RATIO:
-        reasons.append(BREAKOUT_WEEKLY_VOLUME)
+    if BREAKOUT_WEEKLY_VOL_AS_GATE:
+        wvr = signal.get("strict_weekly_volume_ratio")
+        if wvr is not None and wvr < BREAKOUT_WEEKLY_VOL_RATIO:
+            reasons.append(BREAKOUT_WEEKLY_VOLUME)
 
 
 # ── Gate 6 — Mansfield Relative Strength (Phase 2) ─────────────────
@@ -410,15 +446,37 @@ def _check_stop_loss(signal: Dict[str, Any],
         reasons.append(STOP_LOSS_ABOVE_PRICE)
 
 
+def _check_entry_controls(signal: Dict[str, Any], reasons: List[str]) -> None:
+    """Step 4 opt-in gates over observations already attached to a signal.
+
+    Only BREAKOUT uses these controls.  The calculations themselves happen
+    unconditionally in ``entry_control``; this function merely promotes their
+    shadow result to stable strict-filter reason enums when the env toggle is on.
+    """
+    if signal.get("signal_type") != "BREAKOUT":
+        return
+
+    pivot_ext = signal.get("pivot_ext_pct")
+    if (PIVOT_EXT_AS_GATE and pivot_ext is not None
+            and pivot_ext > MAX_PIVOT_EXT_PCT):
+        reasons.append(PIVOT_EXTENSION_TOO_HIGH)
+
+    if UPTHRUST_AS_GATE:
+        if signal.get("upthrust_failed") is True:
+            reasons.append(UPTHRUST_FAILED)
+        elif signal.get("_upthrust_cooldown_active") is True:
+            reasons.append(UPTHRUST_COOLDOWN)
+
+
 # ── Entry-point ────────────────────────────────────────────────────
 def apply_strict_filter(signal: Dict[str, Any],
                         ctx: Dict[str, Any]
                         ) -> Tuple[bool, List[str]]:
     """Strict Weinstein optimal-buy 필터 — 8 게이트 평가.
 
-    ``STRICT_WEINSTEIN_MODE=False`` 면 모든 게이트를 우회하고
-    ``(True, [])`` 반환 (legacy 호환). True 면 8 게이트를 모두 평가하고
-    실패 사유 누적된 ``(passed, reasons)`` 반환.
+    ``STRICT_WEINSTEIN_MODE=False`` 면 기존 8개 Weinstein 게이트는 우회한다.
+    Step 4 entry gate는 각 전용 env가 명시적으로 켜진 경우에만 mode와
+    독립적으로 평가한다. 기본값은 모두 false라 legacy 동작은 그대로다.
 
     게이트 호출 순서는 의미적으로 거시→미시 (Market → Sector → Stock
     Stage → Base → Volume → RS → Extension → Stop-loss). 각 게이트는
@@ -438,16 +496,19 @@ def apply_strict_filter(signal: Dict[str, Any],
                            passed=False 면 reasons 가 enum 문자열 1개 이상.
     """
     reasons: List[str] = []
-    if not STRICT_WEINSTEIN_MODE:
-        return True, reasons
+    if STRICT_WEINSTEIN_MODE:
+        _check_market(signal, ctx, reasons)
+        _check_sector(signal, ctx, reasons)
+        _check_weekly_stage(signal, reasons)
+        _check_base(signal, reasons)
+        _check_volume(signal, reasons)
+        _check_rs(signal, ctx, reasons)
+        _check_extension(signal, reasons)
+        _check_stop_loss(signal, reasons)
 
-    _check_market(signal, ctx, reasons)
-    _check_sector(signal, ctx, reasons)
-    _check_weekly_stage(signal, reasons)
-    _check_base(signal, reasons)
-    _check_volume(signal, reasons)
-    _check_rs(signal, ctx, reasons)
-    _check_extension(signal, reasons)
-    _check_stop_loss(signal, reasons)
+    # Shadow 집계는 기존 8개 게이트를 통과한 후보만 대상으로 해야 한다.
+    # strict mode 자체가 꺼진 legacy 경로는 기존 후보 전체가 baseline 이다.
+    signal["_pre_entry_control_passed"] = len(reasons) == 0
+    _check_entry_controls(signal, reasons)
 
     return (len(reasons) == 0), reasons

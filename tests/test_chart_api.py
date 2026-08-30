@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import date, timedelta
 import pandas as pd
 import pytest
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -45,6 +46,12 @@ def _make_daily(n=300, start_price=100.0, step=0.3, start=date(2023, 1, 2)):
         "Close":  prices,
         "Volume": [1_000_000.0 + i * 100 for i in range(n)],
     }, index=pd.DatetimeIndex(dates))
+
+
+def test_index_template_renders(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Weinstein Stage Scanner" in response.text
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -99,6 +106,10 @@ class TestChartDailyHappy:
         assert body["range"] == "1y"
         assert body["ma_period"] == 150
         assert len(body["candles"]) > 0
+        # scan_result_id 없는 기존 요청은 overlay 키조차 추가하지 않는다.
+        assert set(body) == {
+            "market", "ticker", "timeframe", "range", "ma_period", "candles"
+        }
 
         c0 = body["candles"][0]
         for k in ("t", "o", "h", "l", "c", "v", "ma"):
@@ -287,3 +298,155 @@ class TestWeeklyResample:
         result = to_weekly_ohlcv(short)
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 0
+
+
+# ══════════════════════════════════════════════════════════════════
+# Scanner decision overlay (signal-date DB snapshot)
+# ══════════════════════════════════════════════════════════════════
+
+def _overlay_row(**overrides):
+    values = {
+        "id": 77,
+        "market": "US",
+        "ticker": "FCX",
+        "signal_type": "BREAKOUT",
+        "signal_date": "2024-06-03",
+        "price": 110.0,
+        "volume_ratio": 2.11,
+        "pivot_price": 100.0,
+        "stop_loss": 90.0,
+        "base_start_date": "2024-05-01",
+        "base_end_date": "2024-05-31",
+        "tight_start_date": "2024-05-20",
+        "base_high": 101.0,
+        "base_low": 80.0,
+        "tight_high": 100.0,
+        "tight_low": 92.0,
+        "base_width_pct": 20.79,
+        "tight_width_pct": 8.0,
+        "contraction_ratio": 0.385,
+        "base_mode": "v2",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class TestChartOverlayRouting:
+    def test_invalid_or_missing_id_returns_200_without_overlay(self, client, monkeypatch):
+        from scanner import us_stocks
+        monkeypatch.setattr(us_stocks, "fetch_ohlcv",
+                            lambda t, lookback_days=730: _make_daily(n=600))
+
+        invalid = client.get(
+            "/api/chart/ohlcv?market=US&ticker=FCX&range=1y&scan_result_id=not-an-int")
+        assert invalid.status_code == 200
+        assert "overlay" not in invalid.json()
+
+        import web.app as webapp
+        monkeypatch.setattr(webapp, "_get_chart_overlay_row",
+                            lambda db, raw_id, market, ticker: None)
+        missing = client.get(
+            "/api/chart/ohlcv?market=US&ticker=FCX&range=1y&scan_result_id=999999")
+        assert missing.status_code == 200
+        assert "overlay" not in missing.json()
+
+    def test_v1_row_returns_null_tight(self, client, monkeypatch):
+        from scanner import us_stocks
+        import web.app as webapp
+        df = _make_daily(n=600)
+        signal_date = df.index[-10].strftime("%Y-%m-%d")
+        row = _overlay_row(
+            signal_date=signal_date, base_mode="v1",
+            tight_start_date=None, tight_high=None, tight_low=None,
+            tight_width_pct=None, contraction_ratio=None,
+        )
+        monkeypatch.setattr(us_stocks, "fetch_ohlcv", lambda *a, **kw: df)
+        monkeypatch.setattr(webapp, "_get_chart_overlay_row",
+                            lambda db, raw_id, market, ticker: row)
+
+        resp = client.get(
+            "/api/chart/ohlcv?market=US&ticker=FCX&range=1y&scan_result_id=77")
+        assert resp.status_code == 200
+        overlay = resp.json()["overlay"]
+        assert overlay["base_mode"] == "v1"
+        assert overlay["base"] is not None
+        assert overlay["tight"] is None
+
+    def test_snapshot_dates_are_range_invariant(self, client, monkeypatch):
+        from scanner import us_stocks
+        import web.app as webapp
+        df = _make_daily(n=900)
+        row = _overlay_row(signal_date=df.index[-10].strftime("%Y-%m-%d"))
+        monkeypatch.setattr(us_stocks, "fetch_ohlcv", lambda *a, **kw: df)
+        monkeypatch.setattr(webapp, "_get_chart_overlay_row",
+                            lambda db, raw_id, market, ticker: row)
+
+        snapshots = []
+        for range_key in ("6m", "1y", "2y"):
+            resp = client.get(
+                f"/api/chart/ohlcv?market=US&ticker=FCX&range={range_key}&scan_result_id=77")
+            assert resp.status_code == 200
+            overlay = resp.json()["overlay"]
+            snapshots.append((overlay["base"], overlay["tight"]))
+        assert snapshots[0] == snapshots[1] == snapshots[2]
+
+
+class TestOverlayWarnings:
+    def _warnings(self, current_price, **row_overrides):
+        import pandas as pd
+        import web.app as webapp
+        row = _overlay_row(signal_date="2024-06-03", **row_overrides)
+        daily = pd.DataFrame(
+            {"Close": [current_price]},
+            index=pd.DatetimeIndex(["2024-06-03"]),
+        )
+        return webapp._build_chart_overlay(row, daily)["warnings"]
+
+    def test_chase_warning_strictly_above_five_pct(self):
+        assert not any("추격 구간" in w for w in self._warnings(105.0, pivot_price=100.0))
+        assert any("추격 구간" in w for w in self._warnings(105.01, pivot_price=100.0))
+
+    def test_pivot_regression_warning_strictly_below_pivot(self):
+        assert "돌파 후 피벗 하향 회귀" not in self._warnings(100.0, pivot_price=100.0)
+        assert "돌파 후 피벗 하향 회귀" in self._warnings(99.99, pivot_price=100.0)
+
+    def test_stop_warning_strictly_above_twelve_pct(self):
+        assert not any("현재가 기준 손절폭" in w for w in
+                       self._warnings(100.0, stop_loss=88.0, pivot_price=100.0))
+        assert any("현재가 기준 손절폭" in w for w in
+                   self._warnings(100.0, stop_loss=87.99, pivot_price=100.0))
+
+    # ── Claude Code 리뷰 반영 — 하드코딩 5/12 대신 config 값을 읽는지 ──
+
+    def test_chase_warning_boundary_follows_config_not_hardcoded_five(self, monkeypatch):
+        """MAX_PIVOT_EXT_PCT 를 8로 올리면, 옛 하드코딩(5) 기준으로는
+        경고가 뜨던 +5.01% 가 더 이상 경고를 내지 않아야 한다."""
+        import web.app as webapp
+        monkeypatch.setattr(webapp, "MAX_PIVOT_EXT_PCT", 8.0)
+        assert not any("추격 구간" in w for w in self._warnings(105.01, pivot_price=100.0))
+        assert any("추격 구간" in w for w in self._warnings(108.01, pivot_price=100.0))
+
+    def test_stop_warning_boundary_follows_config_not_hardcoded_twelve(self, monkeypatch):
+        """ALERT_MAX_CUR_STOP_PCT 를 20으로 올리면, 옛 하드코딩(12) 기준으로는
+        경고가 뜨던 13% 이 더 이상 경고를 내지 않아야 한다."""
+        import web.app as webapp
+        monkeypatch.setattr(webapp, "ALERT_MAX_CUR_STOP_PCT", 20.0)
+        assert not any("현재가 기준 손절폭" in w for w in
+                       self._warnings(100.0, stop_loss=87.0, pivot_price=100.0))
+        assert any("현재가 기준 손절폭" in w for w in
+                   self._warnings(100.0, stop_loss=79.0, pivot_price=100.0))
+
+    def test_overlay_response_includes_applied_thresholds(self, monkeypatch):
+        """프론트가 표시할 수 있도록 실제 적용된 임계값이 응답에 실린다."""
+        import web.app as webapp
+        monkeypatch.setattr(webapp, "MAX_PIVOT_EXT_PCT", 7.5)
+        monkeypatch.setattr(webapp, "ALERT_MAX_CUR_STOP_PCT", 15.0)
+
+        row = _overlay_row(signal_date="2024-06-03", pivot_price=100.0)
+        daily = pd.DataFrame({"Close": [100.0]}, index=pd.DatetimeIndex(["2024-06-03"]))
+        overlay = webapp._build_chart_overlay(row, daily)
+
+        assert overlay["thresholds"] == {
+            "max_pivot_ext_pct": 7.5,
+            "max_cur_stop_pct": 15.0,
+        }

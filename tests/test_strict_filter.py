@@ -476,6 +476,69 @@ class TestBaseGate:
             _check_base({"signal_type": "REBOUND", "v4_gate": gate}, r)
             assert r == [], f"v4_gate={gate} 통과해야 함"
 
+    # ── Step 2 — v2(2단 base) 시그널은 BASE_MIN_WEEKS 재검증을 건너뜀 ──
+    # (Codex 리뷰 P2: BASE_LOOKBACK_DAYS 를 5주 미만으로 설정하면 v2 의
+    #  base_weeks 는 항상 그 고정 상수라 BASE_MIN_WEEKS(v1 전용) 와 비교하면
+    #  모든 v2 BREAKOUT 이 차단돼 버렸다.)
+
+    def test_v2_short_base_weeks_does_not_block(self):
+        """base_mode=v2 면 base_weeks < BASE_MIN_WEEKS 이어도 통과한다
+        (BASE_LOOKBACK_DAYS 를 3주로 줄인 배포를 흉내낸 값)."""
+        from scanner.strict_filter import _check_base
+        reasons = []
+        _check_base({"signal_type": "BREAKOUT",
+                     "pivot_price": 100.0,
+                     "base_weeks": 3.0,     # < BASE_MIN_WEEKS=5 이지만
+                     "base_quality_v4": "TIGHT",
+                     "base_mode": "v2"}, reasons)
+        assert reasons == []
+
+    def test_v1_short_base_weeks_still_blocks_regardless_of_base_mode_field(self):
+        """base_mode="v1" 이면 기존 BASE_MIN_WEEKS 검사가 그대로 적용된다."""
+        from scanner.strict_filter import _check_base, BASE_INSUFFICIENT
+        reasons = []
+        _check_base({"signal_type": "BREAKOUT",
+                     "pivot_price": 100.0,
+                     "base_weeks": 3.0,
+                     "base_quality_v4": "TIGHT",
+                     "base_mode": "v1"}, reasons)
+        assert BASE_INSUFFICIENT in reasons
+
+    def test_missing_base_mode_defaults_to_legacy_base_min_weeks_check(self):
+        """base_mode 키 자체가 없는(레거시 픽스처) 시그널은 하위 호환을
+        위해 기존 BASE_MIN_WEEKS 검사를 그대로 받는다."""
+        from scanner.strict_filter import _check_base, BASE_INSUFFICIENT
+        reasons = []
+        _check_base({"signal_type": "BREAKOUT",
+                     "pivot_price": 100.0,
+                     "base_weeks": 3.0,
+                     "base_quality_v4": "TIGHT"}, reasons)
+        assert BASE_INSUFFICIENT in reasons
+
+    def test_v2_still_blocks_on_missing_pivot_or_base_weeks(self):
+        """v2 라도 pivot_price/base_weeks 자체가 없으면 여전히 차단된다 —
+        BASE_MIN_WEEKS 비교만 건너뛸 뿐, 필드 존재 검사는 그대로."""
+        from scanner.strict_filter import _check_base, BASE_INSUFFICIENT
+        reasons = []
+        _check_base({"signal_type": "BREAKOUT",
+                     "pivot_price": None,
+                     "base_weeks": 5.0,
+                     "base_quality_v4": "TIGHT",
+                     "base_mode": "v2"}, reasons)
+        assert BASE_INSUFFICIENT in reasons
+
+    def test_v2_wide_base_quality_still_blocks(self):
+        """v2 라도 base_quality_v4=WIDE 면 여전히 base_too_wide 로 차단된다
+        (BASE_MIN_WEEKS 예외는 base_too_wide 검사와 무관)."""
+        from scanner.strict_filter import _check_base, BASE_TOO_WIDE
+        reasons = []
+        _check_base({"signal_type": "BREAKOUT",
+                     "pivot_price": 100.0,
+                     "base_weeks": 3.0,
+                     "base_quality_v4": "WIDE",
+                     "base_mode": "v2"}, reasons)
+        assert BASE_TOO_WIDE in reasons
+
 
 # ══════════════════════════════════════════════════════════════════
 # Gate 5 — Volume

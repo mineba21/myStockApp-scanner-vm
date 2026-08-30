@@ -13,3 +13,12 @@ build/
 # Local SQLite output — should not be tracked
 *.db
 stock_scanner.db
+
+# Scan funnel 진단 스냅샷 (scanner/scan_engine.py _write_funnel_file)
+logs/
+# 개발 중 잘못된 cwd 에서 돌리면 레포 루트에 떨어지는 funnel 스냅샷 (정상
+# 경로는 logs/ 아래) — 어느 위치에 있든 커밋 대상 아님
+funnel_*.json
+
+# Playwright 브라우저 테스트 산출물
+output/playwright/

@@ -389,6 +389,45 @@ class TestSavePersistsMansfieldRS:
         finally:
             db.close()
 
+    def test_save_persists_decision_snapshot_on_insert_and_update(self):
+        """차트용 base/tight 값은 재계산 없이 INSERT/UPDATE 모두 그대로 저장."""
+        from scanner.scan_engine import _save
+        from database.models import ScanResult
+
+        snapshot = {
+            "base_start_date": "2024-05-01",
+            "base_end_date": "2024-05-31",
+            "tight_start_date": "2024-05-20",
+            "base_high": 105.0,
+            "base_range_low": 82.0,
+            "tight_high": 104.0,
+            "tight_low": 96.0,
+            "base_width_pct": 21.9,
+            "tight_width_pct": 7.7,
+            "contraction_ratio": 0.352,
+            "base_mode": "v2",
+        }
+        db = self._fresh_db()
+        try:
+            _save(db, self._signal(**snapshot))
+            row = db.query(ScanResult).filter(ScanResult.ticker == "TEST").one()
+            assert row.base_start_date == "2024-05-01"
+            assert row.base_end_date == "2024-05-31"
+            assert row.tight_start_date == "2024-05-20"
+            assert row.base_high == 105.0
+            assert row.base_low == 82.0  # v2 손절용 signal[base_low]와 분리된 실제 base 저점
+            assert row.tight_high == 104.0
+            assert row.tight_low == 96.0
+            assert row.base_width_pct == 21.9
+            assert row.tight_width_pct == 7.7
+            assert row.contraction_ratio == 0.352
+            assert row.base_mode == "v2"
+
+            _save(db, self._signal(**{**snapshot, "tight_low": 97.0}))
+            assert db.query(ScanResult).filter(ScanResult.ticker == "TEST").one().tight_low == 97.0
+        finally:
+            db.close()
+
 
 # ══════════════════════════════════════════════════════════════════
 # Strict Weinstein filter — Phase 1: DB 영속화 스캐폴드
@@ -561,6 +600,11 @@ class TestSavePersistsStrictFields:
                 "stop_loss", "sector_name", "sector_stage",
                 "rs_trend", "rs_zero_crossed",
                 "strict_filter_passed", "filter_reasons",
+                "base_start_date", "base_end_date", "tight_start_date",
+                "base_high", "base_low", "tight_high", "tight_low",
+                "base_width_pct", "tight_width_pct", "contraction_ratio",
+                "base_mode", "pivot_ext_pct", "upthrust_failed",
+                "cur_ext_pct", "cur_stop_pct", "entry_warnings",
             }
             missing = need - cols
             assert not missing, f"_migrate() 가 추가 못한 컬럼: {missing}"

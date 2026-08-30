@@ -1241,7 +1241,7 @@
 
 <!-- ══════════════════ 모달: 차트 ════════════════════════ -->
 <div x-show="chartModal.open" x-cloak class="modal-bg" @click.self="closeChart()" @keydown.escape.window="closeChart()">
-  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-4 sm:p-6">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-4 sm:p-6 max-h-[95vh] overflow-y-auto">
     <div class="flex justify-between items-start mb-4 gap-3 flex-wrap">
       <div class="flex items-center gap-2 flex-wrap">
         <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
@@ -1273,8 +1273,52 @@
         x-text="chartModal.timeframe==='weekly'?'30주 MA':'150일 MA'"></span>
     </div>
 
+    <!-- 스캐너 판정 스냅샷 요약: API가 DB에 저장된 signal-date 구간만 반환 -->
+    <div x-show="chartModal.overlay" x-cloak class="mb-3 space-y-2">
+      <div class="flex flex-wrap gap-2 text-xs font-semibold">
+        <span x-show="chartModal.overlay?.base"
+          class="px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 border border-blue-100"
+          x-text="'base '+fmtOverlayPct(chartModal.overlay?.base?.width_pct)"></span>
+        <span x-show="chartModal.overlay?.tight"
+          class="px-2.5 py-1 rounded-lg bg-orange-50 text-orange-700 border border-orange-200"
+          x-text="'→ tight '+fmtOverlayPct(chartModal.overlay?.tight?.width_pct)"></span>
+        <span x-show="chartModal.overlay?.contraction_ratio!=null"
+          class="px-2.5 py-1 rounded-lg bg-slate-50 text-slate-600 border border-slate-200"
+          x-text="'수축 '+chartModal.overlay?.contraction_ratio?.toFixed(2)"></span>
+        <span x-show="chartModal.overlay?.at_signal?.volume_ratio!=null"
+          class="px-2.5 py-1 rounded-lg bg-purple-50 text-purple-700 border border-purple-100"
+          x-text="'돌파일 거래량 '+chartModal.overlay?.at_signal?.volume_ratio?.toFixed(2)+'x'"></span>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+        <div class="rounded-lg bg-slate-50 border border-slate-100 px-3 py-2">
+          <span class="font-bold text-slate-700 mr-2">신호일</span>
+          <span x-text="'진입 '+fmtOverlayPrice(chartModal.overlay?.at_signal?.price)"></span>
+          <span class="text-slate-300 mx-1">/</span>
+          <span x-text="'손절 '+fmtOverlayPct(chartModal.overlay?.at_signal?.stop_pct)"></span>
+          <span class="text-slate-300 mx-1">/</span>
+          <span x-text="'피벗'+fmtSignedPct(chartModal.overlay?.at_signal?.ext_vs_pivot_pct)"></span>
+        </div>
+        <div class="rounded-lg bg-slate-50 border border-slate-100 px-3 py-2">
+          <span class="font-bold text-slate-700 mr-2">현재</span>
+          <span x-text="fmtOverlayPrice(chartModal.overlay?.at_current?.price)"></span>
+          <span class="text-slate-300 mx-1">/</span>
+          <span x-text="'손절 '+fmtOverlayPct(chartModal.overlay?.at_current?.stop_pct)"></span>
+          <span class="text-slate-300 mx-1">/</span>
+          <span x-text="'피벗'+fmtSignedPct(chartModal.overlay?.at_current?.ext_vs_pivot_pct)"></span>
+        </div>
+      </div>
+      <template x-if="(chartModal.overlay?.warnings||[]).length">
+        <div class="rounded-xl bg-red-50 border border-red-200 px-3 py-2 flex flex-wrap gap-1.5">
+          <template x-for="warning in chartModal.overlay.warnings" :key="warning">
+            <span class="text-xs font-bold text-red-700 bg-white/80 rounded-md px-2 py-1"
+              x-text="'⚠ '+warning"></span>
+          </template>
+        </div>
+      </template>
+    </div>
+
     <div class="relative" style="height:420px">
-      <div id="chart-container" class="w-full h-full rounded-lg border border-slate-100"></div>
+      <div id="chart-container" class="relative overflow-hidden w-full h-full rounded-lg border border-slate-100"></div>
 
       <!-- 로딩 -->
       <div x-show="chartModal.loading"
@@ -1409,11 +1453,11 @@ function app() {
     watchForm: {market:'KR'},
 
     // 차트 (Phase 4)
-    chartModal: {open:false, market:'', ticker:'', name:'',
+    chartModal: {open:false, market:'', ticker:'', name:'', scanResultId:null,
                  timeframe:'daily', range:'1y',
-                 loading:false, error:null, empty:false},
+                 loading:false, error:null, empty:false, overlay:null},
     _chart: null, _chartCandles: null, _chartVolume: null, _chartMa: null,
-    _chartResizeObs: null,
+    _chartResizeObs: null, _chartOverlayDraw: null,
 
     toasts: [],
     _si: null, _ci: null,
@@ -1758,10 +1802,12 @@ function app() {
       this.chartModal.market = r.market;
       this.chartModal.ticker = r.ticker;
       this.chartModal.name = r.name || r.ticker;
+      this.chartModal.scanResultId = r.id || null;
       this.chartModal.timeframe = 'daily';
       this.chartModal.range = '1y';
       this.chartModal.error = null;
       this.chartModal.empty = false;
+      this.chartModal.overlay = null;
       this.chartModal.open = true;
       this.$nextTick(() => this.loadChart());
     },
@@ -1795,6 +1841,7 @@ function app() {
       this._chartCandles = null;
       this._chartVolume = null;
       this._chartMa = null;
+      this._chartOverlayDraw = null;
     },
 
     async loadChart() {
@@ -1805,11 +1852,13 @@ function app() {
       this.chartModal.loading = true;
       this.chartModal.error = null;
       this.chartModal.empty = false;
-      const {market, ticker, timeframe, range} = this.chartModal;
+      this.chartModal.overlay = null;
+      const {market, ticker, timeframe, range, scanResultId} = this.chartModal;
       try {
         const url = `/api/chart/ohlcv?market=${encodeURIComponent(market)}`
                   + `&ticker=${encodeURIComponent(ticker)}`
-                  + `&timeframe=${timeframe}&range=${range}`;
+                  + `&timeframe=${timeframe}&range=${range}`
+                  + (scanResultId ? `&scan_result_id=${encodeURIComponent(scanResultId)}` : '');
         const resp = await fetch(url);
         if (!resp.ok) {
           let msg = `HTTP ${resp.status}`;
@@ -1817,13 +1866,14 @@ function app() {
           throw new Error(msg);
         }
         const body = await resp.json();
+        this.chartModal.overlay = body.overlay || null;
         const candles = body.candles || [];
         if (candles.length === 0) {
           this.chartModal.empty = true;
           this._destroyChart();
           return;
         }
-        this._renderChart(candles, body.ma_period);
+        this._renderChart(candles, body.ma_period, body.overlay || null);
       } catch (e) {
         this.chartModal.error = (e && e.message) ? e.message : String(e);
         this._destroyChart();
@@ -1832,7 +1882,7 @@ function app() {
       }
     },
 
-    _renderChart(candles, maPeriod) {
+    _renderChart(candles, maPeriod, overlay) {
       const el = document.getElementById('chart-container');
       if (!el) return;
 
@@ -1856,6 +1906,41 @@ function app() {
       candleSeries.setData(candles.map(c => ({
         time: c.t, open: c.o, high: c.h, low: c.l, close: c.c,
       })));
+
+      // 주봉에서는 signal/base 날짜가 해당 주의 캔들 날짜와 다를 수 있으므로
+      // 렌더링 좌표만 다음 캔들에 매핑한다. overlay의 원본 날짜는 변경하지 않는다.
+      const mapOverlayDate = (dateText) => {
+        if (!dateText || candles.length === 0) return null;
+        const exact = candles.find(c => c.t === dateText);
+        if (exact) return exact.t;
+        const next = candles.find(c => c.t >= dateText);
+        if (!next) return null;
+        const gapDays = Math.abs((new Date(next.t+'T00:00:00Z') - new Date(dateText+'T00:00:00Z')) / 86400000);
+        return gapDays <= 7 ? next.t : null;
+      };
+      const signalChartTime = mapOverlayDate(overlay?.signal_date);
+
+      if (signalChartTime) {
+        candleSeries.setMarkers([{
+          time: signalChartTime, position: 'belowBar', color: '#dc2626',
+          shape: 'arrowUp', text: 'signal',
+        }]);
+      }
+
+      if (overlay?.pivot_price != null) {
+        candleSeries.createPriceLine({
+          price: overlay.pivot_price, color:'#dc2626', lineWidth:2,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          axisLabelVisible:true, title:'pivot',
+        });
+      }
+      if (overlay?.stop_loss != null) {
+        candleSeries.createPriceLine({
+          price: overlay.stop_loss, color:'#111827', lineWidth:2,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible:true, title:'stop',
+        });
+      }
 
       const maData = candles
         .filter(c => c.ma != null)
@@ -1881,8 +1966,28 @@ function app() {
       volumeSeries.setData(candles.map(c => ({
         time: c.t,
         value: c.v,
-        color: c.c >= c.o ? 'rgba(22,163,74,0.45)' : 'rgba(220,38,38,0.45)',
+        color: signalChartTime && c.t === signalChartTime
+          ? '#dc2626'
+          : (c.c >= c.o ? 'rgba(22,163,74,0.45)' : 'rgba(220,38,38,0.45)'),
       })));
+
+      // Range 상·하 경계는 LineSeries로 그리고, 그 사이는 좌표 기반 DOM 박스로
+      // 채운다. 가격/날짜는 모두 저장된 overlay 값이며 여기서 재계산하지 않는다.
+      const addBoundaryLines = (meta, color) => {
+        if (!meta || meta.high == null || meta.low == null) return;
+        const from = mapOverlayDate(meta.from);
+        const to = mapOverlayDate(meta.to);
+        if (!from || !to) return;
+        [meta.high, meta.low].forEach(value => {
+          const line = chart.addLineSeries({
+            color, lineWidth:1, lineStyle:LightweightCharts.LineStyle.Solid,
+            priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false,
+          });
+          line.setData([{time:from, value}, {time:to, value}]);
+        });
+      };
+      addBoundaryLines(overlay?.base, 'rgba(59,130,246,0.75)');
+      addBoundaryLines(overlay?.tight, 'rgba(234,88,12,0.9)');
 
       chart.timeScale().fitContent();
 
@@ -1891,14 +1996,74 @@ function app() {
       this._chartVolume = volumeSeries;
       this._chartMa = maSeries;
 
+      const rangeBoxes = [];
+      const makeRangeBox = (meta, label, background, border, zIndex) => {
+        if (!meta || meta.high == null || meta.low == null) return;
+        const from = mapOverlayDate(meta.from);
+        const to = mapOverlayDate(meta.to);
+        if (!from || !to) return;
+        const box = document.createElement('div');
+        box.className = 'decision-range-overlay';
+        box.style.cssText = `position:absolute;pointer-events:none;border:1px solid ${border};`
+          + `background:${background};z-index:${zIndex};border-radius:3px;`;
+        const tag = document.createElement('span');
+        tag.textContent = label;
+        tag.style.cssText = `position:absolute;left:3px;top:2px;color:${border};font-size:10px;`
+          + 'font-weight:700;background:rgba(255,255,255,.78);padding:1px 4px;border-radius:3px;';
+        box.appendChild(tag);
+        el.appendChild(box);
+        rangeBoxes.push({box, meta, from, to});
+      };
+      makeRangeBox(overlay?.base, 'base', 'rgba(59,130,246,0.10)', '#3b82f6', 2);
+      makeRangeBox(overlay?.tight, 'tight', 'rgba(249,115,22,0.20)', '#ea580c', 3);
+
+      const drawRangeBoxes = () => {
+        rangeBoxes.forEach(({box, meta, from, to}) => {
+          const x1 = chart.timeScale().timeToCoordinate(from);
+          const x2 = chart.timeScale().timeToCoordinate(to);
+          const y1 = candleSeries.priceToCoordinate(meta.high);
+          const y2 = candleSeries.priceToCoordinate(meta.low);
+          if ([x1,x2,y1,y2].some(v => v == null || !Number.isFinite(v))) {
+            box.style.display = 'none';
+            return;
+          }
+          box.style.display = 'block';
+          box.style.left = `${Math.min(x1,x2)-3}px`;
+          box.style.width = `${Math.max(6,Math.abs(x2-x1)+6)}px`;
+          box.style.top = `${Math.min(y1,y2)}px`;
+          box.style.height = `${Math.max(2,Math.abs(y2-y1))}px`;
+        });
+      };
+      this._chartOverlayDraw = drawRangeBoxes;
+      chart.timeScale().subscribeVisibleTimeRangeChange(drawRangeBoxes);
+      requestAnimationFrame(drawRangeBoxes);
+
       if (typeof ResizeObserver !== 'undefined') {
         this._chartResizeObs = new ResizeObserver(() => {
           if (this._chart && el) {
             this._chart.applyOptions({width: el.clientWidth, height: el.clientHeight});
+            if (this._chartOverlayDraw) requestAnimationFrame(this._chartOverlayDraw);
           }
         });
         this._chartResizeObs.observe(el);
       }
+    },
+
+    fmtOverlayPrice(value) {
+      if (value == null) return '-';
+      return this.chartModal.market === 'KR'
+        ? Math.round(value).toLocaleString()+'원'
+        : '$'+Number(value).toFixed(2);
+    },
+
+    fmtOverlayPct(value) {
+      return value == null ? '-' : Number(value).toFixed(1)+'%';
+    },
+
+    fmtSignedPct(value) {
+      if (value == null) return '-';
+      const n = Number(value);
+      return (n >= 0 ? '+' : '')+n.toFixed(1)+'%';
     },
   };
 }

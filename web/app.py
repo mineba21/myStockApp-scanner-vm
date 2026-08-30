@@ -26,7 +26,8 @@ from database.models import (init_db, get_db, ScanResult, ScanLog,
 from scanner.scan_engine import run_scan, scan_status
 from scheduler import start_scheduler, stop_scheduler, get_next_run_times
 from notifications.telegram import test_telegram
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                    MAX_PIVOT_EXT_PCT, ALERT_MAX_CUR_STOP_PCT)
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
@@ -90,7 +91,16 @@ async def shutdown_event():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    try:
+        # Starlette 1.x: request is the first argument.
+        return templates.TemplateResponse(
+            request=request,
+            name="index.html",
+            context={"request": request},
+        )
+    except TypeError:
+        # Starlette bundled with older supported FastAPI releases.
+        return templates.TemplateResponse("index.html", {"request": request})
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -221,12 +231,154 @@ CHART_RANGE_DAYS = {"6m": 183, "1y": 365, "2y": 730, "5y": 1825}
 CHART_TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,15}$")
 
 
+def _get_chart_overlay_row(db: Session, raw_id: Optional[str],
+                           market: str, ticker: str):
+    """유효한 양의 정수 id이며 요청 종목과 같은 ScanResult만 반환.
+
+    잘못된 값/없는 행/다른 종목 id는 모두 overlay 없음으로 취급한다. 차트
+    OHLCV 자체는 언제나 계속 반환해야 하므로 validation exception을 내지 않는다.
+    """
+    if raw_id is None:
+        return None
+    try:
+        result_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    if result_id <= 0 or str(result_id) != str(raw_id).strip():
+        return None
+    return db.query(ScanResult).filter(
+        ScanResult.id == result_id,
+        ScanResult.market == market,
+        ScanResult.ticker == ticker,
+    ).first()
+
+
+def _close_on_date(daily, date_text: Optional[str]) -> Optional[float]:
+    """원본 OHLCV에서 signal-date 종가를 읽는다(구간/피벗 재계산 아님)."""
+    if daily is None or len(daily) == 0 or not date_text:
+        return None
+    try:
+        import pandas as pd
+        target = str(date_text)[:10]
+        for idx, value in daily["Close"].items():
+            if pd.Timestamp(idx).strftime("%Y-%m-%d") == target:
+                return float(value)
+    except Exception:
+        return None
+    return None
+
+
+def _pct_distance(price: Optional[float], reference: Optional[float]) -> Optional[float]:
+    if price is None or reference is None or reference <= 0:
+        return None
+    return round((float(price) - float(reference)) / float(reference) * 100, 2)
+
+
+def _stop_pct(price: Optional[float], stop: Optional[float]) -> Optional[float]:
+    if price is None or stop is None or price <= 0:
+        return None
+    return round((float(price) - float(stop)) / float(price) * 100, 2)
+
+
+def _build_chart_overlay(row, daily) -> dict:
+    """저장된 판정 스냅샷 + 원본 종가로 overlay를 구성한다.
+
+    base/tight/pivot/stop은 DB 값만 사용한다. API에서 계산하는 것은 사용자
+    요청의 at_signal/at_current 파생 퍼센트와 warnings뿐이다.
+    """
+    current_price = None
+    if daily is not None and len(daily) > 0:
+        try:
+            current_price = float(daily["Close"].iloc[-1])
+        except Exception:
+            current_price = None
+    if current_price is None and row.price is not None:
+        current_price = float(row.price)
+
+    signal_price = _close_on_date(daily, row.signal_date)
+    if signal_price is None and row.price is not None:
+        # 외부 데이터가 비어도 차트 API 전체를 막지 않는 안전 폴백. 신규 행의
+        # 정상 경로에서는 signal_date 봉의 Close가 사용된다.
+        signal_price = float(row.price)
+
+    pivot = float(row.pivot_price) if row.pivot_price is not None else None
+    stop = float(row.stop_loss) if row.stop_loss is not None else None
+    signal_stop_pct = _stop_pct(signal_price, stop)
+    current_stop_pct = _stop_pct(current_price, stop)
+    signal_ext_pct = _pct_distance(signal_price, pivot)
+    current_ext_pct = _pct_distance(current_price, pivot)
+
+    base = None
+    if any(getattr(row, key, None) is not None for key in (
+        "base_start_date", "base_end_date", "base_high", "base_low", "base_width_pct"
+    )):
+        base = {
+            "from": row.base_start_date,
+            "to": row.base_end_date,
+            "high": row.base_high,
+            "low": row.base_low,
+            "width_pct": row.base_width_pct,
+        }
+
+    tight = None
+    if any(getattr(row, key, None) is not None for key in (
+        "tight_start_date", "tight_high", "tight_low", "tight_width_pct"
+    )):
+        tight = {
+            "from": row.tight_start_date,
+            "to": row.base_end_date,
+            "high": row.tight_high,
+            "low": row.tight_low,
+            "width_pct": row.tight_width_pct,
+        }
+
+    warnings = []
+    if current_ext_pct is not None and current_ext_pct > MAX_PIVOT_EXT_PCT:
+        warnings.append(f"추격 구간 (피벗 대비 +{current_ext_pct:.1f}%)")
+    if current_price is not None and pivot is not None and current_price < pivot:
+        warnings.append("돌파 후 피벗 하향 회귀")
+    if current_stop_pct is not None and current_stop_pct > ALERT_MAX_CUR_STOP_PCT:
+        warnings.append(f"현재가 기준 손절폭 {current_stop_pct:.1f}%")
+
+    return {
+        "signal_type": row.signal_type,
+        "signal_date": row.signal_date,
+        "base_mode": row.base_mode,
+        "base": base,
+        "tight": tight,
+        "contraction_ratio": row.contraction_ratio,
+        "pivot_price": pivot,
+        "stop_loss": stop,
+        "at_signal": {
+            "price": signal_price,
+            "stop_pct": signal_stop_pct,
+            "ext_vs_pivot_pct": signal_ext_pct,
+            "volume_ratio": (float(row.volume_ratio)
+                             if row.volume_ratio is not None else None),
+        },
+        "at_current": {
+            "price": current_price,
+            "stop_pct": current_stop_pct,
+            "ext_vs_pivot_pct": current_ext_pct,
+        },
+        # Step 4 후속 — 경고 판정에 실제로 쓰인 임계값을 함께 실어 보내
+        # 프론트가 하드코딩된 5/12 대신 이 값을 표시/재사용할 수 있게 한다.
+        "thresholds": {
+            "max_pivot_ext_pct": MAX_PIVOT_EXT_PCT,
+            "max_cur_stop_pct": ALERT_MAX_CUR_STOP_PCT,
+        },
+        "warnings": warnings,
+    }
+
+
 @app.get("/api/chart/ohlcv")
 async def get_chart_ohlcv(
     market: str = Query(..., description="KR 또는 US"),
     ticker: str = Query(..., min_length=1, max_length=15),
     timeframe: str = Query("daily", description="daily 또는 weekly"),
     range: str = Query("1y", description="6m / 1y / 2y / 5y"),
+    scan_result_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
 ):
     """스캔 결과 행에서 일봉/주봉 차트를 그릴 수 있는 OHLCV + MA JSON.
 
@@ -252,6 +404,8 @@ async def get_chart_ohlcv(
         raise HTTPException(status_code=422, detail=f"range 는 {list(CHART_RANGE_DAYS)}")
     if not CHART_TICKER_RE.match(ticker):
         raise HTTPException(status_code=422, detail="ticker 형식 (영숫자/점/하이픈, 1~15)")
+
+    overlay_row = _get_chart_overlay_row(db, scan_result_id, market, ticker)
 
     # MA를 표시 범위 시작 지점에서도 채우기 위해 buffer 추가 페치
     requested_days = CHART_RANGE_DAYS[range_key]
@@ -288,6 +442,8 @@ async def get_chart_ohlcv(
         "timeframe": timeframe, "range": range_key,
         "ma_period": ma_period, "candles": [],
     }
+    if overlay_row is not None:
+        empty_response["overlay"] = _build_chart_overlay(overlay_row, daily)
     if daily is None or len(daily) == 0:
         return empty_response
 
@@ -324,11 +480,16 @@ async def get_chart_ohlcv(
             "ma": (float(ma_val) if pd.notna(ma_val) else None),
         })
 
-    return {
+    response = {
         "market": market, "ticker": ticker,
         "timeframe": timeframe, "range": range_key,
         "ma_period": ma_period, "candles": candles,
     }
+    if overlay_row is not None:
+        # 항상 원본 daily를 사용하므로 timeframe/range 변경과 무관하게 동일한
+        # DB 판정 날짜 및 signal/current 비교를 반환한다.
+        response["overlay"] = _build_chart_overlay(overlay_row, daily)
+    return response
 
 
 @app.get("/api/scan/logs")
