@@ -28,12 +28,14 @@ from scheduler import start_scheduler, stop_scheduler, get_next_run_times
 from notifications.telegram import test_telegram
 from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
                     MAX_PIVOT_EXT_PCT, ALERT_MAX_CUR_STOP_PCT)
+from web.asset_allocation_api import router as asset_allocation_router
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 SITES_API_KEY = os.getenv("SITES_API_KEY", "").strip()
 
 app = FastAPI(title="Weinstein Stock Scanner", version="1.0.0")
+app.include_router(asset_allocation_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
