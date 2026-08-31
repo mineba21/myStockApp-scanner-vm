@@ -1,4 +1,4 @@
-"""키움 account1·account4 보유종목의 Weinstein 매도 후보 표시 전용 분석.
+"""키움 자유투자(미국)·ISA(국내) 보유종목의 Weinstein 매도 후보 분석.
 
 주문 API를 호출하지 않는다. 기존 Weinstein 판정기를 읽기 전용 실계좌 행에
 적용하고, 결과를 메모리와 로컬 JSON에 캐시한다.
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-SELL_PROFILES = frozenset({"account1", "account4"})
+SELL_TARGETS = frozenset({("account2", "US"), ("account4", "KR")})
 STATUS_BY_SEVERITY = {
     "HIGH": "SELL_REQUIRED",
     "MEDIUM": "REVIEW",
@@ -44,6 +44,13 @@ def _cache_seconds() -> int:
 
 def _key(row: dict[str, Any]) -> str:
     return f"{row.get('market')}:{row.get('ticker')}"
+
+
+def _is_target(row: dict[str, Any]) -> bool:
+    return (
+        str(row.get("account_profile") or ""),
+        str(row.get("market") or "").upper(),
+    ) in SELL_TARGETS
 
 
 def _load_cache() -> None:
@@ -139,7 +146,7 @@ def refresh_kiwoom_sell_analysis(rows: list[dict[str, Any]]) -> dict[str, dict[s
 
     targets: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if row.get("account_profile") in SELL_PROFILES and row.get("ticker"):
+        if _is_target(row) and row.get("ticker"):
             targets.setdefault(_key(row), dict(row))
     if not targets:
         return {}
@@ -182,10 +189,10 @@ def apply_kiwoom_sell_analysis(
     force: bool = False,
     background: bool = True,
 ) -> list[dict[str, Any]]:
-    """account1·account4 행에 캐시된 판정 결과를 합치고 필요 시 갱신한다."""
+    """자유투자 미국주식·ISA 국내주식에 판정 결과를 합친다."""
     global _REFRESHING
     now = time.time()
-    targets = [row for row in rows if row.get("account_profile") in SELL_PROFILES]
+    targets = [row for row in rows if _is_target(row)]
     with _LOCK:
         _load_cache()
         stale = force or any(
@@ -205,7 +212,7 @@ def apply_kiwoom_sell_analysis(
         decorated = []
         for original in rows:
             row = dict(original)
-            if row.get("account_profile") in SELL_PROFILES:
+            if _is_target(row):
                 cached = _CACHE.get(_key(row))
                 if cached:
                     row.update({key: value for key, value in cached.items() if key != "checked_epoch"})

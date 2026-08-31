@@ -32,6 +32,7 @@ from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
 from web.asset_allocation_api import router as asset_allocation_router
 from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holdings
 from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
+from web.kiwoom_sizing import apply_live_position_sizing
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
@@ -168,7 +169,7 @@ async def get_results(market: str = "ALL", signal_type: str = "ALL",
             ScanResult.strict_filter_passed.is_(True),
         ))
     rows = q.order_by(ScanResult.signal_date.desc(), ScanResult.scan_time.desc()).limit(limit).all()
-    return [{"id": r.id, "scan_time": r.scan_time.isoformat(),
+    payload = [{"id": r.id, "scan_time": r.scan_time.isoformat(),
              "market": r.market, "ticker": r.ticker, "name": r.name,
              "signal_type": r.signal_type, "stage": r.stage,
              "price": r.price, "ma150": r.ma150,
@@ -193,6 +194,16 @@ async def get_results(market: str = "ALL", signal_type: str = "ALL",
              "sizing_constrained_by": r.sizing_constrained_by,
              "equity_snapshot": r.equity_snapshot}
             for r in rows]
+    if KIWOOM_WEB_ENABLED:
+        try:
+            payload = apply_live_position_sizing(
+                payload,
+                get_kiwoom_account_summaries(),
+                get_kiwoom_holdings(),
+            )
+        except Exception as exc:
+            logger.warning("키움 실계좌 사이징 계산 실패: %s", type(exc).__name__)
+    return payload
 
 
 @app.delete("/api/results/{result_id}")
