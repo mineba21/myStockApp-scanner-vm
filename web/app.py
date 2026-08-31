@@ -1012,13 +1012,20 @@ async def get_exchange_rate():
 
 @app.get("/api/settings")
 async def get_settings():
-    from config import SCAN_LOOKBACK_DAYS, MA_PERIOD, VOLUME_SURGE_RATIO, SCHEDULE_TIMES, US_UNIVERSE
+    from config import (
+        KR_SCHEDULE_TIMES, MA_PERIOD, SCAN_LOOKBACK_DAYS,
+        US_SCHEDULE_TIMES, US_UNIVERSE, VOLUME_SURGE_RATIO,
+    )
     return {
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "scan_lookback_days": SCAN_LOOKBACK_DAYS,
         "ma_period": MA_PERIOD,
         "volume_surge_ratio": VOLUME_SURGE_RATIO,
-        "schedule_times": SCHEDULE_TIMES,
+        "schedule_times": {
+            "KR": KR_SCHEDULE_TIMES,
+            "US": US_SCHEDULE_TIMES,
+            "US_timezone": "America/New_York",
+        },
         "us_universe": US_UNIVERSE,
     }
 

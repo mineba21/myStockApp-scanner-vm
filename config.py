@@ -195,7 +195,9 @@ STRICT_PERSIST_REJECTED                     = os.getenv("STRICT_PERSIST_REJECTED
 STRICT_NOTIFY_INCLUDE_REASONS               = os.getenv("STRICT_NOTIFY_INCLUDE_REASONS", "false").lower() == "true"
 
 # ── Schedule / Infra ────────────────────────────────────────────
-SCHEDULE_TIMES = os.getenv("SCHEDULE_TIMES", "09:00,14:00,22:00").split(",")
+# 각 시장의 정규장 종가가 확정된 뒤 실행한다. 미국 시간대는 DST를 자동 반영한다.
+KR_SCHEDULE_TIMES = os.getenv("KR_SCHEDULE_TIMES", "16:10").split(",")
+US_SCHEDULE_TIMES = os.getenv("US_SCHEDULE_TIMES", "16:30").split(",")
 
 KIS_APP_KEY         = os.getenv("KIS_APP_KEY", "")
 KIS_APP_SECRET      = os.getenv("KIS_APP_SECRET", "")
