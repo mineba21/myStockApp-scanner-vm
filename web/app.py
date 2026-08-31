@@ -30,7 +30,7 @@ from notifications.telegram import test_telegram
 from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
                     MAX_PIVOT_EXT_PCT, ALERT_MAX_CUR_STOP_PCT)
 from web.asset_allocation_api import router as asset_allocation_router
-from web.kiwoom_holdings import get_kiwoom_holdings
+from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holdings
 from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
 
 logger = logging.getLogger(__name__)
@@ -805,6 +805,18 @@ async def list_holdings(account_id: Optional[int] = None, db: Session = Depends(
             # 키움 장애가 기존 수동 보유현황까지 막지 않게 한다. 비밀값은 로깅하지 않는다.
             logger.warning("키움 실계좌 보유현황 조회 실패: %s", type(exc).__name__)
     return rows
+
+
+@app.get("/api/portfolio-summary")
+async def portfolio_summary():
+    """키움 실계좌별 현금·평가손익 요약. 주문 및 환전 기능은 포함하지 않는다."""
+    if not KIWOOM_WEB_ENABLED:
+        return []
+    try:
+        return get_kiwoom_account_summaries()
+    except Exception:
+        logger.exception("키움 계좌 요약 조회 실패")
+        raise HTTPException(status_code=502, detail="키움 계좌 요약을 불러오지 못했습니다.")
 
 
 class HoldingRiskUpdate(BaseModel):

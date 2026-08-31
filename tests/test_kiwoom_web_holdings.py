@@ -30,7 +30,7 @@ def test_map_kiwoom_holding_matches_web_schema():
     assert "app_key" not in row
 
 
-def test_account2_is_labeled_as_asset_allocation_account():
+def test_account_profiles_use_portfolio_names():
     domestic = kiwoom_holdings.map_kiwoom_holding(
         "account2", {"stk_cd": "005930", "rmnd_qty": "1"}
     )
@@ -38,8 +38,42 @@ def test_account2_is_labeled_as_asset_allocation_account():
         "account2", {"stk_cd": "SPY", "poss_qty": "1"}
     )
 
-    assert domestic["account_name"] == "키움 account2 · 자산배분 전용"
-    assert overseas["account_name"] == "키움 account2 · 자산배분 전용"
+    assert domestic["account_name"] == "자유투자 · account2"
+    assert overseas["account_name"] == "자유투자 · account2"
+    assert kiwoom_holdings.map_kiwoom_holding(
+        "account1", {"stk_cd": "005930", "rmnd_qty": "1"}
+    )["account_name"] == "퀀트투자 · account1"
+    assert kiwoom_holdings.map_kiwoom_holding(
+        "account4", {"stk_cd": "005930", "rmnd_qty": "1"}
+    )["account_name"] == "ISA · account4"
+
+
+def test_account_summary_maps_cash_and_profit_by_market():
+    summary = kiwoom_holdings._account_summary(
+        "account1",
+        {"summary": {"tot_pur_amt": "1000", "tot_evlt_amt": "1200", "tot_evlt_pl": "200", "tot_prft_rt": "20", "prsm_dpst_aset_amt": "1700"}},
+        {"summary": {"entr": "500", "pymn_alow_amt": "450", "ord_alow_amt": "430", "d2_entra": "480"}},
+        {"items": [{"crnc_code": "USD", "fc_entra": "100.25", "fc_pymn_alowa": "90", "fc_ord_alowa": "95"}]},
+        {"summary": {"aset_evlt_amt": "200000"}, "items": [{"crnc_code": "USD", "evlt_amt": "300", "crnc_rt": "1400", "chg_entr": "140350", "chg_evlt_amt": "420000"}]},
+        {"items": [{"crnc_code": "USD", "pl_amt": "20", "pl_rt": "7.14", "chg_profit_amt": "28000"}]},
+        updated_at="2026-08-31T12:00:00Z",
+    )
+
+    assert summary["display_name"] == "퀀트투자"
+    assert summary["domestic"]["cash"] == 500
+    assert summary["domestic"]["profit_loss"] == 200
+    assert summary["overseas"]["cash"] == 100.25
+    assert summary["overseas"]["evaluation_amount"] == 300
+    assert summary["overseas"]["profit_loss"] == 20
+    assert summary["read_only"] is True
+
+
+def test_empty_overseas_valuation_is_treated_as_zero_balance():
+    report = kiwoom_holdings._safe_overseas_call(
+        lambda: (_ for _ in ()).throw(KiwoomError("조회 실패 (20): 조회내역이 없습니다."))
+    )
+
+    assert report == {"summary": {}, "items": [], "holdings": []}
 
 
 def test_map_kiwoom_overseas_holding_matches_web_schema():

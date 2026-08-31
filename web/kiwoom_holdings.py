@@ -18,8 +18,14 @@ from trading.kiwoom_readonly import (
 
 
 _LOCK = threading.Lock()
-_BALANCE_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": []}
+_BALANCE_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": [], "accounts": []}
 _TOKEN_CACHE: dict[str, tuple[float, str]] = {}
+
+ACCOUNT_NAMES = {
+    "account1": "퀀트투자",
+    "account2": "자유투자",
+    "account4": "ISA",
+}
 
 
 def _number(value: Any, *, absolute: bool = False) -> float:
@@ -43,9 +49,8 @@ def _ticker(value: Any) -> str:
 
 
 def _account_name(profile: str) -> str:
-    if profile == "account2":
-        return "키움 account2 · 자산배분 전용"
-    return f"키움 {profile}"
+    label = ACCOUNT_NAMES.get(profile)
+    return f"{label} · {profile}" if label else f"키움 {profile}"
 
 
 def map_kiwoom_holding(
@@ -168,38 +173,134 @@ def _get_token(profile: str, config: KiwoomConfig, client: KiwoomReadOnlyClient)
     return token
 
 
-def get_kiwoom_holdings(
+def _currency_item(report: dict[str, Any], currency: str = "USD") -> dict[str, Any]:
+    return next(
+        (
+            item
+            for item in report.get("items", [])
+            if str(item.get("crnc_code") or "").strip().upper() == currency
+        ),
+        {},
+    )
+
+
+def _empty_report() -> dict[str, Any]:
+    return {"summary": {}, "items": [], "holdings": []}
+
+
+def _safe_overseas_call(call: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    try:
+        return call()
+    except KiwoomError as exc:
+        # 국내전용 계좌가 미국주식 조회 TR을 호출하면 508540을 반환한다.
+        message = str(exc)
+        if "508540" in message or "조회내역이 없습니다" in message or "실패 (20)" in message:
+            return _empty_report()
+        raise
+
+
+def _optional_report(client: Any, method: str, token: str) -> dict[str, Any]:
+    call = getattr(client, method, None)
+    return call(token) if callable(call) else _empty_report()
+
+
+def _account_summary(
+    profile: str,
+    domestic_balance: dict[str, Any],
+    domestic_deposit: dict[str, Any],
+    overseas_deposit: dict[str, Any],
+    overseas_currency: dict[str, Any],
+    overseas_valuation: dict[str, Any],
+    *,
+    updated_at: str,
+) -> dict[str, Any]:
+    domestic = domestic_balance.get("summary", {})
+    cash = domestic_deposit.get("summary", {})
+    usd_cash = _currency_item(overseas_deposit)
+    usd_assets = _currency_item(overseas_currency)
+    usd_profit = _currency_item(overseas_valuation)
+    return {
+        "account_profile": profile,
+        "account_name": _account_name(profile),
+        "display_name": ACCOUNT_NAMES.get(profile, profile),
+        "updated_at": updated_at,
+        "read_only": True,
+        "domestic": {
+            "currency": "KRW",
+            "cash": _number(cash.get("entr")),
+            "withdrawable_cash": _number(cash.get("pymn_alow_amt")),
+            "orderable_cash": _number(cash.get("ord_alow_amt")),
+            "d2_cash": _number(cash.get("d2_entra")),
+            "purchase_amount": _number(domestic.get("tot_pur_amt"), absolute=True),
+            "evaluation_amount": _number(domestic.get("tot_evlt_amt"), absolute=True),
+            "profit_loss": _number(domestic.get("tot_evlt_pl")),
+            "profit_loss_pct": _number(domestic.get("tot_prft_rt")),
+            "estimated_assets": _number(domestic.get("prsm_dpst_aset_amt"), absolute=True),
+        },
+        "overseas": {
+            "currency": "USD",
+            "cash": _number(usd_cash.get("fc_entra")),
+            "withdrawable_cash": _number(usd_cash.get("fc_pymn_alowa")),
+            "orderable_cash": _number(usd_cash.get("fc_ord_alowa")),
+            "evaluation_amount": _number(usd_assets.get("evlt_amt"), absolute=True),
+            "profit_loss": _number(usd_profit.get("pl_amt")),
+            "profit_loss_pct": _number(usd_profit.get("pl_rt")),
+            "exchange_rate": _number(usd_assets.get("crnc_rt"), absolute=True),
+            "cash_krw": _number(usd_assets.get("chg_entr")),
+            "evaluation_amount_krw": _number(usd_assets.get("chg_evlt_amt"), absolute=True),
+            "profit_loss_krw": _number(usd_profit.get("chg_profit_amt")),
+            "estimated_assets_krw": _number(
+                overseas_currency.get("summary", {}).get("aset_evlt_amt"),
+                absolute=True,
+            ),
+        },
+    }
+
+
+def _load_kiwoom_portfolio(
     *,
     force: bool = False,
     client_factory: Callable[[KiwoomConfig], KiwoomReadOnlyClient] = KiwoomReadOnlyClient,
-) -> list[dict[str, Any]]:
-    """5계좌 잔고를 합쳐 반환한다. 금융 데이터는 프로세스 메모리에만 캐시한다."""
+) -> dict[str, list[dict[str, Any]]]:
+    """계좌별 주식·현금·평가 요약을 조회하고 메모리에만 캐시한다."""
     try:
         cache_seconds = max(0, int(os.getenv("KIWOOM_BALANCE_CACHE_SECONDS", "60")))
     except ValueError:
         cache_seconds = 60
     now = time.monotonic()
     if not force and _BALANCE_CACHE["expires_at"] > now:
-        return list(_BALANCE_CACHE["rows"])
+        return {
+            "rows": list(_BALANCE_CACHE["rows"]),
+            "accounts": list(_BALANCE_CACHE["accounts"]),
+        }
 
     with _LOCK:
         now = time.monotonic()
         if not force and _BALANCE_CACHE["expires_at"] > now:
-            return list(_BALANCE_CACHE["rows"])
+            return {
+                "rows": list(_BALANCE_CACHE["rows"]),
+                "accounts": list(_BALANCE_CACHE["accounts"]),
+            }
         rows: list[dict[str, Any]] = []
+        accounts: list[dict[str, Any]] = []
         updated_at = datetime.now(timezone.utc).isoformat()
         for profile, config in load_profile_configs().items():
             client = client_factory(config)
             token = _get_token(profile, config, client)
             balance = client.get_account_balance(token)
-            try:
-                overseas_balance = client.get_overseas_account_balance(token)
-            except KiwoomError as exc:
-                # 국내전용 계좌는 미국주식 API가 508540을 반환한다. 이 경우만
-                # 해외 잔고를 비운 채 국내 잔고 조회 결과는 계속 노출한다.
-                if "508540" not in str(exc):
-                    raise
-                overseas_balance = {"holdings": []}
+            domestic_deposit = _optional_report(client, "get_domestic_deposit", token)
+            overseas_balance = _safe_overseas_call(
+                lambda: client.get_overseas_account_balance(token)
+            )
+            overseas_deposit = _safe_overseas_call(
+                lambda: _optional_report(client, "get_overseas_deposit", token)
+            )
+            overseas_currency = _safe_overseas_call(
+                lambda: _optional_report(client, "get_overseas_currency_valuation", token)
+            )
+            overseas_valuation = _safe_overseas_call(
+                lambda: _optional_report(client, "get_overseas_valuation", token)
+            )
             rows.extend(
                 map_kiwoom_holding(profile, item, updated_at=updated_at)
                 for item in balance["holdings"]
@@ -210,6 +311,17 @@ def get_kiwoom_holdings(
                 for item in overseas_balance["holdings"]
                 if _number(item.get("poss_qty"), absolute=True) > 0
             )
+            accounts.append(
+                _account_summary(
+                    profile,
+                    balance,
+                    domestic_deposit,
+                    overseas_deposit,
+                    overseas_currency,
+                    overseas_valuation,
+                    updated_at=updated_at,
+                )
+            )
         rows.sort(
             key=lambda item: (
                 item["account_profile"],
@@ -217,12 +329,34 @@ def get_kiwoom_holdings(
                 item["ticker"],
             )
         )
-        _BALANCE_CACHE.update(expires_at=now + cache_seconds, rows=rows)
-        return list(rows)
+        _BALANCE_CACHE.update(
+            expires_at=now + cache_seconds,
+            rows=rows,
+            accounts=accounts,
+        )
+        return {"rows": list(rows), "accounts": list(accounts)}
+
+
+def get_kiwoom_holdings(
+    *,
+    force: bool = False,
+    client_factory: Callable[[KiwoomConfig], KiwoomReadOnlyClient] = KiwoomReadOnlyClient,
+) -> list[dict[str, Any]]:
+    """기존 WEB 호환용 실계좌 종목 행을 반환한다."""
+    return _load_kiwoom_portfolio(force=force, client_factory=client_factory)["rows"]
+
+
+def get_kiwoom_account_summaries(
+    *,
+    force: bool = False,
+    client_factory: Callable[[KiwoomConfig], KiwoomReadOnlyClient] = KiwoomReadOnlyClient,
+) -> list[dict[str, Any]]:
+    """계좌별 원화·달러 현금과 국내·해외 평가손익을 반환한다."""
+    return _load_kiwoom_portfolio(force=force, client_factory=client_factory)["accounts"]
 
 
 def clear_kiwoom_cache() -> None:
     """테스트 및 강제 새로고침용 캐시 초기화."""
     with _LOCK:
-        _BALANCE_CACHE.update(expires_at=0.0, rows=[])
+        _BALANCE_CACHE.update(expires_at=0.0, rows=[], accounts=[])
         _TOKEN_CACHE.clear()

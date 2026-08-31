@@ -3,11 +3,15 @@ import requests
 
 from trading.kiwoom_readonly import (
     BALANCE_API_ID,
+    DOMESTIC_DEPOSIT_API_ID,
     KiwoomConfig,
     KiwoomError,
     KiwoomReadOnlyClient,
     MOCK_BASE_URL,
     OVERSEAS_BALANCE_API_ID,
+    OVERSEAS_CURRENCY_API_ID,
+    OVERSEAS_DEPOSIT_API_ID,
+    OVERSEAS_VALUATION_API_ID,
     REAL_BASE_URL,
     load_profile_configs,
 )
@@ -146,6 +150,34 @@ def test_overseas_balance_uses_us_read_only_api_and_follows_continuation(monkeyp
     assert first_request["headers"]["api-id"] == "ust21070"
     assert first_request["json"] == {"stex_tp": "", "stk_cd": ""}
     assert session.calls[1][1]["headers"]["next-key"] == "us-next"
+
+
+def test_cash_and_valuation_methods_use_read_only_account_trs():
+    session = _Session([
+        _Response({"return_code": 0, "entr": "500", "ord_alow_amt": "400"}),
+        _Response({"return_code": 0, "result_list": [{"crnc_code": "USD", "fc_entra": "10.25"}]}),
+        _Response({"return_code": 0, "aset_evlt_amt": "10000", "result_list": [{"crnc_code": "USD", "evlt_amt": "20"}]}),
+        _Response({"return_code": 0, "result_list": [{"crnc_code": "USD", "pl_amt": "2"}]}),
+    ])
+    client = KiwoomReadOnlyClient(KiwoomConfig("key", "secret"), session)
+
+    domestic = client.get_domestic_deposit("token")
+    overseas_cash = client.get_overseas_deposit("token")
+    overseas_assets = client.get_overseas_currency_valuation("token")
+    overseas_profit = client.get_overseas_valuation("token")
+
+    assert domestic["summary"]["entr"] == "500"
+    assert overseas_cash["items"][0]["fc_entra"] == "10.25"
+    assert overseas_assets["summary"]["aset_evlt_amt"] == "10000"
+    assert overseas_profit["items"][0]["pl_amt"] == "2"
+    assert [call[1]["headers"]["api-id"] for call in session.calls] == [
+        DOMESTIC_DEPOSIT_API_ID,
+        OVERSEAS_DEPOSIT_API_ID,
+        OVERSEAS_CURRENCY_API_ID,
+        OVERSEAS_VALUATION_API_ID,
+    ]
+    assert session.calls[0][1]["json"] == {"qry_tp": "3"}
+    assert session.calls[2][1]["json"] == {"cmsn_incl_tp": "1", "exrt_tp": "1"}
 
 
 def test_api_error_does_not_expose_credentials():

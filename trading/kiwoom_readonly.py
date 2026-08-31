@@ -21,8 +21,12 @@ from dotenv import load_dotenv
 TOKEN_PATH = "/oauth2/token"
 BALANCE_PATH = "/api/dostk/acnt"
 BALANCE_API_ID = "kt00018"
+DOMESTIC_DEPOSIT_API_ID = "kt00001"
 OVERSEAS_BALANCE_PATH = "/api/us/acnt"
 OVERSEAS_BALANCE_API_ID = "ust21070"
+OVERSEAS_DEPOSIT_API_ID = "ust21110"
+OVERSEAS_CURRENCY_API_ID = "ust21120"
+OVERSEAS_VALUATION_API_ID = "ust21121"
 REAL_BASE_URL = "https://api.kiwoom.com"
 MOCK_BASE_URL = "https://mockapi.kiwoom.com"
 DEFAULT_PROFILES_FILE = Path.home() / ".config" / "mystockapp" / "kiwoom_profiles.json"
@@ -280,6 +284,111 @@ class KiwoomReadOnlyClient:
             "pages": pages,
             "summary": summary,
             "holdings": holdings,
+        }
+
+    def get_domestic_deposit(
+        self,
+        token: str,
+        *,
+        query_type: str = "3",
+    ) -> dict[str, Any]:
+        """``kt00001`` 국내 예수금·주문가능·출금가능 금액을 조회한다."""
+        if query_type not in {"2", "3"}:
+            raise KiwoomError("query_type은 2(일반) 또는 3(추정)이어야 합니다.")
+        return self._post_read_only_report(
+            token,
+            path=BALANCE_PATH,
+            api_id=DOMESTIC_DEPOSIT_API_ID,
+            payload={"qry_tp": query_type},
+            operation="국내 예수금 조회",
+        )
+
+    def get_overseas_deposit(self, token: str) -> dict[str, Any]:
+        """``ust21110`` 원화 및 통화별 외화 예수금을 조회한다."""
+        return self._post_read_only_report(
+            token,
+            path=OVERSEAS_BALANCE_PATH,
+            api_id=OVERSEAS_DEPOSIT_API_ID,
+            payload={},
+            operation="해외주식 예수금 조회",
+            list_key="result_list",
+        )
+
+    def get_overseas_currency_valuation(self, token: str) -> dict[str, Any]:
+        """``ust21120`` 통화별 예수금·증권평가액과 적용환율을 조회한다."""
+        return self._post_read_only_report(
+            token,
+            path=OVERSEAS_BALANCE_PATH,
+            api_id=OVERSEAS_CURRENCY_API_ID,
+            payload={"cmsn_incl_tp": "1", "exrt_tp": "1"},
+            operation="해외 통화별 자산 조회",
+            list_key="result_list",
+        )
+
+    def get_overseas_valuation(self, token: str) -> dict[str, Any]:
+        """``ust21121`` 통화별 해외증권 평가손익을 조회한다."""
+        return self._post_read_only_report(
+            token,
+            path=OVERSEAS_BALANCE_PATH,
+            api_id=OVERSEAS_VALUATION_API_ID,
+            payload={"cmsn_incl_tp": "1", "exrt_tp": "1"},
+            operation="해외증권 평가손익 조회",
+            list_key="result_list",
+        )
+
+    def _post_read_only_report(
+        self,
+        token: str,
+        *,
+        path: str,
+        api_id: str,
+        payload: dict[str, str],
+        operation: str,
+        list_key: str | None = None,
+        max_pages: int = 10,
+    ) -> dict[str, Any]:
+        """주문 기능과 분리된 조회 TR을 연속조회까지 안전하게 호출한다."""
+        summary: dict[str, Any] = {}
+        items: list[dict[str, Any]] = []
+        cont_yn: str | None = None
+        next_key: str | None = None
+        pages = 0
+        while pages < max_pages:
+            headers = {
+                "Content-Type": "application/json;charset=UTF-8",
+                "authorization": f"Bearer {token}",
+                "api-id": api_id,
+            }
+            if cont_yn == "Y" and next_key:
+                headers["cont-yn"] = cont_yn
+                headers["next-key"] = next_key
+            response = self.session.post(
+                self.config.base_url + path,
+                headers=headers,
+                json=payload,
+                timeout=self.config.timeout_seconds,
+            )
+            data = self._parse_response(response, operation)
+            pages += 1
+            if pages == 1:
+                summary = {
+                    key: value
+                    for key, value in data.items()
+                    if key not in {list_key, "return_code", "return_msg"}
+                }
+            if list_key and isinstance(data.get(list_key), list):
+                items.extend(item for item in data[list_key] if isinstance(item, dict))
+            cont_yn = response.headers.get("cont-yn")
+            next_key = response.headers.get("next-key")
+            if cont_yn != "Y" or not next_key:
+                break
+            time.sleep(0.2)
+        return {
+            "mode": self.config.mode,
+            "api_id": api_id,
+            "pages": pages,
+            "summary": summary,
+            "items": items,
         }
 
     @staticmethod
