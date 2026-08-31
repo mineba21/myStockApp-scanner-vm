@@ -69,6 +69,13 @@ class ScanResult(Base):
     cur_ext_pct       = Column(Float,       nullable=True)
     cur_stop_pct      = Column(Float,       nullable=True)
     entry_warnings    = Column(Text,        nullable=True)  # JSON 배열
+    # ── Step 5 position-sizing snapshot ────────────────────────
+    suggested_qty         = Column(Integer,     nullable=True)
+    r_per_share           = Column(Float,       nullable=True)
+    risk_amount           = Column(Float,       nullable=True)
+    position_pct          = Column(Float,       nullable=True)
+    sizing_constrained_by = Column(String(20),  nullable=True)
+    equity_snapshot       = Column(Float,       nullable=True)
     # ── Strict Weinstein filter (Phase 1 scaffold) ──────────────
     stop_loss            = Column(Float,       nullable=True)              # Gate 8: BUY 시그널 손절가
     sector_name          = Column(String(50),  nullable=True)              # Gate 2: 종목 sector (후속 plan)
@@ -111,6 +118,23 @@ class UpthrustCooldown(Base):
 
 
 # ── 계좌 및 거래 관리 ────────────────────────────────────────────
+
+class AccountEquity(Base):
+    """시장별 계좌 자산 스냅샷.
+
+    append-only 이력을 유지한다. 현재 값은 market 별 recorded_at 최신 행이며,
+    기존 행을 갱신하지 않는다.
+    """
+    __tablename__ = "account_equity"
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(10), nullable=False, index=True)  # KR / US
+    currency = Column(String(3), nullable=False)             # KRW / USD
+    total_equity = Column(Float, nullable=False)
+    cash_balance = Column(Float, nullable=False)
+    note = Column(String(200), nullable=True)
+    recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
 
 class Account(Base):
     """계좌 (여러 계좌 지원)"""
@@ -181,10 +205,17 @@ class Holding(Base):
     avg_price = Column(Float, default=0)          # 평단가
     current_price = Column(Float, nullable=True)  # 현재가 (캐시)
     price_updated_at = Column(DateTime, nullable=True)
+    entry_price = Column(Float, nullable=True)
+    initial_stop_loss = Column(Float, nullable=True)
+    current_stop_loss = Column(Float, nullable=True)
+    initial_r = Column(Float, nullable=True)
     sell_status = Column(String(20), default="PENDING", server_default="PENDING")
     sell_severity = Column(String(10), nullable=True)
     sell_reason = Column(Text, nullable=True)
     sell_checked_at = Column(DateTime, nullable=True)
+    last_alert_severity = Column(String(10), nullable=True)
+    last_alert_reason = Column(String(200), nullable=True)
+    last_alert_at = Column(DateTime, nullable=True)
     memo = Column(Text, default="")
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -262,6 +293,12 @@ def _migrate():
         "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS cur_ext_pct DOUBLE PRECISION",
         "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS cur_stop_pct DOUBLE PRECISION",
         "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS entry_warnings TEXT",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS suggested_qty INTEGER",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS r_per_share DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS risk_amount DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS position_pct DOUBLE PRECISION",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS sizing_constrained_by VARCHAR(20)",
+        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS equity_snapshot DOUBLE PRECISION",
     ]
 
     if engine.dialect.name != "sqlite":
@@ -270,6 +307,13 @@ def _migrate():
             "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_severity VARCHAR(10)",
             "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_reason TEXT",
             "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_checked_at TIMESTAMP",
+            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS entry_price DOUBLE PRECISION",
+            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS initial_stop_loss DOUBLE PRECISION",
+            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS current_stop_loss DOUBLE PRECISION",
+            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS initial_r DOUBLE PRECISION",
+            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_alert_severity VARCHAR(10)",
+            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_alert_reason VARCHAR(200)",
+            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_alert_at TIMESTAMP",
         ]
         with engine.begin() as conn:
             for ddl in scan_result_ddls + holding_ddls:
@@ -319,6 +363,13 @@ def _migrate():
             ("cur_ext_pct",          "ALTER TABLE scan_results ADD COLUMN cur_ext_pct REAL"),
             ("cur_stop_pct",         "ALTER TABLE scan_results ADD COLUMN cur_stop_pct REAL"),
             ("entry_warnings",       "ALTER TABLE scan_results ADD COLUMN entry_warnings TEXT"),
+            # Step 5 position-sizing snapshot
+            ("suggested_qty",         "ALTER TABLE scan_results ADD COLUMN suggested_qty INTEGER"),
+            ("r_per_share",           "ALTER TABLE scan_results ADD COLUMN r_per_share REAL"),
+            ("risk_amount",           "ALTER TABLE scan_results ADD COLUMN risk_amount REAL"),
+            ("position_pct",          "ALTER TABLE scan_results ADD COLUMN position_pct REAL"),
+            ("sizing_constrained_by", "ALTER TABLE scan_results ADD COLUMN sizing_constrained_by VARCHAR(20)"),
+            ("equity_snapshot",       "ALTER TABLE scan_results ADD COLUMN equity_snapshot REAL"),
             # Strict Weinstein filter (Phase 1)
             ("stop_loss",            "ALTER TABLE scan_results ADD COLUMN stop_loss REAL"),
             ("sector_name",          "ALTER TABLE scan_results ADD COLUMN sector_name VARCHAR(50)"),
@@ -349,6 +400,13 @@ def _migrate():
             ("sell_severity", "ALTER TABLE holdings ADD COLUMN sell_severity VARCHAR(10)"),
             ("sell_reason", "ALTER TABLE holdings ADD COLUMN sell_reason TEXT"),
             ("sell_checked_at", "ALTER TABLE holdings ADD COLUMN sell_checked_at DATETIME"),
+            ("entry_price", "ALTER TABLE holdings ADD COLUMN entry_price REAL"),
+            ("initial_stop_loss", "ALTER TABLE holdings ADD COLUMN initial_stop_loss REAL"),
+            ("current_stop_loss", "ALTER TABLE holdings ADD COLUMN current_stop_loss REAL"),
+            ("initial_r", "ALTER TABLE holdings ADD COLUMN initial_r REAL"),
+            ("last_alert_severity", "ALTER TABLE holdings ADD COLUMN last_alert_severity VARCHAR(10)"),
+            ("last_alert_reason", "ALTER TABLE holdings ADD COLUMN last_alert_reason VARCHAR(200)"),
+            ("last_alert_at", "ALTER TABLE holdings ADD COLUMN last_alert_at DATETIME"),
         ]:
             if col not in holding_cols:
                 try:

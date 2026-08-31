@@ -112,6 +112,28 @@ ALERT_MAX_CUR_EXT_PCT   = float(os.getenv("ALERT_MAX_CUR_EXT_PCT", "5.0"))
 ALERT_MAX_CUR_STOP_PCT  = float(os.getenv("ALERT_MAX_CUR_STOP_PCT", "12.0"))
 ALERT_FRESHNESS_AS_GATE = os.getenv("ALERT_FRESHNESS_AS_GATE", "false").lower() == "true"
 
+# ── Step 5 — Van Tharp R-multiple position sizing ──────────────
+# market_param() 으로 KR_/US_ 오버라이드를 지원한다. US와 KR 자산/heat는
+# 서로 독립이며 환율 환산을 하지 않는다.
+RISK_PCT              = float(os.getenv("RISK_PCT", "1.0"))
+MAX_POSITION_PCT      = float(os.getenv("MAX_POSITION_PCT", "20.0"))
+MAX_TOTAL_HEAT_PCT    = float(os.getenv("MAX_TOTAL_HEAT_PCT", "6.0"))
+MIN_R_PCT             = float(os.getenv("MIN_R_PCT", "3.0"))
+MAX_R_PCT             = float(os.getenv("MAX_R_PCT", "15.0"))
+R_BAND_AS_GATE        = os.getenv("R_BAND_AS_GATE", "true").lower() == "true"
+
+# ── Step 6 — 보유 종목 매도 알림 ───────────────────────────
+HOLDING_ALERT_REPEAT_HOURS = int(os.getenv("HOLDING_ALERT_REPEAT_HOURS", "24"))
+
+for _sizing_name in (
+    "RISK_PCT", "MAX_POSITION_PCT", "MAX_TOTAL_HEAT_PCT",
+    "MIN_R_PCT", "MAX_R_PCT",
+):
+    for _sizing_market in ("KR", "US"):
+        _sizing_key = f"{_sizing_market}_{_sizing_name}"
+        if _sizing_key in os.environ:
+            globals()[_sizing_key] = float(os.environ[_sizing_key])
+
 
 def market_param(name: str, market: "str | None", default):
     """시장별 파라미터 오버라이드 조회.

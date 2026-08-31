@@ -459,6 +459,51 @@
 ═════════════════════════════════════════════════════════ -->
 <div x-show="activeTab==='account'" x-cloak>
 
+  <!-- 포지션 사이징용 시장별 자산 스냅샷 -->
+  <div class="card p-4 mb-6">
+    <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+      <div>
+        <h2 class="font-bold text-slate-800">🎯 포지션 사이징 자산</h2>
+        <p class="text-xs text-slate-400 mt-1">KRW와 USD는 서로 환산하지 않고 시장별로 독립 관리합니다.</p>
+      </div>
+      <div class="text-xs text-slate-500" x-show="equity[equityForm.market]">
+        최근 갱신 <span class="font-semibold" x-text="fmtDt(equity[equityForm.market]?.recorded_at)"></span>
+        <span x-show="equity[equityForm.market]?.is_stale"
+          class="ml-2 px-2 py-1 rounded bg-amber-100 text-amber-700 font-bold">⚠ 자산 정보가 오래되었습니다</span>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">시장</label>
+        <select x-model="equityForm.market" @change="fillEquityForm()" class="input">
+          <option value="KR">🇰🇷 KR (KRW)</option>
+          <option value="US">🇺🇸 US (USD)</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">총 자산</label>
+        <input x-model.number="equityForm.total_equity" type="number" min="0" step="any" class="input" placeholder="100000"/>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">매수 가능 현금</label>
+        <input x-model.number="equityForm.cash_balance" type="number" min="0" step="any" class="input" placeholder="50000"/>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">메모 (선택)</label>
+        <input x-model="equityForm.note" maxlength="200" class="input" placeholder="월말 자산"/>
+      </div>
+      <button @click="saveEquity()" :disabled="equitySaving"
+        class="btn btn-primary disabled:opacity-50" x-text="equitySaving?'저장 중...':'새 스냅샷 저장'"></button>
+    </div>
+    <div class="mt-3 text-xs text-slate-500" x-show="equity[equityForm.market]">
+      현재 등록값:
+      총 자산 <strong x-text="fmtMoney(equity[equityForm.market]?.total_equity, equity[equityForm.market]?.currency)"></strong>
+      · 현금 <strong x-text="fmtMoney(equity[equityForm.market]?.cash_balance, equity[equityForm.market]?.currency)"></strong>
+      <span x-show="equity[equityForm.market]?.note"> · <span x-text="equity[equityForm.market]?.note"></span></span>
+    </div>
+    <p class="mt-3 text-xs text-slate-400" x-show="!equity[equityForm.market]">아직 등록된 자산이 없습니다.</p>
+  </div>
+
   <!-- 통화별 합산 요약 -->
   <div class="grid grid-cols-2 gap-4 mb-6">
     <div class="card p-4 border-l-4 border-blue-400">
@@ -674,8 +719,8 @@
 <div x-show="activeTab==='holdings'" x-cloak>
 
   <!-- 필터 바 -->
-  <div class="flex justify-between items-center mb-4">
-    <div class="flex gap-2">
+  <div class="flex flex-wrap justify-between items-center gap-3 mb-3">
+    <div class="flex flex-wrap gap-2">
       <button @click="holdingsMarket='ALL'"
         :class="holdingsMarket==='ALL'?'bg-indigo-600 text-white':'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'"
         class="px-4 py-1.5 rounded-full text-sm font-semibold transition">전체</button>
@@ -685,6 +730,16 @@
       <button @click="holdingsMarket='US'"
         :class="holdingsMarket==='US'?'bg-indigo-600 text-white':'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'"
         class="px-4 py-1.5 rounded-full text-sm font-semibold transition">🇺🇸 미국</button>
+      <span class="w-px bg-slate-200 mx-1"></span>
+      <button @click="holdingsSource='ALL'"
+        :class="holdingsSource==='ALL'?'bg-slate-700 text-white':'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'"
+        class="px-3 py-1.5 rounded-full text-sm font-semibold transition">전체 출처</button>
+      <button @click="holdingsSource='manual'"
+        :class="holdingsSource==='manual'?'bg-slate-700 text-white':'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'"
+        class="px-3 py-1.5 rounded-full text-sm font-semibold transition">수동</button>
+      <button @click="holdingsSource='kiwoom'"
+        :class="holdingsSource==='kiwoom'?'bg-emerald-600 text-white':'bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-50'"
+        class="px-3 py-1.5 rounded-full text-sm font-semibold transition">키움 실계좌</button>
     </div>
     <button @click="refreshPrices()" class="btn btn-ghost flex items-center gap-1.5">
       <svg class="w-3.5 h-3.5" :class="priceRefreshing?'spin':''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -694,11 +749,44 @@
     </button>
   </div>
 
+  <!-- 상세 필터 -->
+  <div class="card p-3 mb-4 flex flex-wrap items-center gap-2">
+    <label class="relative flex-1 min-w-52">
+      <span class="sr-only">종목 검색</span>
+      <input x-model.debounce.200ms="holdingsSearch" type="search"
+        placeholder="종목명 또는 티커 검색"
+        class="input w-full pl-9">
+      <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35m1.35-5.65a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z"/>
+      </svg>
+    </label>
+    <select x-model="holdingsAccount" class="input w-auto min-w-40" aria-label="계좌 필터">
+      <option value="ALL">전체 계좌</option>
+      <template x-for="account in holdingAccounts" :key="account.key">
+        <option :value="account.key" x-text="account.label"></option>
+      </template>
+    </select>
+    <select x-model="holdingsPerformance" class="input w-auto" aria-label="수익 상태 필터">
+      <option value="ALL">전체 수익 상태</option>
+      <option value="PROFIT">수익 종목</option>
+      <option value="LOSS">손실 종목</option>
+      <option value="FLAT">보합 종목</option>
+    </select>
+    <button @click="resetHoldingFilters()" class="btn btn-ghost text-xs">필터 초기화</button>
+    <span class="text-xs text-slate-400 ml-auto" x-text="`표시 ${filteredHoldings.length} / 전체 ${holdings.length}`"></span>
+  </div>
+
   <!-- 보유 주식 없음 -->
   <div x-show="holdings.length===0" class="card p-16 text-center text-slate-400">
     <div class="text-5xl mb-3">💼</div>
     <p class="font-semibold text-slate-500">보유 주식이 없습니다</p>
     <p class="mt-1 text-xs">매수 기록을 추가하면 자동으로 반영됩니다</p>
+  </div>
+
+  <div x-show="holdings.length>0 && filteredHoldings.length===0" class="card p-12 text-center text-slate-400">
+    <div class="text-3xl mb-2">🔎</div>
+    <p class="font-semibold text-slate-500">필터 조건에 맞는 보유 종목이 없습니다</p>
+    <button @click="resetHoldingFilters()" class="mt-3 text-sm text-indigo-600 hover:text-indigo-800">필터 초기화</button>
   </div>
 
   <!-- ── 🇰🇷 한국 주식 섹션 ── -->
@@ -739,23 +827,30 @@
           <table class="w-full text-xs">
             <thead class="bg-slate-50 text-slate-500 uppercase">
               <tr>
-                <th class="px-4 py-3 text-left">종목</th>
-                <th class="px-4 py-3 text-right">수량</th>
-                <th class="px-4 py-3 text-right">평단가</th>
-                <th class="px-4 py-3 text-right">현재가</th>
-                <th class="px-4 py-3 text-right">수익률</th>
-                <th class="px-4 py-3 text-right">평가금액</th>
-                <th class="px-4 py-3 text-right">손익</th>
-                <th class="px-4 py-3 text-center">업데이트</th>
+                <th class="px-4 py-3 text-left"><button @click="setHoldingSort('ticker')" class="inline-flex items-center gap-1 hover:text-indigo-600">종목 <span x-text="holdingSortIndicator('ticker')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('quantity')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">수량 <span x-text="holdingSortIndicator('quantity')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('avg_price')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">평단가 <span x-text="holdingSortIndicator('avg_price')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('current_price')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">현재가 <span x-text="holdingSortIndicator('current_price')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss_pct')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">수익률 <span x-text="holdingSortIndicator('profit_loss_pct')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('eval_amount')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">평가금액 <span x-text="holdingSortIndicator('eval_amount')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">손익 <span x-text="holdingSortIndicator('profit_loss')"></span></button></th>
+                <th class="px-4 py-3 text-center"><button @click="setHoldingSort('unrealized_r')" class="inline-flex items-center gap-1 hover:text-indigo-600">R / 손절 <span x-text="holdingSortIndicator('unrealized_r')"></span></button></th>
+                <th class="px-4 py-3 text-center"><button @click="setHoldingSort('price_updated_at')" class="inline-flex items-center gap-1 hover:text-indigo-600">업데이트 <span x-text="holdingSortIndicator('price_updated_at')"></span></button></th>
+                <th class="px-4 py-3 text-center">편집</th>
                 <th class="px-4 py-3 text-center">삭제</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
               <template x-for="h in krHoldings" :key="h.id">
-                <tr class="hover:bg-slate-50 transition">
+                <tr class="hover:bg-slate-50 transition" :class="h.source!=='kiwoom' && h.current_stop_loss==null?'bg-amber-50/70':''">
                   <td class="px-4 py-3">
-                    <div class="font-semibold text-slate-800" x-text="h.name"></div>
+                    <div class="flex items-center gap-1.5">
+                      <div class="font-semibold text-slate-800" x-text="h.name"></div>
+                      <span x-show="h.source==='kiwoom'" class="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded-full">실계좌</span>
+                    </div>
                     <div class="text-slate-400" x-text="h.ticker"></div>
+                    <div x-show="h.source==='kiwoom'" class="text-emerald-700 mt-1" x-text="h.account_name"></div>
+                    <div x-show="h.source!=='kiwoom' && h.current_stop_loss==null" class="text-amber-700 font-semibold mt-1">⚠️ 손절가 미등록</div>
                   </td>
                   <td class="px-4 py-3 text-right text-slate-700 font-medium" x-text="h.quantity?.toLocaleString()"></td>
                   <td class="px-4 py-3 text-right text-slate-700" x-text="'₩'+h.avg_price?.toLocaleString()"></td>
@@ -769,10 +864,19 @@
                   <td class="px-4 py-3 text-right font-semibold"
                     :class="h.profit_loss>0?'text-emerald-600':h.profit_loss<0?'text-red-600':'text-slate-400'"
                     x-text="h.current_price ? (h.profit_loss>=0?'+₩':'-₩')+Math.abs(h.profit_loss)?.toLocaleString() : '-'"></td>
+                  <td class="px-4 py-3 text-center">
+                    <div class="font-bold" :class="h.unrealized_r>=0?'text-emerald-600':'text-red-600'"
+                      x-text="h.unrealized_r==null?'-':(h.unrealized_r>=0?'+':'')+h.unrealized_r.toFixed(2)+'R'"></div>
+                    <div class="text-slate-400 mt-0.5" x-text="h.current_stop_loss==null?'-':'₩'+h.current_stop_loss.toLocaleString()"></div>
+                  </td>
                   <td class="px-4 py-3 text-center text-slate-400"
                     x-text="h.price_updated_at ? fmtDt(h.price_updated_at) : '미업데이트'"></td>
                   <td class="px-4 py-3 text-center">
-                    <button @click="deleteHolding(h.id, h.name||h.ticker)"
+                    <button x-show="!h.read_only" @click="openHoldingEdit(h)" class="text-xs text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded transition">편집</button>
+                    <span x-show="h.read_only" class="text-xs text-slate-400">읽기 전용</span>
+                  </td>
+                  <td class="px-4 py-3 text-center">
+                    <button x-show="!h.read_only" @click="deleteHolding(h.id, h.name||h.ticker)"
                       class="text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded transition">삭제</button>
                   </td>
                 </tr>
@@ -834,24 +938,31 @@
           <table class="w-full text-xs">
             <thead class="bg-slate-50 text-slate-500 uppercase">
               <tr>
-                <th class="px-4 py-3 text-left">종목</th>
-                <th class="px-4 py-3 text-right">수량</th>
-                <th class="px-4 py-3 text-right">평단가(USD)</th>
-                <th class="px-4 py-3 text-right">현재가(USD)</th>
-                <th class="px-4 py-3 text-right">수익률</th>
-                <th class="px-4 py-3 text-right">평가금액</th>
-                <th class="px-4 py-3 text-right">원화 평가</th>
-                <th class="px-4 py-3 text-right">손익(USD)</th>
-                <th class="px-4 py-3 text-center">업데이트</th>
+                <th class="px-4 py-3 text-left"><button @click="setHoldingSort('ticker')" class="inline-flex items-center gap-1 hover:text-indigo-600">종목 <span x-text="holdingSortIndicator('ticker')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('quantity')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">수량 <span x-text="holdingSortIndicator('quantity')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('avg_price')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">평단가(USD) <span x-text="holdingSortIndicator('avg_price')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('current_price')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">현재가(USD) <span x-text="holdingSortIndicator('current_price')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss_pct')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">수익률 <span x-text="holdingSortIndicator('profit_loss_pct')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('eval_amount')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">평가금액 <span x-text="holdingSortIndicator('eval_amount')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('eval_amount_krw')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">원화 평가 <span x-text="holdingSortIndicator('eval_amount_krw')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">손익(USD) <span x-text="holdingSortIndicator('profit_loss')"></span></button></th>
+                <th class="px-4 py-3 text-center"><button @click="setHoldingSort('unrealized_r')" class="inline-flex items-center gap-1 hover:text-indigo-600">R / 손절 <span x-text="holdingSortIndicator('unrealized_r')"></span></button></th>
+                <th class="px-4 py-3 text-center"><button @click="setHoldingSort('price_updated_at')" class="inline-flex items-center gap-1 hover:text-indigo-600">업데이트 <span x-text="holdingSortIndicator('price_updated_at')"></span></button></th>
+                <th class="px-4 py-3 text-center">편집</th>
                 <th class="px-4 py-3 text-center">삭제</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
               <template x-for="h in usHoldings" :key="h.id">
-                <tr class="hover:bg-slate-50 transition">
+                <tr class="hover:bg-slate-50 transition" :class="h.current_stop_loss==null?'bg-amber-50/70':''">
                   <td class="px-4 py-3">
                     <div class="font-semibold text-slate-800" x-text="h.name"></div>
-                    <div class="text-slate-400" x-text="h.ticker"></div>
+                    <div class="flex items-center gap-1.5 text-slate-400">
+                      <span x-text="h.ticker"></span>
+                      <span x-show="h.source==='kiwoom'" class="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded-full">실계좌</span>
+                    </div>
+                    <div x-show="h.source==='kiwoom'" class="text-emerald-700 mt-1" x-text="h.account_name"></div>
+                    <div x-show="!h.read_only && h.current_stop_loss==null" class="text-amber-700 font-semibold mt-1">⚠️ 손절가 미등록</div>
                   </td>
                   <td class="px-4 py-3 text-right text-slate-700 font-medium" x-text="h.quantity?.toLocaleString()"></td>
                   <td class="px-4 py-3 text-right text-slate-700" x-text="'$'+h.avg_price?.toFixed(2)"></td>
@@ -867,11 +978,21 @@
                   <td class="px-4 py-3 text-right font-semibold"
                     :class="h.profit_loss>0?'text-emerald-600':h.profit_loss<0?'text-red-600':'text-slate-400'"
                     x-text="h.current_price ? (h.profit_loss>=0?'+':'')+' $'+(h.profit_loss||0).toFixed(2) : '-'"></td>
+                  <td class="px-4 py-3 text-center">
+                    <div class="font-bold" :class="h.unrealized_r>=0?'text-emerald-600':'text-red-600'"
+                      x-text="h.unrealized_r==null?'-':(h.unrealized_r>=0?'+':'')+h.unrealized_r.toFixed(2)+'R'"></div>
+                    <div class="text-slate-400 mt-0.5" x-text="h.current_stop_loss==null?'-':'$'+h.current_stop_loss.toFixed(2)"></div>
+                  </td>
                   <td class="px-4 py-3 text-center text-slate-400"
                     x-text="h.price_updated_at ? fmtDt(h.price_updated_at) : '미업데이트'"></td>
                   <td class="px-4 py-3 text-center">
-                    <button @click="deleteHolding(h.id, h.name||h.ticker)"
+                    <button x-show="!h.read_only" @click="openHoldingEdit(h)" class="text-xs text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded transition">편집</button>
+                    <span x-show="h.read_only" class="text-xs text-slate-400">읽기 전용</span>
+                  </td>
+                  <td class="px-4 py-3 text-center">
+                    <button x-show="!h.read_only" @click="deleteHolding(h.id, h.name||h.ticker)"
                       class="text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded transition">삭제</button>
+                    <span x-show="h.read_only" class="text-xs text-slate-300">—</span>
                   </td>
                 </tr>
               </template>
@@ -1038,6 +1159,44 @@
 </div>
 
 </main>
+
+<div x-show="showHoldingEdit" x-cloak class="modal-bg" @click.self="showHoldingEdit=false">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+    <div class="flex justify-between items-center mb-5">
+      <div>
+        <h2 class="text-base font-bold text-slate-800">보유 종목 손절가 설정</h2>
+        <p class="text-xs text-slate-400 mt-1" x-text="holdingEdit.name+' ('+holdingEdit.ticker+')'"></p>
+      </div>
+      <button @click="showHoldingEdit=false" class="text-slate-400 text-2xl leading-none">×</button>
+    </div>
+    <form @submit.prevent="saveHoldingEdit()" class="space-y-4">
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">진입가</label>
+        <input x-model="holdingEdit.entry_price" type="number" step="any" min="0" required class="input"/>
+        <p x-show="holdingEdit.entryWasPrefilled" class="text-xs text-amber-600 mt-1">평단가를 미리 채웠습니다. 저장 전 실제 최초 진입가인지 확인하세요.</p>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">최초 손절가</label>
+          <input x-model="holdingEdit.initial_stop_loss" type="number" step="any" min="0" class="input" placeholder="자동 추정 안 함"/>
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">현재 손절가</label>
+          <input x-model="holdingEdit.current_stop_loss" type="number" step="any" min="0" class="input" placeholder="자동 추정 안 함"/>
+        </div>
+      </div>
+      <div class="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm">
+        <span class="text-slate-500">최초 1R</span>
+        <span class="float-right font-bold text-slate-800" x-text="holdingInitialRText()"></span>
+      </div>
+      <p class="text-xs text-slate-400">손절가는 진입가보다 낮아야 합니다. 시스템은 손절가를 자동 추정하지 않습니다.</p>
+      <div class="flex gap-3">
+        <button type="button" @click="showHoldingEdit=false" class="flex-1 btn btn-ghost">취소</button>
+        <button type="submit" class="flex-1 btn btn-primary">저장</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <!-- ══════════════════ 모달: 거래 추가 ══════════════════════ -->
 <div x-show="showTxModal" x-cloak class="modal-bg" @click.self="showTxModal=false">
@@ -1389,6 +1548,8 @@ const REASON_LABELS_KO = {
   extended_above_30w:         '30주 MA 대비 30%+ 과열',
   stop_loss_missing:          '손절가 산출 실패',
   stop_loss_above_price:      '손절가가 현재가 이상(비정상)',
+  r_pct_too_tight:            '손절폭이 최소 R 범위보다 좁음',
+  r_pct_too_wide:             '손절폭이 최대 R 범위를 초과',
 };
 function reasonLabel(key) { return REASON_LABELS_KO[key] || key; }
 
@@ -1420,6 +1581,8 @@ function app() {
     // 계좌
     accounts: [], selectedAccountId: null,
     showAddAccount: false, accountForm: {account_type:'KR_STOCK', _region:'KR'},
+    equity: {KR:null, US:null}, equitySaving: false,
+    equityForm: {market:'KR', total_equity:null, cash_balance:null, note:''},
     // account_type 옵션 (지역별로 필터됨)
     accountTypeOptions: [],
     KR_TYPES: [
@@ -1446,6 +1609,15 @@ function app() {
     holdings: [], priceRefreshing: false,
     holdingStats: {totalCost:0, totalEval:0, totalPL:0},
     holdingsMarket: 'ALL',
+    holdingsSource: 'ALL',
+    holdingsSearch: '',
+    holdingsAccount: 'ALL',
+    holdingsPerformance: 'ALL',
+    holdingsSortKey: 'ticker',
+    holdingsSortDir: 'asc',
+    showHoldingEdit: false,
+    holdingEdit: {id:null, ticker:'', name:'', market:'US', entry_price:'',
+                  initial_stop_loss:'', current_stop_loss:'', entryWasPrefilled:false},
     usdKrw: 1380,
 
     // 감시
@@ -1466,6 +1638,7 @@ function app() {
       this.updateClock();
       this._ci = setInterval(() => this.updateClock(), 1000);
       await Promise.all([this.loadSettings(), this.loadAccounts(),
+                         this.loadEquity(),
                          this.loadResults(), this.loadTransactions(),
                          this.loadAllTransactions(), this.loadHoldings(),
                          this.loadWatchList(), this.loadScanLogs(),
@@ -1568,6 +1741,40 @@ function app() {
         if (!this.selectedAccountId && this.accounts.length > 0)
           this.selectedAccountId = this.accounts[0].id;
       } catch{}
+    },
+
+    async loadEquity() {
+      try {
+        const data = await (await fetch('/api/equity')).json();
+        this.equity = {KR:data.KR||null, US:data.US||null};
+        this.fillEquityForm();
+      } catch{}
+    },
+
+    fillEquityForm() {
+      const current = this.equity[this.equityForm.market];
+      this.equityForm.total_equity = current?.total_equity ?? null;
+      this.equityForm.cash_balance = current?.cash_balance ?? null;
+      this.equityForm.note = '';
+    },
+
+    async saveEquity() {
+      if (this.equitySaving) return;
+      this.equitySaving = true;
+      try {
+        const r = await fetch('/api/equity', {method:'POST',
+          headers:{'Content-Type':'application/json'}, body:JSON.stringify(this.equityForm)});
+        if (!r.ok) {
+          const e = await r.json();
+          this.toast(e.detail||'자산 저장 실패','error');
+          return;
+        }
+        const row = await r.json();
+        this.equity[row.market] = row;
+        this.toast('자산 스냅샷이 저장됐습니다','success');
+        this.fillEquityForm();
+      } catch { this.toast('자산 저장 실패','error'); }
+      finally { this.equitySaving = false; }
     },
 
     openAddAccount(region) {
@@ -1712,12 +1919,72 @@ function app() {
       } catch {}
     },
 
-    get krHoldings() { return this.holdings.filter(h=>h.market==='KR'); },
-    get usHoldings() { return this.holdings.filter(h=>h.market!=='KR'); },
+    holdingAccountKey(h) {
+      const source = h.source || 'manual';
+      return `${source}:${h.account_profile || h.account_id || h.account_name || 'unknown'}`;
+    },
+    get holdingAccounts() {
+      const accounts = new Map();
+      this.holdings.forEach(h => {
+        const key = this.holdingAccountKey(h);
+        accounts.set(key, h.account_name || h.account_profile || `계좌 ${h.account_id || ''}`.trim());
+      });
+      return [...accounts.entries()]
+        .map(([key, label]) => ({key, label}))
+        .sort((a,b) => a.label.localeCompare(b.label, 'ko'));
+    },
+    get sourceHoldings() {
+      const query = this.holdingsSearch.trim().toLocaleUpperCase();
+      const filtered = this.holdings.filter(h => {
+        if (this.holdingsSource !== 'ALL' && (h.source || 'manual') !== this.holdingsSource) return false;
+        if (this.holdingsAccount !== 'ALL' && this.holdingAccountKey(h) !== this.holdingsAccount) return false;
+        if (query && !`${h.ticker || ''} ${h.name || ''}`.toLocaleUpperCase().includes(query)) return false;
+        const profit = Number(h.profit_loss || 0);
+        if (this.holdingsPerformance === 'PROFIT' && profit <= 0) return false;
+        if (this.holdingsPerformance === 'LOSS' && profit >= 0) return false;
+        if (this.holdingsPerformance === 'FLAT' && profit !== 0) return false;
+        return true;
+      });
+      return this.sortHoldings(filtered);
+    },
+    get krHoldings() { return this.sourceHoldings.filter(h=>h.market==='KR'); },
+    get usHoldings() { return this.sourceHoldings.filter(h=>h.market!=='KR'); },
     get filteredHoldings() {
       if (this.holdingsMarket==='KR') return this.krHoldings;
       if (this.holdingsMarket==='US') return this.usHoldings;
-      return this.holdings;
+      return this.sourceHoldings;
+    },
+    setHoldingSort(key) {
+      if (this.holdingsSortKey === key) {
+        this.holdingsSortDir = this.holdingsSortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.holdingsSortKey = key;
+        this.holdingsSortDir = key === 'ticker' ? 'asc' : 'desc';
+      }
+    },
+    holdingSortIndicator(key) {
+      if (this.holdingsSortKey !== key) return '⇅';
+      return this.holdingsSortDir === 'asc' ? '↑' : '↓';
+    },
+    sortHoldings(rows) {
+      const key = this.holdingsSortKey;
+      const direction = this.holdingsSortDir === 'asc' ? 1 : -1;
+      return [...rows].sort((a, b) => {
+        let left = key === 'eval_amount_krw' ? (a.eval_amount_krw ?? Number(a.eval_amount || 0) * this.usdKrw) : a[key];
+        let right = key === 'eval_amount_krw' ? (b.eval_amount_krw ?? Number(b.eval_amount || 0) * this.usdKrw) : b[key];
+        const leftEmpty = left === null || left === undefined || left === '';
+        const rightEmpty = right === null || right === undefined || right === '';
+        if (leftEmpty !== rightEmpty) return leftEmpty ? 1 : -1;
+        if (typeof left === 'string' || typeof right === 'string') {
+          return String(left || '').localeCompare(String(right || ''), 'ko', {numeric:true}) * direction;
+        }
+        return (Number(left || 0) - Number(right || 0)) * direction;
+      });
+    },
+    resetHoldingFilters() {
+      this.holdingsSearch = '';
+      this.holdingsAccount = 'ALL';
+      this.holdingsPerformance = 'ALL';
     },
 
     async deleteHolding(id, label) {
@@ -1725,6 +1992,54 @@ function app() {
       const r = await fetch(`/api/holdings/${id}`, {method:'DELETE'});
       if (r.ok) { this.toast('삭제됐습니다','success'); await this.loadHoldings(); await this.loadAccounts(); }
       else this.toast('삭제 실패','error');
+    },
+
+    async openHoldingEdit(row) {
+      try {
+        const r = await fetch(`/api/holdings/${row.id}`);
+        const h = r.ok ? await r.json() : row;
+        const prefilled = h.entry_price == null;
+        this.holdingEdit = {
+          id:h.id, ticker:h.ticker, name:h.name, market:h.market,
+          entry_price: prefilled ? h.avg_price : h.entry_price,
+          initial_stop_loss: h.initial_stop_loss ?? '',
+          current_stop_loss: h.current_stop_loss ?? '',
+          entryWasPrefilled: prefilled,
+        };
+        this.showHoldingEdit = true;
+      } catch { this.toast('보유 정보를 불러오지 못했습니다','error'); }
+    },
+
+    holdingInitialRText() {
+      const entry = Number(this.holdingEdit.entry_price);
+      const stop = Number(this.holdingEdit.initial_stop_loss);
+      if (!(entry > 0) || !(stop > 0) || stop >= entry) return '-';
+      const value = entry - stop;
+      return this.holdingEdit.market === 'KR'
+        ? Math.round(value).toLocaleString()+'원'
+        : '$'+value.toFixed(2);
+    },
+
+    async saveHoldingEdit() {
+      const nullableNumber = value => value==='' || value==null ? null : Number(value);
+      const body = {
+        entry_price: nullableNumber(this.holdingEdit.entry_price),
+        initial_stop_loss: nullableNumber(this.holdingEdit.initial_stop_loss),
+        current_stop_loss: nullableNumber(this.holdingEdit.current_stop_loss),
+      };
+      try {
+        const r = await fetch(`/api/holdings/${this.holdingEdit.id}`, {
+          method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
+        });
+        if (!r.ok) {
+          const e = await r.json();
+          this.toast(e.detail||'저장 실패','error');
+          return;
+        }
+        this.showHoldingEdit = false;
+        await this.loadHoldings();
+        this.toast('진입가와 손절가를 저장했습니다','success');
+      } catch { this.toast('저장 실패','error'); }
     },
 
     async refreshPrices() {

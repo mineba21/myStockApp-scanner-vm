@@ -67,6 +67,10 @@ from config import (
     MAX_PIVOT_EXT_PCT,
     PIVOT_EXT_AS_GATE,
     UPTHRUST_AS_GATE,
+    MIN_R_PCT,
+    MAX_R_PCT,
+    R_BAND_AS_GATE,
+    market_param,
 )
 
 # Step 1 — 주봉 거래량을 hard gate 로 쓸지 warning 으로만 쓸지 (backward compat)
@@ -116,6 +120,8 @@ EXTENDED_ABOVE_30W         = "extended_above_30w"
 # Gate 8 — Stop-loss
 STOP_LOSS_MISSING          = "stop_loss_missing"
 STOP_LOSS_ABOVE_PRICE      = "stop_loss_above_price"
+R_PCT_TOO_TIGHT            = "r_pct_too_tight"
+R_PCT_TOO_WIDE             = "r_pct_too_wide"
 
 # Step 4 — opt-in entry timing gates
 PIVOT_EXTENSION_TOO_HIGH   = "pivot_extension_too_high"
@@ -446,6 +452,39 @@ def _check_stop_loss(signal: Dict[str, Any],
         reasons.append(STOP_LOSS_ABOVE_PRICE)
 
 
+def _check_r_band(signal: Dict[str, Any], reasons: List[str]) -> None:
+    """Gate 8 후속 — 신호일 진입가 대비 손절폭이 실행 가능한지 검사한다."""
+    price = signal.get("strict_price")
+    stop = signal.get("stop_loss")
+    if price is None or stop is None or price <= 0 or stop >= price:
+        return
+
+    market = signal.get("market")
+    min_r_pct = float(market_param("MIN_R_PCT", market, MIN_R_PCT))
+    max_r_pct = float(market_param("MAX_R_PCT", market, MAX_R_PCT))
+    r_pct = (price - stop) / price * 100.0
+
+    reason = None
+    warning = None
+    if r_pct < min_r_pct:
+        reason = R_PCT_TOO_TIGHT
+        warning = f"손절폭 {r_pct:.1f}% — 최소 R {min_r_pct:.1f}% 미만"
+    elif r_pct > max_r_pct:
+        reason = R_PCT_TOO_WIDE
+        warning = f"손절폭 {r_pct:.1f}% — 최대 R {max_r_pct:.1f}% 초과"
+
+    if reason is None:
+        return
+    if R_BAND_AS_GATE:
+        reasons.append(reason)
+        return
+
+    warnings = list(signal.get("warning_flags") or [])
+    if warning not in warnings:
+        warnings.append(warning)
+    signal["warning_flags"] = warnings
+
+
 def _check_entry_controls(signal: Dict[str, Any], reasons: List[str]) -> None:
     """Step 4 opt-in gates over observations already attached to a signal.
 
@@ -505,6 +544,7 @@ def apply_strict_filter(signal: Dict[str, Any],
         _check_rs(signal, ctx, reasons)
         _check_extension(signal, reasons)
         _check_stop_loss(signal, reasons)
+        _check_r_band(signal, reasons)
 
     # Shadow 집계는 기존 8개 게이트를 통과한 후보만 대상으로 해야 한다.
     # strict mode 자체가 꺼진 legacy 경로는 기존 후보 전체가 baseline 이다.

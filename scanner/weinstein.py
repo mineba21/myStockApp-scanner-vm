@@ -2042,10 +2042,25 @@ def _rs_deteriorating(close: pd.Series,
     return rs_value < 0 and rs_trend == "FALLING"
 
 
+def _stage3_three_weeks(weekly_df: Optional[pd.DataFrame]) -> bool:
+    """완료된 최근 3개 주봉이 연속 Stage3인지 확인한다."""
+    if weekly_df is None or len(weekly_df) < WEEKLY_MA_LONG + 2:
+        return False
+    stages = []
+    for offset in (2, 1, 0):
+        frame = weekly_df.iloc[:len(weekly_df) - offset] if offset else weekly_df
+        weekly_ind = compute_weekly_indicators(frame)
+        if weekly_ind is None:
+            return False
+        stages.append(classify_stage(weekly_ind, None))
+    return stages == ["STAGE3", "STAGE3", "STAGE3"]
+
+
 def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
                       buy_price: float = None, stop_loss: float = None,
                       weekly_df: Optional[pd.DataFrame] = None,
-                      benchmark_close: Optional[pd.Series] = None) -> Optional[dict]:
+                      benchmark_close: Optional[pd.Series] = None,
+                      market_condition: Optional[str] = None) -> Optional[dict]:
     """감시 종목 매도 시그널 체크 (severity: HIGH / MEDIUM / LOW).
 
     옵션 인자 weekly_df / benchmark_close 가 제공되면 30주 SMA 붕괴/슬로프
@@ -2067,8 +2082,8 @@ def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
     reason   = None
     severity = None
 
-    if stop_loss and cur_p <= stop_loss:
-        reason   = f"손절가 도달 (현재 {cur_p:,.0f} ≤ 손절 {stop_loss:,.0f})"
+    if stop_loss is not None and cur_p < stop_loss:
+        reason   = f"손절가 이탈 (현재 {cur_p:,.2f} < 손절 {stop_loss:,.2f})"
         severity = "HIGH"
 
     elif _weekly_breakdown(weekly_df):
@@ -2084,23 +2099,29 @@ def check_sell_signal(df: pd.DataFrame, ticker: str, name: str, market: str,
                 severity = "HIGH"
                 break
 
-    if reason is None and len(ma.dropna()) >= 6:
-        slope_past = _slope(ma.iloc[:-5], n=MA_SLOPE_PERIOD)
-        if slope_past > 0 and slope <= 0:
-            reason   = "MA150 기울기 반전 (상승 추세 약화)"
-            severity = "MEDIUM"
-
-    if reason is None and _weekly_slope_reversal(weekly_df):
-        reason   = "주봉 30-SMA 기울기 반전"
+    if reason is None and _stage3_three_weeks(weekly_df):
+        reason   = "Stage3 판정 3주 연속"
         severity = "MEDIUM"
 
     if reason is None and _rs_deteriorating(close, benchmark_close):
-        reason   = "상대강도(Mansfield RS) 악화"
+        rs_value, _ = compute_relative_performance(close, benchmark_close)
+        reason   = f"Mansfield RS 하락 전환 (RS {rs_value:+.1f})"
         severity = "MEDIUM"
 
-    if reason is None and stage == "STAGE3":
-        reason   = "Stage3 진입 징후 (고점 부근, 분배 주의)"
+    if reason is None and len(ma.dropna()) >= 6:
+        slope_past = _slope(ma.iloc[:-5], n=MA_SLOPE_PERIOD)
+        if slope_past > 0 and slope <= 0:
+            reason   = "MA150 기울기 하락 반전"
+            severity = "LOW"
+
+    # 기존 주봉 기울기 경고는 MA150 반전과 같은 관찰 등급으로 유지.
+    if reason is None and _weekly_slope_reversal(weekly_df):
+        reason   = "주봉 30-SMA 기울기 반전"
         severity = "LOW"
+
+    if reason is None and market_condition == "BEAR":
+        reason   = "시장 BEAR — 신규 중단 + 약체 축소"
+        severity = "MEDIUM"
 
     if reason is None:
         return None

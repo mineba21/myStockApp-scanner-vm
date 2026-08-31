@@ -182,6 +182,29 @@ class TestRejectReasons:
 
 class TestFunnelAggregation:
 
+    def test_r_band_reasons_are_counted_by_funnel(self):
+        from scanner.scan_engine import _new_funnel, _funnel_record
+
+        funnel = _new_funnel()
+        _funnel_record(
+            funnel,
+            {"signal_type": "BREAKOUT",
+             "filter_reasons": ["r_pct_too_wide"]},
+            {"reject": None},
+            notified=False,
+        )
+        _funnel_record(
+            funnel,
+            {"signal_type": "REBOUND",
+             "filter_reasons": ["r_pct_too_tight"]},
+            {"reject": None},
+            notified=False,
+        )
+        assert funnel["strict_rejects"] == {
+            "r_pct_too_wide": 1,
+            "r_pct_too_tight": 1,
+        }
+
     def test_funnel_counts_rejects_signals_and_strict_rejects(self):
         """_funnel_record 가 세 부류(탈락/strict 탈락/시그널)를 나눠 센다."""
         from scanner.scan_engine import (

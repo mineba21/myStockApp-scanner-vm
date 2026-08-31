@@ -9,6 +9,7 @@ __pycache__/
 dist/
 build/
 .env
+.kiwoom/
 
 # Local SQLite output — should not be tracked
 *.db

@@ -156,8 +156,9 @@ def _force_all_strict_flags(monkeypatch, *,
                             require_rs_positive: bool = True,
                             require_rs_rising: bool = True,
                             require_rs_zero_cross_for_breakout: bool = True,
-                            require_stop_loss: bool = True):
-    """apply_strict_filter 통합 테스트용 — 14 STRICT_* 모두 명시 강제.
+                            require_stop_loss: bool = True,
+                            r_band_as_gate: bool = True):
+    """apply_strict_filter 통합 테스트용 — 모든 gate 플래그를 명시 강제.
 
     기본값은 plan 의 production 권장값과 동일(mode=True, sector=False).
     """
@@ -172,6 +173,7 @@ def _force_all_strict_flags(monkeypatch, *,
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_RS_RISING",           require_rs_rising)
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_RS_ZERO_CROSS_FOR_BREAKOUT", require_rs_zero_cross_for_breakout)
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_STOP_LOSS",           require_stop_loss)
+    _force_strict_flag(monkeypatch, "R_BAND_AS_GATE",                     r_band_as_gate)
 
 
 def _full_passing_breakout_signal(**overrides):
@@ -698,6 +700,57 @@ class TestStopLossGate:
         reasons = []
         _check_stop_loss({"stop_loss": 95.0, "strict_price": 100.0}, reasons)
         assert reasons == []
+
+
+class TestRBandGate:
+    def test_too_tight_and_too_wide_are_rejected(self, monkeypatch):
+        from scanner.strict_filter import (
+            _check_r_band, R_PCT_TOO_TIGHT, R_PCT_TOO_WIDE,
+        )
+        _force_strict_flag(monkeypatch, "R_BAND_AS_GATE", True)
+
+        tight_reasons = []
+        _check_r_band({"market": "US", "strict_price": 100.0,
+                       "stop_loss": 98.0}, tight_reasons)
+        assert tight_reasons == [R_PCT_TOO_TIGHT]
+
+        wide_reasons = []
+        _check_r_band({"market": "US", "strict_price": 100.0,
+                       "stop_loss": 84.0}, wide_reasons)
+        assert wide_reasons == [R_PCT_TOO_WIDE]
+
+    @pytest.mark.parametrize("stop", [97.0, 85.0])
+    def test_boundaries_are_inclusive(self, monkeypatch, stop):
+        from scanner.strict_filter import _check_r_band
+        _force_strict_flag(monkeypatch, "R_BAND_AS_GATE", True)
+        reasons = []
+        _check_r_band({"market": "US", "strict_price": 100.0,
+                       "stop_loss": stop}, reasons)
+        assert reasons == []
+
+    def test_gate_off_adds_warning_only(self, monkeypatch):
+        from scanner.strict_filter import _check_r_band
+        _force_strict_flag(monkeypatch, "R_BAND_AS_GATE", False)
+        signal = {"market": "US", "strict_price": 100.0,
+                  "stop_loss": 80.0, "warning_flags": []}
+        reasons = []
+        _check_r_band(signal, reasons)
+        assert reasons == []
+        assert signal["warning_flags"] == ["손절폭 20.0% — 최대 R 15.0% 초과"]
+
+    def test_market_override_is_used(self, monkeypatch):
+        import config
+        from scanner.strict_filter import _check_r_band
+        _force_strict_flag(monkeypatch, "R_BAND_AS_GATE", True)
+        monkeypatch.setattr(config, "US_MAX_R_PCT", 18.0, raising=False)
+        monkeypatch.setattr(config, "KR_MAX_R_PCT", 15.0, raising=False)
+
+        us_reasons, kr_reasons = [], []
+        signal = {"strict_price": 100.0, "stop_loss": 83.0}
+        _check_r_band({**signal, "market": "US"}, us_reasons)
+        _check_r_band({**signal, "market": "KR"}, kr_reasons)
+        assert us_reasons == []
+        assert kr_reasons == ["r_pct_too_wide"]
 
 
 # ══════════════════════════════════════════════════════════════════

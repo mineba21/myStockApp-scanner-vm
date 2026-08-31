@@ -473,7 +473,13 @@ def run_scan(market: str = "ALL", universe: str = None,
             funnel_counts["US"] = cnt
             buy_signals.extend(sigs); total_scanned += cnt
 
-        holding_checks = _check_holdings(db, kr_bench=kr_bench, us_bench=us_bench)
+        holding_signals = _check_holdings(
+            db,
+            kr_bench=kr_bench,
+            us_bench=us_bench,
+            kr_condition=kr_condition,
+            us_condition=us_condition,
+        )
         sell_signals = _check_watchlist(db, kr_bench=kr_bench, us_bench=us_bench)
 
         # Step 4 — 실제 알림 전송 직전에 현재가 기반 값을 다시 계산/저장한다.
@@ -497,10 +503,11 @@ def run_scan(market: str = "ALL", universe: str = None,
                 funnel_counts.get(funnel_market, 0),
             )
 
-        if buy_signals or sell_signals:
+        if buy_signals or sell_signals or holding_signals:
             _notify(
                 buy_signals,
                 sell_signals,
+                holding_signals,
                 send_telegram_message,
                 send_slack_message,
             )
@@ -514,7 +521,10 @@ def run_scan(market: str = "ALL", universe: str = None,
         return {"status": "done", "total_scanned": total_scanned,
                 "signals_found": len(buy_signals),
                 "sell_signals": len(sell_signals),
-                "holding_checks": holding_checks,
+                "holding_signals": len([
+                    signal for signal in holding_signals
+                    if signal.get("signal_type") == "SELL"
+                ]),
                 "funnel": funnels}
 
     except Exception as e:
@@ -543,6 +553,8 @@ def _prepare_alert_candidates(db, signals: list) -> Tuple[list, list]:
     from config import ALERT_FRESHNESS_AS_GATE
     from scanner.entry_control import annotate_alert_freshness
 
+    _attach_position_sizing(db, signals)
+
     eligible, suppressed = [], []
     for signal in signals:
         annotate_alert_freshness(signal)
@@ -554,6 +566,94 @@ def _prepare_alert_candidates(db, signals: list) -> Tuple[list, list]:
         else:
             eligible.append(signal)
     return eligible, suppressed
+
+
+def _sizing_config(market: str) -> dict:
+    """현재 config에서 시장별 사이징 값을 읽어 순수 함수에 전달한다."""
+    from config import market_param
+
+    defaults = {
+        "RISK_PCT": 1.0,
+        "MAX_POSITION_PCT": 20.0,
+        "MAX_TOTAL_HEAT_PCT": 6.0,
+        "MIN_R_PCT": 3.0,
+        "MAX_R_PCT": 15.0,
+    }
+    return {name: float(market_param(name, market, default))
+            for name, default in defaults.items()}
+
+
+def _attach_position_sizing(db, signals: list) -> None:
+    """알림 후보에 시장별 최신 자산/heat 기준 사이징 스냅샷을 붙인다."""
+    from database.models import AccountEquity, Holding
+    from scanner.sizing import calculate_open_risk, calculate_position
+
+    holdings = db.query(Holding).filter(
+        Holding.is_active == True,
+        Holding.quantity > 0,
+    ).all()
+    contexts = {}
+    for market in {str(s.get("market", "")).upper() for s in signals}:
+        if market not in {"KR", "US"}:
+            continue
+        equity = db.query(AccountEquity).filter(
+            AccountEquity.market == market,
+        ).order_by(
+            AccountEquity.recorded_at.desc(),
+            AccountEquity.id.desc(),
+        ).first()
+        contexts[market] = {
+            "equity": equity,
+            "heat": calculate_open_risk(holdings, market),
+            "cfg": _sizing_config(market),
+        }
+
+    for signal in signals:
+        market = str(signal.get("market", "")).upper()
+        context = contexts.get(market)
+        equity_row = context.get("equity") if context else None
+        heat = context.get("heat") if context else {
+            "open_risk_sum": 0.0, "warnings": [],
+        }
+        signal["_heat_warnings"] = list(heat.get("warnings") or [])
+
+        if equity_row is None or not equity_row.total_equity or equity_row.total_equity <= 0:
+            signal["sizing"] = None
+            signal["suggested_qty"] = None
+            signal["r_per_share"] = None
+            signal["risk_amount"] = None
+            signal["position_pct"] = None
+            signal["sizing_constrained_by"] = None
+            signal["equity_snapshot"] = None
+            signal["_sizing_status"] = "equity_missing"
+            continue
+
+        result = calculate_position(
+            entry=signal.get("strict_price"),
+            stop=signal.get("stop_loss"),
+            equity=equity_row.total_equity,
+            cash=equity_row.cash_balance,
+            open_risk_sum=heat["open_risk_sum"],
+            market=market,
+            cfg=context["cfg"],
+        )
+        signal["sizing"] = result
+        signal["suggested_qty"] = result["qty"]
+        signal["r_per_share"] = result["r_per_share"]
+        signal["risk_amount"] = result["risk_amount"]
+        signal["position_pct"] = result["position_pct"]
+        signal["sizing_constrained_by"] = result["constrained_by"]
+        signal["equity_snapshot"] = float(equity_row.total_equity)
+        signal["_sizing_status"] = "calculated"
+        signal["_heat_before_pct"] = round(
+            heat["open_risk_sum"] / equity_row.total_equity * 100.0, 4)
+        signal["_heat_after_pct"] = round(
+            (heat["open_risk_sum"] + result["risk_amount"])
+            / equity_row.total_equity * 100.0, 4)
+        signal["_remaining_heat_pct"] = max(
+            0.0,
+            context["cfg"]["MAX_TOTAL_HEAT_PCT"] - signal["_heat_before_pct"],
+        )
 
 
 def _sync_upthrust_cooldown(db, signal: dict) -> None:
@@ -766,14 +866,44 @@ def _check_watchlist(db, kr_bench=None, us_bench=None):
     return sells
 
 
-def _check_holdings(db, kr_bench=None, us_bench=None):
-    """활성 보유종목을 중복 티커 단위로 조회하고 현재 매도 상태를 저장한다."""
+_HOLDING_SEVERITY_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
+_MISSING_STOP_REASON = "__MISSING_STOP__"
+
+
+def _clear_holding_alert_state(holding) -> None:
+    holding.last_alert_severity = None
+    holding.last_alert_reason = None
+    holding.last_alert_at = None
+
+
+def _holding_alert_due(holding, severity: str, reason: str,
+                       now: datetime, repeat_hours: int) -> bool:
+    """상태 전이/사유 변경/반복 주기에 따라 이번 알림 대상인지 판정한다."""
+    previous_severity = holding.last_alert_severity
+    previous_reason = holding.last_alert_reason
+    previous_at = holding.last_alert_at
+
+    if previous_severity is None or previous_reason is None or previous_at is None:
+        return True
+    if _HOLDING_SEVERITY_RANK.get(severity, 0) < _HOLDING_SEVERITY_RANK.get(previous_severity, 0):
+        _clear_holding_alert_state(holding)
+        return False
+    if _HOLDING_SEVERITY_RANK.get(severity, 0) > _HOLDING_SEVERITY_RANK.get(previous_severity, 0):
+        return True
+    if reason != previous_reason:
+        return True
+    return now - previous_at >= timedelta(hours=repeat_hours)
+
+
+def _check_holdings(db, kr_bench=None, us_bench=None,
+                    kr_condition=None, us_condition=None):
+    """보유 종목 매도 상태를 저장하고, 이번에 발송할 신호 목록을 반환한다."""
     from collections import defaultdict
     from database.models import Holding
     from scanner.weinstein import check_sell_signal, to_weekly_ohlcv
     from scanner.kr_stocks import get_kr_ohlcv
     from scanner.us_stocks import get_us_ohlcv
-    from config import MA_PERIOD
+    from config import MA_PERIOD, HOLDING_ALERT_REPEAT_HOURS
 
     holdings = db.query(Holding).filter(
         Holding.is_active == True,
@@ -783,8 +913,8 @@ def _check_holdings(db, kr_bench=None, us_bench=None):
     for holding in holdings:
         grouped[(holding.market, holding.ticker)].append(holding)
 
-    counts = {"total": len(holdings), "SELL_REQUIRED": 0, "REVIEW": 0,
-              "CAUTION": 0, "HOLD": 0, "CHECK_FAILED": 0}
+    signals = []
+    missing_stop_rows = []
     status_by_severity = {
         "HIGH": "SELL_REQUIRED",
         "MEDIUM": "REVIEW",
@@ -801,15 +931,24 @@ def _check_holdings(db, kr_bench=None, us_bench=None):
             if weekly_df is None or len(weekly_df) == 0:
                 weekly_df = None
             benchmark = kr_bench if market == "KR" else us_bench
+            market_condition = kr_condition if market == "KR" else us_condition
             current_price = float(df["Close"].iloc[-1])
 
             for holding in rows:
                 signal = check_sell_signal(
                     df, holding.ticker, holding.name, holding.market,
-                    buy_price=holding.avg_price,
+                    buy_price=holding.entry_price or holding.avg_price,
+                    stop_loss=holding.current_stop_loss,
                     weekly_df=weekly_df,
                     benchmark_close=benchmark,
+                    market_condition=market_condition,
                 )
+                if signal:
+                    signal.setdefault("signal_type", "SELL")
+                    signal.setdefault("ticker", holding.ticker)
+                    signal.setdefault("name", holding.name)
+                    signal.setdefault("market", holding.market)
+                    signal.setdefault("price", current_price)
                 status = status_by_severity.get(signal.get("severity"), "CAUTION") if signal else "HOLD"
                 holding.current_price = current_price
                 holding.price_updated_at = checked_at
@@ -817,7 +956,43 @@ def _check_holdings(db, kr_bench=None, us_bench=None):
                 holding.sell_severity = signal.get("severity") if signal else None
                 holding.sell_reason = signal.get("sell_reason") if signal else None
                 holding.sell_checked_at = checked_at
-                counts[status] += 1
+
+                if holding.current_stop_loss is None:
+                    missing_stop_rows.append(holding)
+
+                if signal is None:
+                    if holding.last_alert_reason != _MISSING_STOP_REASON:
+                        _clear_holding_alert_state(holding)
+                    continue
+
+                severity = signal.get("severity") or "LOW"
+                reason = signal.get("sell_reason") or "매도 판정"
+                if not _holding_alert_due(
+                        holding, severity, reason, checked_at,
+                        HOLDING_ALERT_REPEAT_HOURS):
+                    continue
+
+                entry_price = holding.entry_price or holding.avg_price
+                unrealized_r = None
+                if (entry_price is not None and holding.initial_r is not None
+                        and holding.initial_r > 0):
+                    unrealized_r = (current_price - entry_price) / holding.initial_r
+                signal.update({
+                    "holding_id": holding.id,
+                    "is_holding": True,
+                    "quantity": holding.quantity,
+                    "avg_price": holding.avg_price,
+                    "entry_price": entry_price,
+                    "initial_stop_loss": holding.initial_stop_loss,
+                    "current_stop_loss": holding.current_stop_loss,
+                    "initial_r": holding.initial_r,
+                    "unrealized_r": (round(unrealized_r, 2)
+                                     if unrealized_r is not None else None),
+                })
+                signals.append(signal)
+                holding.last_alert_severity = severity
+                holding.last_alert_reason = reason
+                holding.last_alert_at = checked_at
         except Exception as exc:
             logger.error(f"보유종목 매도 점검 오류 {market} {ticker}: {exc}")
             for holding in rows:
@@ -825,10 +1000,33 @@ def _check_holdings(db, kr_bench=None, us_bench=None):
                 holding.sell_severity = None
                 holding.sell_reason = "가격 데이터를 확인하지 못했습니다."
                 holding.sell_checked_at = checked_at
-                counts["CHECK_FAILED"] += 1
+
+    # 손절가 미등록은 종목별 알림이 아닌 하나의 정보 섹션으로 묶는다.
+    # 매도 신호가 없는 행은 같은 24시간 반복 규칙을 재사용한다.
+    missing_due = []
+    for holding in missing_stop_rows:
+        if holding.sell_severity is not None:
+            # 이 행의 실제 매도 알림 상태를 덮어쓰지 않는다.
+            continue
+        if _holding_alert_due(
+                holding, "INFO", _MISSING_STOP_REASON, checked_at,
+                HOLDING_ALERT_REPEAT_HOURS):
+            missing_due.append(holding)
+            holding.last_alert_severity = "INFO"
+            holding.last_alert_reason = _MISSING_STOP_REASON
+            holding.last_alert_at = checked_at
+    if missing_stop_rows and (missing_due or any(
+            signal.get("signal_type") == "SELL" for signal in signals)):
+        signals.append({
+            "signal_type": "HOLDING_STOP_MISSING",
+            "holdings": [
+                {"ticker": h.ticker, "name": h.name, "market": h.market}
+                for h in missing_stop_rows
+            ],
+        })
 
     db.flush()
-    return counts
+    return signals
 
 
 def _save(db, signal: dict):
@@ -891,6 +1089,13 @@ def _save(db, signal: dict):
             existing.cur_ext_pct       = signal.get("cur_ext_pct")
             existing.cur_stop_pct      = signal.get("cur_stop_pct")
             existing.entry_warnings    = entry_warnings_json
+            # Step 5 position-sizing snapshot
+            existing.suggested_qty         = signal.get("suggested_qty")
+            existing.r_per_share           = signal.get("r_per_share")
+            existing.risk_amount           = signal.get("risk_amount")
+            existing.position_pct          = signal.get("position_pct")
+            existing.sizing_constrained_by = signal.get("sizing_constrained_by")
+            existing.equity_snapshot       = signal.get("equity_snapshot")
             # Strict Weinstein filter (Phase 1 scaffold; Phase 4 에서 채워짐)
             existing.stop_loss            = signal.get("stop_loss")
             existing.sector_name          = signal.get("sector_name")
@@ -937,6 +1142,13 @@ def _save(db, signal: dict):
                 cur_ext_pct       = signal.get("cur_ext_pct"),
                 cur_stop_pct      = signal.get("cur_stop_pct"),
                 entry_warnings    = entry_warnings_json,
+                # Step 5 position-sizing snapshot
+                suggested_qty         = signal.get("suggested_qty"),
+                r_per_share           = signal.get("r_per_share"),
+                risk_amount           = signal.get("risk_amount"),
+                position_pct          = signal.get("position_pct"),
+                sizing_constrained_by = signal.get("sizing_constrained_by"),
+                equity_snapshot       = signal.get("equity_snapshot"),
                 # Strict Weinstein filter (Phase 1 scaffold; Phase 4 에서 채워짐)
                 stop_loss            = signal.get("stop_loss"),
                 sector_name          = signal.get("sector_name"),
@@ -971,7 +1183,136 @@ def _sector_summary(market: str) -> str:
         return ""
 
 
-def _notify(buys, sells, send_fn, slack_send_fn=None):
+def _format_currency(value, currency: str) -> str:
+    """알림용 통화 포맷. 시장 통화 사이의 환산은 수행하지 않는다."""
+    if value is None:
+        return "-"
+    if currency == "KRW":
+        return f"{float(value):,.0f}원"
+    return f"${float(value):,.2f}"
+
+
+def _sizing_notification_lines(signal: dict) -> list[str]:
+    """한 신호의 포지션 사이징/heat 안내 문구를 만든다."""
+    sizing = signal.get("sizing")
+    if signal.get("_sizing_status") == "equity_missing" or sizing is None:
+        lines = ["  ℹ️ 자산 미등록 — 설정에서 계좌 자산을 입력하면 권장수량이 표시됩니다"]
+        lines.extend(f"  ⚠️ {warning}" for warning in signal.get("_heat_warnings") or [])
+        return lines
+
+    currency = sizing["currency"]
+    qty = sizing["qty"]
+    lines = []
+    if qty > 0:
+        lines.append(
+            f"  • 권장수량 {qty:,}주  {_format_currency(sizing['position_value'], currency)} "
+            f"(자산의 {sizing['position_pct']:.1f}%)")
+        lines.append(
+            f"  • 리스크 {_format_currency(sizing['risk_amount'], currency)} "
+            f"({sizing['risk_pct_actual']:.1f}%)  |  현재 heat "
+            f"{signal.get('_heat_before_pct', 0):.1f}% → "
+            f"{signal.get('_heat_after_pct', 0):.1f}%")
+    else:
+        reason_labels = {
+            "r_pct_below_min": "손절폭이 최소 R 범위보다 좁음",
+            "r_pct_above_max": "손절폭이 최대 R 범위를 초과",
+            "stop_must_be_below_entry": "손절가가 진입가보다 낮지 않음",
+            "risk_budget_too_small": "리스크 예산으로 1주도 매수 불가",
+            "position_cap_too_small": "비중 상한으로 1주도 매수 불가",
+            "heat_limit_exceeded": "총 heat 한도 초과",
+            "insufficient_cash": "현금 부족",
+            "invalid_numeric_input": "진입가 또는 손절가 없음",
+        }
+        reasons = [reason_labels.get(r, r) for r in sizing.get("reasons") or []]
+        lines.append(f"  ⚠️ 권장수량 산출 불가 — {', '.join(reasons) or '입력값 확인 필요'}")
+
+    constrained = sizing.get("constrained_by")
+    if qty > 0 and constrained == "position_cap":
+        lines.append(
+            f"  ⚠️ 비중 상한으로 축소 (계산 {sizing['calculated_qty']:,}주 → {qty:,}주)")
+    elif qty > 0 and constrained == "heat":
+        lines.append(
+            f"  ⚠️ heat 한도 잔여 {signal.get('_remaining_heat_pct', 0):.1f}% — 리스크 축소 적용")
+    elif qty > 0 and constrained == "cash":
+        lines.append(f"  ⚠️ 현금 부족 — 최대 {qty:,}주까지 가능")
+
+    for warning in signal.get("_heat_warnings") or []:
+        lines.append(f"  ⚠️ {warning}")
+    return lines
+
+
+def _holding_price(value, market: str) -> str:
+    if value is None:
+        return "-"
+    return f"{value:,.0f}원" if market == "KR" else f"${value:,.2f}"
+
+
+def _holding_recommendation(signal: dict) -> str:
+    quantity = int(signal.get("quantity") or 0)
+    severity = signal.get("severity")
+    reason = signal.get("sell_reason") or ""
+    if severity == "HIGH":
+        return f"전량 청산 {quantity:,}주"
+    if "Stage3" in reason:
+        return f"1/2 축소 검토 (약 {int(quantity / 2):,}주)"
+    if "Mansfield" in reason:
+        return f"1/3 축소 검토 (약 {int(quantity / 3):,}주)"
+    if "BEAR" in reason:
+        return "신규 중단 + 약체 축소 검토"
+    return "관찰"
+
+
+def _format_holding_alerts(holding_signals: list) -> str:
+    actual = [s for s in holding_signals if s.get("signal_type") == "SELL"]
+    missing = next((s for s in holding_signals
+                    if s.get("signal_type") == "HOLDING_STOP_MISSING"), None)
+    lines = [f"💼 *보유 종목 매도 알림*",
+             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')} KST", ""]
+    severity_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🔵"}
+    severity_title = {"HIGH": "매도 신호", "MEDIUM": "매도 검토", "LOW": "매도 관찰"}
+    for signal in actual:
+        market = signal.get("market") or "US"
+        severity = signal.get("severity") or "LOW"
+        icon = severity_icon.get(severity, "🔵")
+        title = severity_title.get(severity, "매도 관찰")
+        quantity = int(signal.get("quantity") or 0)
+        avg_price = signal.get("avg_price")
+        current = signal.get("price")
+        profit_pct = signal.get("profit_pct")
+        profit_text = f"{profit_pct:+.1f}%" if profit_pct is not None else "-"
+        lines.extend([
+            f"{icon} *{title}*  {signal.get('ticker')} ({signal.get('name')})   [보유]",
+            (f"보유 {quantity:,}주  평균 {_holding_price(avg_price, market)}  "
+             f"현재 {_holding_price(current, market)} ({profit_text})"),
+        ])
+        unrealized_r = signal.get("unrealized_r")
+        if unrealized_r is not None:
+            risk_line = f"미실현 {unrealized_r:+.2f}R"
+            entry = signal.get("entry_price")
+            stop = signal.get("current_stop_loss")
+            if entry is not None and stop is not None:
+                risk_line += (f"  |  진입 {_holding_price(entry, market)} / "
+                              f"손절 {_holding_price(stop, market)}")
+            lines.append(risk_line)
+        lines.extend([
+            "",
+            f"⚠️ {severity} — {signal.get('sell_reason')}",
+            f"권장: {_holding_recommendation(signal)}",
+            "",
+        ])
+
+    if missing:
+        rows = missing.get("holdings") or []
+        labels = [f"{row.get('ticker')} {row.get('name')}".strip() for row in rows]
+        lines.extend([
+            f"ℹ️ 손절가 미등록 {len(rows)}건 — 설정에서 입력하면 손절 도달 알림을 받을 수 있습니다",
+            "   " + " / ".join(labels),
+        ])
+    return "\n".join(lines).rstrip()
+
+
+def _notify(buys, sells, holding_signals_or_send=None, send_fn=None,
+            slack_send_fn=None):
     """매수 시그널은 Telegram/Slack, 매도 시그널은 Telegram으로 전송.
 
     Phase 4 invariant: ``buys`` 는 *strict-pass* 만 들어오므로 본 함수는
@@ -983,6 +1324,16 @@ def _notify(buys, sells, send_fn, slack_send_fn=None):
     + 비어있지 않은 reason 리스트) 가 알림에 추가된다. 기본 False — 메시지
     길이/노이즈 방지.
     """
+    # 기존 호출 `_notify(buys, sells, telegram, slack)`도 그대로 지원.
+    if callable(holding_signals_or_send):
+        legacy_send = holding_signals_or_send
+        legacy_slack = send_fn
+        holding_signals = []
+        send_fn = legacy_send
+        slack_send_fn = legacy_slack
+    else:
+        holding_signals = holding_signals_or_send or []
+
     try:
         from config import STRICT_NOTIFY_INCLUDE_REASONS, STRICT_WEINSTEIN_MODE
     except ImportError:
@@ -1057,9 +1408,14 @@ def _notify(buys, sells, send_fn, slack_send_fn=None):
                             f"현재 기준 손절폭 {cur_stop_text}\n")
                     for warning in s.get("entry_warnings") or []:
                         msg += f"  ⚠️ {warning}\n"
+                    for sizing_line in _sizing_notification_lines(s):
+                        msg += sizing_line + "\n"
                     msg += "\n"
                 else:
-                    msg += f"  • 시그널일: {s['signal_date']}\n\n"
+                    msg += f"  • 시그널일: {s['signal_date']}\n"
+                    for sizing_line in _sizing_notification_lines(s):
+                        msg += sizing_line + "\n"
+                    msg += "\n"
             if len(mkt_list) > 10:
                 msg += f"  ... 외 {len(mkt_list) - 10}개\n\n"
         # Telegram legacy Markdown treats the underscore in RE_BREAKOUT as an
@@ -1081,6 +1437,9 @@ def _notify(buys, sells, send_fn, slack_send_fn=None):
                     f"  • {s['sell_reason']}\n"
                     f"  • 현재가: {s['price']:,.4g} | 수익률: {pl}\n\n")
         _safe_send(send_fn, msg, "Telegram")
+
+    if holding_signals:
+        _safe_send(send_fn, _format_holding_alerts(holding_signals), "Telegram")
 
 
 def _safe_send(send_fn, message: str, channel: str) -> None:

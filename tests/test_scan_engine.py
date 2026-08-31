@@ -584,6 +584,16 @@ class TestSavePersistsStrictFields:
                         signal_date VARCHAR(10), notified BOOLEAN
                     )
                 """))
+                conn.execute(text("""
+                    CREATE TABLE holdings (
+                        id INTEGER PRIMARY KEY,
+                        account_id INTEGER,
+                        ticker VARCHAR(20), name VARCHAR(100), market VARCHAR(10),
+                        quantity REAL, avg_price REAL,
+                        current_price REAL, price_updated_at DATETIME,
+                        memo TEXT, is_active BOOLEAN, created_at DATETIME
+                    )
+                """))
 
             # 2) 동일 DB URL 로 _migrate() 실행 — engine 을 monkeypatch
             from database import models as _models
@@ -605,9 +615,19 @@ class TestSavePersistsStrictFields:
                 "base_width_pct", "tight_width_pct", "contraction_ratio",
                 "base_mode", "pivot_ext_pct", "upthrust_failed",
                 "cur_ext_pct", "cur_stop_pct", "entry_warnings",
+                "suggested_qty", "r_per_share", "risk_amount", "position_pct",
+                "sizing_constrained_by", "equity_snapshot",
             }
             missing = need - cols
             assert not missing, f"_migrate() 가 추가 못한 컬럼: {missing}"
+
+            holding_cols = {c["name"] for c in inspect(eng).get_columns("holdings")}
+            holding_need = {
+                "entry_price", "initial_stop_loss", "current_stop_loss", "initial_r",
+                "last_alert_severity", "last_alert_reason", "last_alert_at",
+            }
+            holding_missing = holding_need - holding_cols
+            assert not holding_missing, f"_migrate() 가 추가 못한 Holding 컬럼: {holding_missing}"
         finally:
             _os.unlink(tmp.name)
 
@@ -707,6 +727,7 @@ class TestStrictFilterFlow:
         _force_scan_engine_flag(monkeypatch, "STRICT_WEINSTEIN_MODE",      mode)
         _force_scan_engine_flag(monkeypatch, "STRICT_PERSIST_REJECTED",    persist)
         _force_scan_engine_flag(monkeypatch, "STRICT_NOTIFY_INCLUDE_REASONS", False)
+        _force_scan_engine_flag(monkeypatch, "R_BAND_AS_GATE", True)
         # strict_filter 모듈 (import 시 캡처 후 매 호출마다 read)
         for name, value in (
             ("STRICT_WEINSTEIN_MODE",                       mode),
@@ -720,6 +741,7 @@ class TestStrictFilterFlow:
             ("STRICT_REQUIRE_RS_RISING",                    True),
             ("STRICT_REQUIRE_RS_ZERO_CROSS_FOR_BREAKOUT",   True),
             ("STRICT_REQUIRE_STOP_LOSS",                    True),
+            ("R_BAND_AS_GATE",                              True),
         ):
             _force_strict_module_flag(monkeypatch, name, value)
 

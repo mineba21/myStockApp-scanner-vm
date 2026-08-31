@@ -4,6 +4,7 @@ FastAPI 웹 애플리케이션
 
 import json
 import logging
+import math
 import re
 import secrets
 import threading
@@ -22,17 +23,20 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.models import (init_db, get_db, ScanResult, ScanLog,
-                              Account, Transaction, Holding, WatchList)
+                              Account, AccountEquity, Transaction, Holding, WatchList)
 from scanner.scan_engine import run_scan, scan_status
 from scheduler import start_scheduler, stop_scheduler, get_next_run_times
 from notifications.telegram import test_telegram
 from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
                     MAX_PIVOT_EXT_PCT, ALERT_MAX_CUR_STOP_PCT)
 from web.asset_allocation_api import router as asset_allocation_router
+from web.kiwoom_holdings import get_kiwoom_holdings
+from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 SITES_API_KEY = os.getenv("SITES_API_KEY", "").strip()
+KIWOOM_WEB_ENABLED = os.getenv("KIWOOM_WEB_ENABLED", "false").lower() == "true"
 
 app = FastAPI(title="Weinstein Stock Scanner", version="1.0.0")
 app.include_router(asset_allocation_router)
@@ -180,7 +184,14 @@ async def get_results(market: str = "ALL", signal_type: str = "ALL",
              "rs_value": r.rs_value,
              "rs_trend": r.rs_trend,
              "pivot_price": r.pivot_price,
-             "stop_loss": r.stop_loss}
+             "stop_loss": r.stop_loss,
+             # Step 5 sizing snapshot (nullable for legacy/equity-missing rows)
+             "suggested_qty": r.suggested_qty,
+             "r_per_share": r.r_per_share,
+             "risk_amount": r.risk_amount,
+             "position_pct": r.position_pct,
+             "sizing_constrained_by": r.sizing_constrained_by,
+             "equity_snapshot": r.equity_snapshot}
             for r in rows]
 
 
@@ -510,6 +521,78 @@ async def get_scan_logs(limit: int = 20, db: Session = Depends(get_db)):
 #  계좌 API
 # ═══════════════════════════════════════════════════════════════
 
+EQUITY_CURRENCY = {"KR": "KRW", "US": "USD"}
+
+
+class EquityCreate(BaseModel):
+    market: str
+    total_equity: float
+    cash_balance: float
+    note: Optional[str] = None
+
+    model_config = {"extra": "forbid"}
+
+
+def _equity_to_dict(row: Optional[AccountEquity]):
+    if row is None:
+        return None
+    age = datetime.utcnow() - row.recorded_at
+    return {
+        "id": row.id,
+        "market": row.market,
+        "currency": row.currency,
+        "total_equity": row.total_equity,
+        "cash_balance": row.cash_balance,
+        "note": row.note,
+        "recorded_at": row.recorded_at.isoformat(),
+        "age_days": age.days,
+        "is_stale": age > timedelta(days=30),
+    }
+
+
+@app.get("/api/equity")
+async def get_equity(db: Session = Depends(get_db)):
+    """KR/US 각각의 최신 append-only 자산 스냅샷을 반환한다."""
+    latest = {}
+    for market in ("KR", "US"):
+        row = db.query(AccountEquity).filter(
+            AccountEquity.market == market,
+        ).order_by(
+            AccountEquity.recorded_at.desc(),
+            AccountEquity.id.desc(),
+        ).first()
+        latest[market] = _equity_to_dict(row)
+    return latest
+
+
+@app.post("/api/equity")
+async def create_equity(body: EquityCreate, db: Session = Depends(get_db)):
+    """시장 통화가 고정된 새 자산 행을 append한다 (기존 행 갱신 금지)."""
+    market = body.market.strip().upper()
+    if market not in EQUITY_CURRENCY:
+        raise HTTPException(status_code=422, detail="시장은 KR 또는 US여야 합니다.")
+    if (not math.isfinite(body.total_equity) or body.total_equity <= 0):
+        raise HTTPException(status_code=422, detail="총 자산은 0보다 커야 합니다.")
+    if (not math.isfinite(body.cash_balance) or body.cash_balance < 0):
+        raise HTTPException(status_code=422, detail="매수 가능 현금은 0 이상이어야 합니다.")
+    if body.cash_balance > body.total_equity:
+        raise HTTPException(status_code=422, detail="매수 가능 현금은 총 자산을 초과할 수 없습니다.")
+    note = body.note.strip() if body.note else None
+    if note and len(note) > 200:
+        raise HTTPException(status_code=422, detail="메모는 200자 이하여야 합니다.")
+
+    row = AccountEquity(
+        market=market,
+        currency=EQUITY_CURRENCY[market],
+        total_equity=body.total_equity,
+        cash_balance=body.cash_balance,
+        note=note,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _equity_to_dict(row)
+
 ACCOUNT_TYPE_CURRENCY = {
     "KR_STOCK":  "KRW",
     "US_STOCK":  "USD",
@@ -714,7 +797,68 @@ async def list_holdings(account_id: Optional[int] = None, db: Session = Depends(
     if account_id:
         q = q.filter(Holding.account_id == account_id)
     holdings = q.order_by(Holding.market, Holding.ticker).all()
-    return [_holding_to_dict(h, db) for h in holdings]
+    rows = [_holding_to_dict(h, db) for h in holdings]
+    if KIWOOM_WEB_ENABLED and account_id is None:
+        try:
+            rows.extend(apply_kiwoom_sell_analysis(get_kiwoom_holdings()))
+        except Exception as exc:
+            # 키움 장애가 기존 수동 보유현황까지 막지 않게 한다. 비밀값은 로깅하지 않는다.
+            logger.warning("키움 실계좌 보유현황 조회 실패: %s", type(exc).__name__)
+    return rows
+
+
+class HoldingRiskUpdate(BaseModel):
+    entry_price: Optional[float] = None
+    initial_stop_loss: Optional[float] = None
+    current_stop_loss: Optional[float] = None
+
+
+@app.get("/api/holdings/{holding_id}")
+async def get_holding(holding_id: int, db: Session = Depends(get_db)):
+    h = db.query(Holding).filter(Holding.id == holding_id).first()
+    if not h:
+        raise HTTPException(status_code=404, detail="보유주식을 찾을 수 없습니다.")
+    return _holding_to_dict(h, db)
+
+
+@app.patch("/api/holdings/{holding_id}")
+async def update_holding_risk(holding_id: int, body: HoldingRiskUpdate,
+                              db: Session = Depends(get_db)):
+    """사용자가 정한 진입가/손절가만 저장한다. avg_price 기반 자동 추정은 하지 않는다."""
+    h = db.query(Holding).filter(Holding.id == holding_id).first()
+    if not h:
+        raise HTTPException(status_code=404, detail="보유주식을 찾을 수 없습니다.")
+
+    fields_set = (body.model_fields_set if hasattr(body, "model_fields_set")
+                  else body.__fields_set__)
+    values = body.model_dump()
+    for field in fields_set:
+        value = values[field]
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise HTTPException(status_code=400, detail=f"{field}는 0보다 큰 유한수여야 합니다.")
+
+    entry = values["entry_price"] if "entry_price" in fields_set else h.entry_price
+    initial_stop = (values["initial_stop_loss"]
+                    if "initial_stop_loss" in fields_set else h.initial_stop_loss)
+    current_stop = (values["current_stop_loss"]
+                    if "current_stop_loss" in fields_set else h.current_stop_loss)
+    if (initial_stop is not None or current_stop is not None) and entry is None:
+        raise HTTPException(status_code=400, detail="손절가 저장 전에 진입가를 입력해주세요.")
+    for label, stop in (("최초 손절가", initial_stop), ("현재 손절가", current_stop)):
+        if stop is not None and stop >= entry:
+            raise HTTPException(status_code=400, detail=f"{label}는 진입가보다 낮아야 합니다.")
+
+    for field in fields_set:
+        setattr(h, field, values[field])
+    h.initial_r = (entry - initial_stop
+                   if entry is not None and initial_stop is not None else None)
+    if "current_stop_loss" in fields_set:
+        h.last_alert_severity = None
+        h.last_alert_reason = None
+        h.last_alert_at = None
+    db.commit()
+    db.refresh(h)
+    return _holding_to_dict(h, db)
 
 
 @app.delete("/api/holdings/{holding_id}")
@@ -745,6 +889,12 @@ async def refresh_prices(background_tasks: BackgroundTasks, db: Session = Depend
     """보유 주식 현재가 일괄 업데이트"""
     def _refresh():
         _update_holding_prices()
+        if KIWOOM_WEB_ENABLED:
+            try:
+                live_rows = get_kiwoom_holdings(force=True)
+                apply_kiwoom_sell_analysis(live_rows, force=True)
+            except Exception as exc:
+                logger.warning("키움 실계좌 새로고침 실패: %s", type(exc).__name__)
     background_tasks.add_task(_refresh)
     return {"status": "started", "message": "현재가 업데이트를 시작했습니다."}
 
@@ -893,6 +1043,7 @@ def _apply_buy(db: Session, account_id: int, ticker: str, name: str,
         h = Holding(account_id=account_id, ticker=ticker, name=name,
                     market=market, quantity=quantity, avg_price=price,
                     current_price=price, price_updated_at=datetime.utcnow(),
+                    entry_price=price,
                     sell_status="PENDING")
         db.add(h)
 
@@ -1005,6 +1156,10 @@ def _holding_to_dict(h: Holding, db: Session) -> dict:
         Transaction.tx_type == "BUY",
     ).order_by(Transaction.trade_date.desc(), Transaction.id.desc()).first()
     account = h.account
+    unrealized_r = None
+    if (h.current_price is not None and h.entry_price is not None
+            and h.initial_r is not None and h.initial_r > 0):
+        unrealized_r = round((h.current_price - h.entry_price) / h.initial_r, 2)
     return {
         "id": h.id, "account_id": h.account_id,
         "account_name": account.name if account else "",
@@ -1013,6 +1168,11 @@ def _holding_to_dict(h: Holding, db: Session) -> dict:
         "ticker": h.ticker, "name": h.name, "market": h.market,
         "quantity": h.quantity, "avg_price": h.avg_price,
         "current_price": h.current_price,
+        "entry_price": h.entry_price,
+        "initial_stop_loss": h.initial_stop_loss,
+        "current_stop_loss": h.current_stop_loss,
+        "initial_r": h.initial_r,
+        "unrealized_r": unrealized_r,
         "eval_amount": eval_amt,
         "profit_loss": pl,
         "profit_loss_pct": pl_pct,
@@ -1022,5 +1182,10 @@ def _holding_to_dict(h: Holding, db: Session) -> dict:
         "sell_severity": h.sell_severity,
         "sell_reason": h.sell_reason,
         "sell_checked_at": h.sell_checked_at.isoformat() if h.sell_checked_at else None,
+        "last_alert_severity": h.last_alert_severity,
+        "last_alert_reason": h.last_alert_reason,
+        "last_alert_at": h.last_alert_at.isoformat() if h.last_alert_at else None,
         "memo": h.memo,
+        "source": "manual",
+        "read_only": False,
     }

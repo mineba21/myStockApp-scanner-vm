@@ -127,10 +127,11 @@ def test_holding_sell_status_mapping(db, monkeypatch, severity, expected):
         },
     )
 
-    counts = scan_engine._check_holdings(db, us_bench=None)
+    signals = scan_engine._check_holdings(db, us_bench=None)
     holding = db.query(Holding).filter(Holding.ticker == "AAPL").one()
     assert holding.sell_status == expected
-    assert counts[expected] == 1
+    sell_signals = [s for s in signals if s.get("signal_type") == "SELL"]
+    assert len(sell_signals) == (0 if severity is None else 1)
     assert holding.sell_checked_at is not None
     assert holding.current_price is not None
 
@@ -144,8 +145,184 @@ def test_holding_fetch_failure_is_saved(db, monkeypatch):
         raise RuntimeError("downstream unavailable")
 
     monkeypatch.setattr(us_stocks, "get_us_ohlcv", fail)
-    counts = scan_engine._check_holdings(db)
+    signals = scan_engine._check_holdings(db)
     holding = db.query(Holding).filter(Holding.ticker == "AAPL").one()
     assert holding.sell_status == "CHECK_FAILED"
-    assert counts["CHECK_FAILED"] == 1
+    assert signals == []
     assert "확인하지 못했습니다" in holding.sell_reason
+
+
+def test_holding_patch_validates_stop_and_calculates_r(db):
+    from web.app import HoldingRiskUpdate, update_holding_risk
+
+    _buy(db, price=100)
+    holding = db.query(Holding).filter(Holding.ticker == "AAPL").one()
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(update_holding_risk(
+            holding.id,
+            HoldingRiskUpdate(entry_price=100, initial_stop_loss=100,
+                              current_stop_loss=95),
+            db,
+        ))
+    assert exc.value.status_code == 400
+
+    result = asyncio.run(update_holding_risk(
+        holding.id,
+        HoldingRiskUpdate(entry_price=100, initial_stop_loss=90,
+                          current_stop_loss=92),
+        db,
+    ))
+    assert result["entry_price"] == 100
+    assert result["initial_r"] == 10
+    assert result["current_stop_loss"] == 92
+
+
+def test_stop_loss_is_passed_and_holding_signal_reaches_notify(db, monkeypatch):
+    from scanner import scan_engine, us_stocks, weinstein
+
+    _buy(db, quantity=12, price=100)
+    holding = db.query(Holding).filter(Holding.ticker == "AAPL").one()
+    holding.entry_price = 100
+    holding.initial_stop_loss = 95
+    holding.current_stop_loss = 96
+    holding.initial_r = 5
+    db.flush()
+
+    daily = _daily()
+    daily.loc[daily.index[-1], "Close"] = 94
+    monkeypatch.setattr(us_stocks, "get_us_ohlcv", lambda ticker: daily)
+    monkeypatch.setattr(weinstein, "to_weekly_ohlcv", lambda frame: frame)
+    captured = {}
+
+    def fake_check(*args, **kwargs):
+        captured["stop_loss"] = kwargs.get("stop_loss")
+        return {
+            "ticker": "AAPL", "name": "Apple", "market": "US",
+            "signal_type": "SELL", "severity": "HIGH", "price": 94,
+            "sell_reason": "손절가 이탈", "profit_pct": -6,
+        }
+
+    monkeypatch.setattr(weinstein, "check_sell_signal", fake_check)
+    signals = scan_engine._check_holdings(db)
+    assert captured["stop_loss"] == 96
+    assert signals[0]["unrealized_r"] == -1.2
+
+    messages = []
+    scan_engine._notify([], [], signals, messages.append)
+    assert len(messages) == 1
+    assert "[\ubcf4\uc720]" in messages[0]
+    assert "전량 청산 12주" in messages[0]
+
+
+def test_none_stop_still_allows_other_sell_rules(db, monkeypatch):
+    from scanner import scan_engine, us_stocks, weinstein
+
+    _buy(db)
+    monkeypatch.setattr(us_stocks, "get_us_ohlcv", lambda ticker: _daily())
+    monkeypatch.setattr(weinstein, "to_weekly_ohlcv", lambda frame: frame)
+    captured = {}
+
+    def fake_check(*args, **kwargs):
+        captured["stop_loss"] = kwargs.get("stop_loss")
+        return {
+            "ticker": "AAPL", "name": "Apple", "market": "US",
+            "signal_type": "SELL", "severity": "MEDIUM", "price": 121.9,
+            "sell_reason": "Mansfield RS 하락 전환", "profit_pct": 21.9,
+        }
+
+    monkeypatch.setattr(weinstein, "check_sell_signal", fake_check)
+    signals = scan_engine._check_holdings(db)
+    assert captured["stop_loss"] is None
+    assert any(s.get("severity") == "MEDIUM" for s in signals)
+
+
+def test_holding_alert_transition_suppression_and_reset(db):
+    from scanner.scan_engine import _holding_alert_due, _clear_holding_alert_state
+
+    _buy(db)
+    holding = db.query(Holding).filter(Holding.ticker == "AAPL").one()
+    now = datetime.utcnow()
+    holding.last_alert_severity = "MEDIUM"
+    holding.last_alert_reason = "same"
+    holding.last_alert_at = now
+
+    assert _holding_alert_due(holding, "MEDIUM", "same", now + timedelta(hours=23), 24) is False
+    assert _holding_alert_due(holding, "MEDIUM", "same", now + timedelta(hours=24), 24) is True
+    assert _holding_alert_due(holding, "HIGH", "same", now + timedelta(hours=1), 24) is True
+    assert _holding_alert_due(holding, "MEDIUM", "changed", now + timedelta(hours=1), 24) is True
+    assert _holding_alert_due(holding, "LOW", "same", now + timedelta(hours=1), 24) is False
+    assert holding.last_alert_severity is None
+
+    holding.last_alert_severity = "HIGH"
+    holding.last_alert_reason = "old"
+    holding.last_alert_at = now
+    _clear_holding_alert_state(holding)
+    assert holding.last_alert_severity is None
+    assert holding.last_alert_reason is None
+    assert holding.last_alert_at is None
+
+
+def test_check_holdings_suppresses_repeat_then_resets_on_recovery(db, monkeypatch):
+    from scanner import scan_engine, us_stocks, weinstein
+
+    _buy(db)
+    holding = db.query(Holding).filter(Holding.ticker == "AAPL").one()
+    holding.entry_price = 100
+    holding.initial_stop_loss = 90
+    holding.current_stop_loss = 90
+    holding.initial_r = 10
+    db.flush()
+    monkeypatch.setattr(us_stocks, "get_us_ohlcv", lambda ticker: _daily())
+    monkeypatch.setattr(weinstein, "to_weekly_ohlcv", lambda frame: frame)
+
+    state = {"severity": "MEDIUM", "reason": "RS 하락"}
+
+    def fake_check(*args, **kwargs):
+        if state["severity"] is None:
+            return None
+        return {
+            "ticker": "AAPL", "name": "Apple", "market": "US",
+            "signal_type": "SELL", "severity": state["severity"],
+            "sell_reason": state["reason"], "price": 121.9,
+            "profit_pct": 21.9,
+        }
+
+    monkeypatch.setattr(weinstein, "check_sell_signal", fake_check)
+    assert len(scan_engine._check_holdings(db)) == 1
+    assert scan_engine._check_holdings(db) == []
+
+    state.update(severity="HIGH", reason="손절가 이탈")
+    assert len(scan_engine._check_holdings(db)) == 1
+
+    state.update(severity=None, reason="")
+    assert scan_engine._check_holdings(db) == []
+    assert holding.last_alert_severity is None
+    assert holding.last_alert_reason is None
+    assert holding.last_alert_at is None
+
+
+def test_missing_stops_are_grouped_into_one_notification():
+    from scanner.scan_engine import _format_holding_alerts
+
+    message = _format_holding_alerts([{
+        "signal_type": "HOLDING_STOP_MISSING",
+        "holdings": [
+            {"ticker": "AAPL", "name": "Apple", "market": "US"},
+            {"ticker": "005930", "name": "삼성전자", "market": "KR"},
+        ],
+    }])
+    assert "손절가 미등록 2건" in message
+    assert message.count("손절가 미등록 2건") == 1
+    assert "AAPL Apple / 005930 삼성전자" in message
+
+
+def test_unrealized_r_is_none_without_initial_r(db):
+    from web.app import _holding_to_dict
+
+    _buy(db)
+    holding = db.query(Holding).filter(Holding.ticker == "AAPL").one()
+    holding.entry_price = 100
+    holding.current_price = 110
+    holding.initial_r = None
+    assert _holding_to_dict(holding, db)["unrealized_r"] is None
