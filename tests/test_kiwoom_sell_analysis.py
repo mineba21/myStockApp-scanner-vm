@@ -30,7 +30,7 @@ def test_only_free_investment_us_and_isa_kr_receive_sell_analysis(
 
     def fake_signal(frame, ticker, *args, **kwargs):
         calls.append(ticker)
-        if ticker == "SPY":
+        if ticker == "AAPL":
             return {"severity": "HIGH", "sell_reason": "주봉 30-SMA 하향 이탈"}
         return None
 
@@ -45,11 +45,11 @@ def test_only_free_investment_us_and_isa_kr_receive_sell_analysis(
         rows, force=True, background=False
     )
 
-    assert calls == ["SPY", "005930"] or calls == ["005930", "SPY"]
-    assert result[0]["sell_status"] == "BROKER_LIVE"
-    assert result[1]["sell_status"] == "SELL_REQUIRED"
-    assert result[1]["sell_reason"] == "주봉 30-SMA 하향 이탈"
-    assert result[1]["sell_analysis"] == "WEINSTEIN_READ_ONLY"
+    assert calls == ["AAPL", "005930"] or calls == ["005930", "AAPL"]
+    assert result[0]["sell_status"] == "SELL_REQUIRED"
+    assert result[0]["sell_reason"] == "주봉 30-SMA 하향 이탈"
+    assert result[0]["sell_analysis"] == "WEINSTEIN_READ_ONLY"
+    assert result[1]["sell_status"] == "BROKER_LIVE"
     assert result[2]["sell_status"] == "HOLD"
     assert result[2]["sell_reason"] == "Weinstein 매도 신호 없음"
 
@@ -63,7 +63,7 @@ def test_missing_price_data_becomes_check_failed(monkeypatch, tmp_path):
     monkeypatch.setattr(us_stocks, "get_us_ohlcv", lambda ticker: None)
 
     result = kiwoom_sell_analysis.apply_kiwoom_sell_analysis(
-        [{"account_profile": "account2", "market": "US", "ticker": "AAPL"}],
+        [{"account_profile": "account1", "market": "US", "ticker": "AAPL"}],
         force=True,
         background=False,
     )

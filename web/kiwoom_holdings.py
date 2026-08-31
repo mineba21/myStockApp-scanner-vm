@@ -22,9 +22,14 @@ _BALANCE_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": [], "accounts": []}
 _TOKEN_CACHE: dict[str, tuple[float, str]] = {}
 
 ACCOUNT_NAMES = {
-    "account1": "퀀트투자",
-    "account2": "자유투자",
+    "account1": "자유투자",
+    "account2": "퀀트투자",
     "account4": "ISA",
+}
+ACCOUNT_MARKETS = {
+    "account1": frozenset({"US"}),
+    "account2": frozenset({"US"}),
+    "account4": frozenset({"KR"}),
 }
 
 
@@ -50,7 +55,7 @@ def _ticker(value: Any) -> str:
 
 def _account_name(profile: str) -> str:
     label = ACCOUNT_NAMES.get(profile)
-    return f"{label} · {profile}" if label else f"키움 {profile}"
+    return label if label else "키움 실계좌"
 
 
 def map_kiwoom_holding(
@@ -301,16 +306,19 @@ def _load_kiwoom_portfolio(
             overseas_valuation = _safe_overseas_call(
                 lambda: _optional_report(client, "get_overseas_valuation", token)
             )
-            rows.extend(
-                map_kiwoom_holding(profile, item, updated_at=updated_at)
-                for item in balance["holdings"]
-                if _number(item.get("rmnd_qty"), absolute=True) > 0
-            )
-            rows.extend(
-                map_kiwoom_overseas_holding(profile, item, updated_at=updated_at)
-                for item in overseas_balance["holdings"]
-                if _number(item.get("poss_qty"), absolute=True) > 0
-            )
+            allowed_markets = ACCOUNT_MARKETS.get(profile, frozenset({"KR", "US"}))
+            if "KR" in allowed_markets:
+                rows.extend(
+                    map_kiwoom_holding(profile, item, updated_at=updated_at)
+                    for item in balance["holdings"]
+                    if _number(item.get("rmnd_qty"), absolute=True) > 0
+                )
+            if "US" in allowed_markets:
+                rows.extend(
+                    map_kiwoom_overseas_holding(profile, item, updated_at=updated_at)
+                    for item in overseas_balance["holdings"]
+                    if _number(item.get("poss_qty"), absolute=True) > 0
+                )
             accounts.append(
                 _account_summary(
                     profile,

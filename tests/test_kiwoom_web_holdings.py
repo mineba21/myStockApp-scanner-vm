@@ -38,14 +38,14 @@ def test_account_profiles_use_portfolio_names():
         "account2", {"stk_cd": "SPY", "poss_qty": "1"}
     )
 
-    assert domestic["account_name"] == "자유투자 · account2"
-    assert overseas["account_name"] == "자유투자 · account2"
+    assert domestic["account_name"] == "퀀트투자"
+    assert overseas["account_name"] == "퀀트투자"
     assert kiwoom_holdings.map_kiwoom_holding(
         "account1", {"stk_cd": "005930", "rmnd_qty": "1"}
-    )["account_name"] == "퀀트투자 · account1"
+    )["account_name"] == "자유투자"
     assert kiwoom_holdings.map_kiwoom_holding(
         "account4", {"stk_cd": "005930", "rmnd_qty": "1"}
-    )["account_name"] == "ISA · account4"
+    )["account_name"] == "ISA"
 
 
 def test_account_summary_maps_cash_and_profit_by_market():
@@ -59,7 +59,7 @@ def test_account_summary_maps_cash_and_profit_by_market():
         updated_at="2026-08-31T12:00:00Z",
     )
 
-    assert summary["display_name"] == "퀀트투자"
+    assert summary["display_name"] == "자유투자"
     assert summary["domestic"]["cash"] == 500
     assert summary["domestic"]["profit_loss"] == 200
     assert summary["overseas"]["cash"] == 100.25
@@ -162,8 +162,8 @@ def test_get_kiwoom_holdings_combines_profiles_and_reuses_cache(monkeypatch):
     second = kiwoom_holdings.get_kiwoom_holdings(client_factory=Client)
 
     assert [(row["account_profile"], row["market"]) for row in first] == [
-        ("account1", "KR"), ("account1", "US"),
-        ("account2", "KR"), ("account2", "US"),
+        ("account1", "US"),
+        ("account2", "US"),
     ]
     assert second == first
     assert calls == [

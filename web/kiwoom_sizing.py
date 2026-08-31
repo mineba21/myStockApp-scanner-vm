@@ -7,7 +7,7 @@ from typing import Any
 from scanner.sizing import calculate_open_risk, calculate_position
 
 
-TARGET_ACCOUNT_BY_MARKET = {"US": "account2", "KR": "account4"}
+TARGET_ACCOUNT_BY_MARKET = {"US": "account1", "KR": "account4"}
 
 
 def _sizing_config(market: str) -> dict[str, float]:
@@ -51,7 +51,7 @@ def apply_live_position_sizing(
 ) -> list[dict[str, Any]]:
     """매수 후보에 지정 계좌의 실시간 현금 기반 제안 수량을 붙인다.
 
-    미국 후보는 자유투자(account2), 국내 후보는 ISA(account4)만 사용한다.
+    미국 후보는 자유투자(account1), 국내 후보는 ISA(account4)만 사용한다.
     주문 API는 호출하지 않으며 반환값은 참고용 계산 결과다.
     """
     summaries = {

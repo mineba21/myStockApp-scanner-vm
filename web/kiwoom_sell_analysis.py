@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-SELL_TARGETS = frozenset({("account2", "US"), ("account4", "KR")})
+SELL_TARGETS = frozenset({("account1", "US"), ("account4", "KR")})
 STATUS_BY_SEVERITY = {
     "HIGH": "SELL_REQUIRED",
     "MEDIUM": "REVIEW",
