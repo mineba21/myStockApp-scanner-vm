@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 
@@ -100,12 +101,32 @@ def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
     if summary is None:
         raise RuntimeError("퀀트투자 계좌 요약을 확인하지 못했습니다.")
 
-    def load_price(ticker: str) -> float | None:
+    holdings = get_kiwoom_holdings()
+    held_prices = {
+        str(row.get("ticker") or "").upper(): float(row.get("current_price") or 0)
+        for row in holdings
+        if row.get("account_profile") == "account2" and row.get("market") == "US"
+    }
+    missing = [
+        str(ticker).upper()
+        for ticker in (report.get("combined_allocations") or {})
+        if held_prices.get(str(ticker).upper(), 0) <= 0
+    ]
+
+    def fetch_price(ticker: str) -> tuple[str, float | None]:
         frame = get_us_ohlcv(ticker)
         if frame is None or len(frame) == 0:
-            return None
-        return float(frame["Close"].iloc[-1])
+            return ticker, None
+        return ticker, float(frame["Close"].iloc[-1])
+
+    fetched: dict[str, float | None] = {}
+    if missing:
+        with ThreadPoolExecutor(max_workers=min(4, len(missing))) as pool:
+            futures = {pool.submit(fetch_price, ticker): ticker for ticker in missing}
+            for future in as_completed(futures):
+                ticker, price = future.result()
+                fetched[ticker] = price
 
     return calculate_allocation_sizing(
-        report, get_kiwoom_holdings(), summary, load_price
+        report, holdings, summary, lambda ticker: fetched.get(ticker)
     )
