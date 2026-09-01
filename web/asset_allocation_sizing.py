@@ -109,7 +109,9 @@ def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
         get_kiwoom_holdings,
     )
 
-    summaries = get_kiwoom_account_summaries()
+    # Entering the allocation tab must refresh live account state, while the
+    # monthly strategy signal remains the cached report.
+    summaries = get_kiwoom_account_summaries(force=True)
     summary = next(
         (item for item in summaries if item.get("account_profile") == "account2"),
         None,

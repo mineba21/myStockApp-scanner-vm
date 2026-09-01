@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from web.asset_allocation_sizing import build_live_allocation_sizing
 
@@ -154,14 +155,25 @@ async def get_asset_allocation(profile: str = "easy", as_of: Optional[str] = Non
     with _allocation_lock:
         runtime = dict(_allocation_runtime.get(key, {}))
     is_running = bool(runtime.get("is_running"))
+    live_sizing = cached.get("sizing") if cached else None
+    live_sizing_error = cached.get("sizing_error") if cached else None
+    if cached and not is_running:
+        try:
+            live_sizing = await run_in_threadpool(
+                build_live_allocation_sizing, cached["report"]
+            )
+            live_sizing_error = None
+        except Exception as exc:
+            logger.warning("탭 진입 키움 가격 갱신 실패: %s", type(exc).__name__)
+            live_sizing_error = "키움 현재가와 계좌 상태를 새로 불러오지 못했습니다."
     return {
         "status": "running" if is_running else "ready" if cached else "error" if runtime.get("error") else "empty",
         "is_running": is_running,
         "error": runtime.get("error"),
         "updated_at": cached.get("updated_at") if cached else runtime.get("updated_at"),
         "report": cached.get("report") if cached else None,
-        "sizing": cached.get("sizing") if cached else None,
-        "sizing_error": cached.get("sizing_error") if cached else None,
+        "sizing": live_sizing,
+        "sizing_error": live_sizing_error,
     }
 
 
