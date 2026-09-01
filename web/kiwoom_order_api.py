@@ -20,6 +20,11 @@ router = APIRouter(prefix="/api/kiwoom/orders", tags=["kiwoom-orders"])
 _lock = threading.Lock()
 _previews: dict[str, dict[str, Any]] = {}
 PREVIEW_TTL_SECONDS = 300
+US_EXCHANGE_BY_TICKER = {
+    "AGG": "NY", "BIL": "NY", "EFA": "NY", "GLD": "NY",
+    "IEF": "ND", "IEMG": "NY", "LQD": "ND", "QQQ": "ND",
+    "SHY": "ND", "SPY": "NY", "VTV": "NY",
+}
 
 
 class SellPreviewRequest(BaseModel):
@@ -60,11 +65,22 @@ def _find_holding(ticker: str) -> dict[str, Any]:
     raise HTTPException(status_code=404, detail="퀀트투자 계좌 보유종목이 아닙니다.")
 
 
+def _holding_exchange(holding: dict[str, Any]) -> str:
+    try:
+        return _exchange_code(str(holding.get("exchange") or ""))
+    except HTTPException:
+        ticker = str(holding.get("ticker") or "").upper()
+        exchange = US_EXCHANGE_BY_TICKER.get(ticker)
+        if exchange:
+            return exchange
+        raise
+
+
 @router.get("/sell/quote")
 async def quote_sell(ticker: str):
     """매도 모달을 열 때 account2 보유종목의 키움 현재가를 다시 조회한다."""
     holding = _find_holding(ticker)
-    exchange = _exchange_code(str(holding.get("exchange") or ""))
+    exchange = _holding_exchange(holding)
     try:
         config = load_profile_configs()["account2"]
         client = KiwoomReadOnlyClient(config)
@@ -99,7 +115,7 @@ async def preview_sell(body: SellPreviewRequest):
         "quantity": body.quantity,
         "held_quantity": held_quantity,
         "limit_price": body.limit_price,
-        "exchange": _exchange_code(str(holding.get("exchange") or "")),
+        "exchange": _holding_exchange(holding),
         "expires_at": time.time() + PREVIEW_TTL_SECONDS,
     }
     with _lock:

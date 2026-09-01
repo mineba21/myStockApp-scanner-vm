@@ -58,6 +58,19 @@ def test_preview_is_account2_only_and_cannot_exceed_holdings(monkeypatch):
     assert exc.value.status_code == 422
 
 
+def test_preview_falls_back_from_generic_us_exchange_name(monkeypatch):
+    monkeypatch.setattr(kiwoom_order_api, "get_kiwoom_holdings", lambda force: [{
+        "account_profile": "account2", "market": "US", "ticker": "BIL",
+        "name": "BIL", "quantity": 3, "exchange": "미국",
+    }])
+
+    preview = asyncio.run(kiwoom_order_api.preview_sell(
+        kiwoom_order_api.SellPreviewRequest(ticker="BIL", quantity=1, limit_price=91)
+    ))
+
+    assert preview["exchange"] == "NY"
+
+
 def test_execute_is_blocked_without_explicit_server_flag():
     with pytest.raises(HTTPException) as exc:
         asyncio.run(kiwoom_order_api.execute_sell(
