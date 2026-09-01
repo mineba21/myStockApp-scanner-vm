@@ -35,7 +35,9 @@ def calculate_allocation_sizing(
         if current_value <= 0 and price > 0:
             current_value = quantity * price
         target_quantity = math.floor(target_value / price) if price > 0 else None
-        needed = max(0, target_quantity - math.floor(quantity)) if target_quantity is not None else 0
+        # account2 자산배분은 기존 보유분을 전량 매도한 뒤 목표 포트폴리오를
+        # 새로 구성하는 시나리오다. 현재 수량은 목표 매수수량에서 차감하지 않는다.
+        needed = target_quantity if target_quantity is not None else 0
         rows.append({
             "ticker": ticker,
             "target_weight": weight,
@@ -49,7 +51,7 @@ def calculate_allocation_sizing(
             "buy_quantity": 0,
         })
 
-    remaining = cash
+    remaining = total_assets
     while True:
         eligible = [
             row for row in rows
@@ -61,7 +63,7 @@ def calculate_allocation_sizing(
         selected = max(
             eligible,
             key=lambda row: (
-                (row["target_value"] - row["current_value"] - row["buy_quantity"] * row["price"])
+                (row["target_value"] - row["buy_quantity"] * row["price"])
                 / row["target_value"]
                 if row["target_value"] > 0 else 0
             ),
@@ -72,7 +74,7 @@ def calculate_allocation_sizing(
     for row in rows:
         required_cost = row["required_buy_quantity"] * (row["price"] or 0)
         estimated_cost = row["buy_quantity"] * (row["price"] or 0)
-        post_value = row["current_value"] + estimated_cost
+        post_value = estimated_cost
         row["estimated_cost"] = round(estimated_cost, 2)
         row["required_cost"] = round(required_cost, 2)
         row["post_weight"] = round(post_value / total_assets, 8) if total_assets > 0 else 0
@@ -84,9 +86,10 @@ def calculate_allocation_sizing(
         "orderable_cash": round(cash, 2),
         "evaluation_amount": round(evaluation, 2),
         "total_assets": round(total_assets, 2),
-        "recommended_cost": round(cash - remaining, 2),
+        "recommended_cost": round(total_assets - remaining, 2),
         "required_cost": round(sum(row["required_cost"] for row in rows), 2),
         "remaining_cash": round(remaining, 2),
+        "liquidate_before_rebalance": True,
         "items": sorted(rows, key=lambda row: (-row["target_weight"], row["ticker"])),
         "read_only": True,
     }

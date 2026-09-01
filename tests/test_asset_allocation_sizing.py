@@ -14,15 +14,18 @@ def test_sizing_uses_cash_and_evaluation_without_exceeding_cash():
     )
 
     assert result["total_assets"] == 500
-    assert result["recommended_cost"] <= result["orderable_cash"]
+    assert result["recommended_cost"] <= result["total_assets"]
     items = {item["ticker"]: item for item in result["items"]}
     assert items["SPY"]["target_quantity"] == 2
-    assert items["SPY"]["buy_quantity"] == 0
+    assert items["SPY"]["required_buy_quantity"] == 2
+    assert items["SPY"]["buy_quantity"] == 2
     assert items["QQQ"]["target_quantity"] == 5
     assert items["QQQ"]["required_buy_quantity"] == 5
     assert items["QQQ"]["buy_quantity"] == 5
     assert result["remaining_cash"] == 50
-    assert result["required_cost"] == 250
+    assert result["required_cost"] == 450
+    assert result["recommended_cost"] == 450
+    assert result["liquidate_before_rebalance"] is True
 
 
 def test_sizing_marks_missing_price_without_recommending_purchase():
