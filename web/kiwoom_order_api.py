@@ -7,6 +7,7 @@ import logging
 import secrets
 import threading
 import time
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -106,6 +107,9 @@ async def quote_sell(ticker: str):
 
 @router.post("/sell/preview")
 async def preview_sell(body: SellPreviewRequest):
+    price = Decimal(str(body.limit_price))
+    if price != price.quantize(Decimal("0.01")):
+        raise HTTPException(status_code=422, detail="미국주식 지정가는 소수점 둘째 자리까지만 입력할 수 있습니다.")
     holding = _find_holding(body.ticker)
     held_quantity = int(float(holding.get("quantity") or 0))
     if body.quantity > held_quantity:

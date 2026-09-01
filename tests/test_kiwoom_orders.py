@@ -38,6 +38,17 @@ def test_order_client_sends_us_limit_sell_shape():
     }
 
 
+def test_order_client_keeps_two_decimal_places_for_us_price():
+    session = Session()
+    client = KiwoomOrderClient(KiwoomConfig("key", "secret", "mock"), session)
+
+    client.sell_us_limit(
+        "token", exchange="NY", ticker="BIL", quantity=1, price=91.4
+    )
+
+    assert session.calls[0][1]["json"]["ord_uv"] == "91.40"
+
+
 def test_preview_is_account2_only_and_cannot_exceed_holdings(monkeypatch):
     monkeypatch.setattr(kiwoom_order_api, "get_kiwoom_holdings", lambda force: [{
         "account_profile": "account2", "market": "US", "ticker": "SPY",
@@ -69,6 +80,18 @@ def test_preview_falls_back_from_generic_us_exchange_name(monkeypatch):
     ))
 
     assert preview["exchange"] == "NY"
+
+
+def test_preview_rejects_us_price_beyond_two_decimal_places():
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(kiwoom_order_api.preview_sell(
+            kiwoom_order_api.SellPreviewRequest(
+                ticker="BIL", quantity=1, limit_price=91.401
+            )
+        ))
+
+    assert exc.value.status_code == 422
+    assert "소수점 둘째 자리" in exc.value.detail
 
 
 def test_execute_is_blocked_without_explicit_server_flag():

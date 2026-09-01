@@ -38,7 +38,9 @@ class KiwoomOrderClient:
                 "stex_tp": exchange,
                 "stk_cd": ticker,
                 "ord_qty": str(quantity),
-                "ord_uv": format(price, ".8f").rstrip("0").rstrip("."),
+                # Kiwoom US orders expect cent-denominated prices with two
+                # fractional digits, including a trailing zero (e.g. 91.40).
+                "ord_uv": format(price, ".2f"),
                 "trde_tp": "00",
             },
             timeout=self.config.timeout_seconds,
