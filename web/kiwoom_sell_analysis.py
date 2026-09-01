@@ -123,7 +123,6 @@ def _analyze_one(
             stop_loss=None,
             weekly_df=weekly,
             benchmark_close=benchmark_close,
-            market_condition=None,
         )
         fields = _analysis_fields(result)
     except Exception:

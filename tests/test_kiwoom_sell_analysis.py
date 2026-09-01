@@ -70,3 +70,30 @@ def test_missing_price_data_becomes_check_failed(monkeypatch, tmp_path):
 
     assert result[0]["sell_status"] == "CHECK_FAILED"
     assert "가격 데이터" in result[0]["sell_reason"]
+
+
+def test_sell_analysis_supports_legacy_signal_signature(monkeypatch, tmp_path):
+    """VM의 이전 판정 함수처럼 market_condition 인자가 없어도 동작한다."""
+    from scanner import market_analysis, us_stocks, weinstein
+
+    monkeypatch.setenv("KIWOOM_SELL_CACHE_FILE", str(tmp_path / "sell.json"))
+    kiwoom_sell_analysis.clear_kiwoom_sell_cache()
+    monkeypatch.setattr(market_analysis, "get_benchmark_close", lambda market: _daily()["Close"])
+    monkeypatch.setattr(us_stocks, "get_us_ohlcv", lambda ticker: _daily())
+    monkeypatch.setattr(weinstein, "to_weekly_ohlcv", lambda frame: frame)
+
+    def legacy_signal(
+        frame, ticker, name, market, buy_price=None, stop_loss=None,
+        weekly_df=None, benchmark_close=None,
+    ):
+        return None
+
+    monkeypatch.setattr(weinstein, "check_sell_signal", legacy_signal)
+    result = kiwoom_sell_analysis.apply_kiwoom_sell_analysis(
+        [{"account_profile": "account1", "market": "US", "ticker": "NVDA"}],
+        force=True,
+        background=False,
+    )
+
+    assert result[0]["sell_status"] == "HOLD"
+    assert result[0]["sell_reason"] == "Weinstein 매도 신호 없음"
