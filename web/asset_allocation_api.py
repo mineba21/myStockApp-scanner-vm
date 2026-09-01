@@ -115,8 +115,18 @@ def _refresh_asset_allocation(profile: str, requested: date):
     key = _allocation_key(profile, requested)
     try:
         report = _run_asset_allocation(profile, requested)
+        sizing = None
+        sizing_error = None
+        try:
+            sizing = build_live_allocation_sizing(report)
+        except Exception as exc:
+            logger.warning("키움 현재가 기반 자산배분 수량 계산 실패: %s", type(exc).__name__)
+            sizing_error = "키움 현재가로 매수수량을 계산하지 못했습니다."
         updated_at = datetime.utcnow().isoformat() + "Z"
-        payload = {"updated_at": updated_at, "report": report}
+        payload = {
+            "updated_at": updated_at, "report": report,
+            "sizing": sizing, "sizing_error": sizing_error,
+        }
         ASSET_ALLOCATION_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_path = _allocation_cache_path(profile, requested)
         temp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
@@ -144,22 +154,14 @@ async def get_asset_allocation(profile: str = "easy", as_of: Optional[str] = Non
     with _allocation_lock:
         runtime = dict(_allocation_runtime.get(key, {}))
     is_running = bool(runtime.get("is_running"))
-    sizing = None
-    sizing_error = None
-    if cached:
-        try:
-            sizing = build_live_allocation_sizing(cached["report"])
-        except Exception as exc:
-            logger.warning("자산배분 매수수량 계산 실패: %s", type(exc).__name__)
-            sizing_error = "퀀트투자 계좌의 매수수량을 계산하지 못했습니다."
     return {
         "status": "running" if is_running else "ready" if cached else "error" if runtime.get("error") else "empty",
         "is_running": is_running,
         "error": runtime.get("error"),
         "updated_at": cached.get("updated_at") if cached else runtime.get("updated_at"),
         "report": cached.get("report") if cached else None,
-        "sizing": sizing,
-        "sizing_error": sizing_error,
+        "sizing": cached.get("sizing") if cached else None,
+        "sizing_error": cached.get("sizing_error") if cached else None,
     }
 
 

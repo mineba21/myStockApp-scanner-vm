@@ -79,6 +79,10 @@ def test_refresh_executes_fixed_command_and_persists_cache(client, monkeypatch):
         return SimpleNamespace(returncode=0, stdout=json.dumps(report), stderr="")
 
     monkeypatch.setattr(webapp.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        webapp, "build_live_allocation_sizing",
+        lambda report: {"total_assets": 1000, "items": [], "read_only": True},
+    )
     response = test_client.post(
         "/api/asset-allocation/refresh?profile=easy&as_of=2026-08-31"
     )
@@ -89,6 +93,7 @@ def test_refresh_executes_fixed_command_and_persists_cache(client, monkeypatch):
     ).json()
     assert ready["status"] == "ready"
     assert ready["report"] == report
+    assert ready["sizing"]["total_assets"] == 1000
     assert "--json" in calls[0][0]
     assert calls[0][1]["check"] is False
     assert calls[0][1]["timeout"] == webapp.ASSET_ALLOCATION_TIMEOUT_SECONDS

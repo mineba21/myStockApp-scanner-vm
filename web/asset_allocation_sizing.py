@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 
@@ -46,6 +45,7 @@ def calculate_allocation_sizing(
             "target_value": round(target_value, 2),
             "target_quantity": target_quantity,
             "needed_quantity": needed,
+            "required_buy_quantity": needed,
             "buy_quantity": 0,
         })
 
@@ -70,9 +70,11 @@ def calculate_allocation_sizing(
         remaining -= selected["price"]
 
     for row in rows:
+        required_cost = row["required_buy_quantity"] * (row["price"] or 0)
         estimated_cost = row["buy_quantity"] * (row["price"] or 0)
         post_value = row["current_value"] + estimated_cost
         row["estimated_cost"] = round(estimated_cost, 2)
+        row["required_cost"] = round(required_cost, 2)
         row["post_weight"] = round(post_value / total_assets, 8) if total_assets > 0 else 0
         row.pop("needed_quantity", None)
 
@@ -83,6 +85,7 @@ def calculate_allocation_sizing(
         "evaluation_amount": round(evaluation, 2),
         "total_assets": round(total_assets, 2),
         "recommended_cost": round(cash - remaining, 2),
+        "required_cost": round(sum(row["required_cost"] for row in rows), 2),
         "remaining_cash": round(remaining, 2),
         "items": sorted(rows, key=lambda row: (-row["target_weight"], row["ticker"])),
         "read_only": True,
@@ -90,8 +93,12 @@ def calculate_allocation_sizing(
 
 
 def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
-    from scanner.us_stocks import get_us_ohlcv
-    from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holdings
+    from trading.kiwoom_readonly import KiwoomReadOnlyClient, load_profile_configs
+    from web.kiwoom_holdings import (
+        _get_token,
+        get_kiwoom_account_summaries,
+        get_kiwoom_holdings,
+    )
 
     summaries = get_kiwoom_account_summaries()
     summary = next(
@@ -113,19 +120,24 @@ def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
         if held_prices.get(str(ticker).upper(), 0) <= 0
     ]
 
-    def fetch_price(ticker: str) -> tuple[str, float | None]:
-        frame = get_us_ohlcv(ticker)
-        if frame is None or len(frame) == 0:
-            return ticker, None
-        return ticker, float(frame["Close"].iloc[-1])
-
     fetched: dict[str, float | None] = {}
     if missing:
-        with ThreadPoolExecutor(max_workers=min(4, len(missing))) as pool:
-            futures = {pool.submit(fetch_price, ticker): ticker for ticker in missing}
-            for future in as_completed(futures):
-                ticker, price = future.result()
-                fetched[ticker] = price
+        config = load_profile_configs()["account2"]
+        client = KiwoomReadOnlyClient(config)
+        token = _get_token("account2", config, client)
+        exchanges = {
+            "AGG": "NY", "BIL": "NY", "EFA": "NY", "GLD": "NY",
+            "IEF": "ND", "IEMG": "NY", "LQD": "ND", "QQQ": "ND",
+            "SPY": "NY", "VTV": "NY", "SHY": "ND",
+        }
+        for ticker in missing:
+            quote = client.get_overseas_quote(
+                token, exchange=exchanges.get(ticker, "NY"), ticker=ticker
+            )["quote"]
+            try:
+                fetched[ticker] = abs(float(str(quote.get("cur_prc") or "0").replace(",", ""))) or None
+            except (TypeError, ValueError):
+                fetched[ticker] = None
 
     return calculate_allocation_sizing(
         report, holdings, summary, lambda ticker: fetched.get(ticker)

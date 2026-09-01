@@ -12,6 +12,7 @@ from trading.kiwoom_readonly import (
     OVERSEAS_CURRENCY_API_ID,
     OVERSEAS_DEPOSIT_API_ID,
     OVERSEAS_VALUATION_API_ID,
+    OVERSEAS_QUOTE_API_ID,
     REAL_BASE_URL,
     load_profile_configs,
 )
@@ -84,6 +85,19 @@ def test_issue_token_uses_client_credentials_without_logging_secret():
         "appkey": "key",
         "secretkey": "secret",
     }
+
+
+def test_overseas_quote_uses_fixed_read_only_api():
+    session = _Session([_Response({"return_code": 0, "cur_prc": "123.4500"})])
+    client = KiwoomReadOnlyClient(KiwoomConfig("key", "secret"), session)
+
+    result = client.get_overseas_quote("token", exchange="ND", ticker="QQQ")
+
+    assert result["quote"]["cur_prc"] == "123.4500"
+    url, request = session.calls[0]
+    assert url == MOCK_BASE_URL + "/api/us/mrkcond"
+    assert request["headers"]["api-id"] == OVERSEAS_QUOTE_API_ID
+    assert request["json"] == {"stex_tp": "ND", "stk_cd": "QQQ"}
 
 
 def test_balance_uses_fixed_read_only_api_and_follows_continuation(monkeypatch):

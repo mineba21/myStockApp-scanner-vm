@@ -19,8 +19,10 @@ def test_sizing_uses_cash_and_evaluation_without_exceeding_cash():
     assert items["SPY"]["target_quantity"] == 2
     assert items["SPY"]["buy_quantity"] == 0
     assert items["QQQ"]["target_quantity"] == 5
+    assert items["QQQ"]["required_buy_quantity"] == 5
     assert items["QQQ"]["buy_quantity"] == 5
     assert result["remaining_cash"] == 50
+    assert result["required_cost"] == 250
 
 
 def test_sizing_marks_missing_price_without_recommending_purchase():
