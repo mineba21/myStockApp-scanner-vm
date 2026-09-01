@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from trading.kiwoom_orders import KiwoomOrderClient
 from trading.kiwoom_readonly import KiwoomError, KiwoomReadOnlyClient, load_profile_configs
-from web.kiwoom_holdings import get_kiwoom_holdings
+from web.kiwoom_holdings import _get_token, get_kiwoom_holdings
 
 
 router = APIRouter(prefix="/api/kiwoom/orders", tags=["kiwoom-orders"])
@@ -58,6 +58,32 @@ def _find_holding(ticker: str) -> dict[str, Any]:
         ):
             return holding
     raise HTTPException(status_code=404, detail="퀀트투자 계좌 보유종목이 아닙니다.")
+
+
+@router.get("/sell/quote")
+async def quote_sell(ticker: str):
+    """매도 모달을 열 때 account2 보유종목의 키움 현재가를 다시 조회한다."""
+    holding = _find_holding(ticker)
+    exchange = _exchange_code(str(holding.get("exchange") or ""))
+    try:
+        config = load_profile_configs()["account2"]
+        client = KiwoomReadOnlyClient(config)
+        token = _get_token("account2", config, client)
+        quote = client.get_overseas_quote(
+            token, exchange=exchange, ticker=str(holding["ticker"]).upper()
+        )["quote"]
+        current_price = abs(float(str(quote.get("cur_prc") or "0").replace(",", "")))
+        if current_price <= 0:
+            raise ValueError("empty price")
+    except (KeyError, KiwoomError, TypeError, ValueError):
+        raise HTTPException(status_code=502, detail="키움 현재가를 확인하지 못했습니다.")
+    return {
+        "ticker": str(holding["ticker"]).upper(),
+        "current_price": current_price,
+        "exchange": exchange,
+        "source": "KIWOOM_USA20100",
+        "read_only": True,
+    }
 
 
 @router.post("/sell/preview")

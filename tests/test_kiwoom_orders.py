@@ -66,3 +66,32 @@ def test_execute_is_blocked_without_explicit_server_flag():
             )
         ))
     assert exc.value.status_code == 503
+
+
+def test_sell_quote_uses_account2_kiwoom_current_price(monkeypatch):
+    monkeypatch.setattr(
+        kiwoom_order_api,
+        "_find_holding",
+        lambda ticker: {"ticker": "QQQ", "exchange": "NASDAQ", "quantity": 3},
+    )
+    monkeypatch.setattr(
+        kiwoom_order_api, "load_profile_configs", lambda: {"account2": object()}
+    )
+
+    class Client:
+        def __init__(self, config):
+            pass
+
+        def get_overseas_quote(self, token, *, exchange, ticker):
+            assert exchange == "ND"
+            assert ticker == "QQQ"
+            return {"quote": {"cur_prc": "512.3400"}}
+
+    monkeypatch.setattr(kiwoom_order_api, "KiwoomReadOnlyClient", Client)
+    monkeypatch.setattr(kiwoom_order_api, "_get_token", lambda *args: "token")
+
+    result = asyncio.run(kiwoom_order_api.quote_sell("QQQ"))
+
+    assert result["current_price"] == 512.34
+    assert result["source"] == "KIWOOM_USA20100"
+    assert result["read_only"] is True
