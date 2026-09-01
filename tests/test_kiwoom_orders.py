@@ -49,6 +49,22 @@ def test_order_client_keeps_two_decimal_places_for_us_price():
     assert session.calls[0][1]["json"]["ord_uv"] == "91.40"
 
 
+def test_order_client_sends_us_limit_buy_shape():
+    session = Session()
+    client = KiwoomOrderClient(KiwoomConfig("key", "secret", "mock"), session)
+
+    client.buy_us_limit(
+        "token", exchange="ND", ticker="QQQ", quantity=3, price=512.4
+    )
+
+    request = session.calls[0][1]
+    assert request["headers"]["api-id"] == "ust20000"
+    assert request["json"] == {
+        "stex_tp": "ND", "stk_cd": "QQQ", "ord_qty": "3",
+        "ord_uv": "512.40", "trde_tp": "00",
+    }
+
+
 def test_preview_is_account2_only_and_cannot_exceed_holdings(monkeypatch):
     monkeypatch.setattr(kiwoom_order_api, "get_kiwoom_holdings", lambda force: [{
         "account_profile": "account2", "market": "US", "ticker": "SPY",
@@ -102,6 +118,24 @@ def test_execute_is_blocked_without_explicit_server_flag():
             )
         ))
     assert exc.value.status_code == 503
+
+
+def test_buy_preview_checks_account2_cash(monkeypatch):
+    monkeypatch.setattr(kiwoom_order_api, "_account2_orderable_cash", lambda: 100)
+    monkeypatch.delenv("KIWOOM_TRADING_ENABLED", raising=False)
+
+    preview = asyncio.run(kiwoom_order_api.preview_buy(
+        kiwoom_order_api.BuyPreviewRequest(ticker="BIL", quantity=1, limit_price=91.4)
+    ))
+    assert preview["execution_enabled"] is False
+    assert preview["estimated_cost"] == 91.4
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(kiwoom_order_api.preview_buy(
+            kiwoom_order_api.BuyPreviewRequest(ticker="BIL", quantity=2, limit_price=91.4)
+        ))
+    assert exc.value.status_code == 422
+    assert "주문가능 현금" in exc.value.detail
 
 
 def test_sell_quote_uses_account2_kiwoom_current_price(monkeypatch):

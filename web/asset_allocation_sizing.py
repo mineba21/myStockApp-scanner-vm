@@ -24,7 +24,9 @@ def calculate_allocation_sizing(
     }
 
     rows: list[dict[str, Any]] = []
-    for ticker, raw_weight in targets.items():
+    all_tickers = set(str(ticker).upper() for ticker in targets) | set(by_ticker)
+    for ticker in all_tickers:
+        raw_weight = targets.get(ticker, 0)
         ticker = str(ticker).upper()
         weight = max(0.0, float(raw_weight or 0))
         held = by_ticker.get(ticker, {})
@@ -38,6 +40,7 @@ def calculate_allocation_sizing(
         # account2 자산배분은 기존 보유분을 전량 매도한 뒤 목표 포트폴리오를
         # 새로 구성하는 시나리오다. 현재 수량은 목표 매수수량에서 차감하지 않는다.
         needed = target_quantity if target_quantity is not None else 0
+        adjustment = needed - int(quantity)
         rows.append({
             "ticker": ticker,
             "target_weight": weight,
@@ -49,6 +52,9 @@ def calculate_allocation_sizing(
             "needed_quantity": needed,
             "required_buy_quantity": needed,
             "buy_quantity": 0,
+            "additional_buy_quantity": max(adjustment, 0),
+            "additional_sell_quantity": max(-adjustment, 0),
+            "adjustment_quantity": adjustment,
         })
 
     remaining = total_assets

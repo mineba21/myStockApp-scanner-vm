@@ -1,6 +1,7 @@
 """시장별 정규장 마감 후 Weinstein 자동 스캔."""
 import logging
 import pytz
+from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import sys, os
@@ -20,6 +21,15 @@ def _run(market: str):
         run_scan(market=market, triggered_by="scheduler")
     except Exception as e:
         logger.error("[스케줄러] %s 오류: %s", market, e, exc_info=True)
+
+
+def _run_monthly_allocation():
+    """Prior month close data, once before the first US session of the month."""
+    from web.asset_allocation_api import _latest_completed_month_end, _refresh_asset_allocation
+    requested = _latest_completed_month_end(datetime.now(NEW_YORK).date())
+    for profile in ("easy", "original"):
+        logger.info("[스케줄러] 자산배분 자동 계산 시작: %s %s", profile, requested)
+        _refresh_asset_allocation(profile, requested)
 
 
 def _add_market_jobs(scheduler, market: str, times: list[str], timezone) -> None:
@@ -56,6 +66,15 @@ def start_scheduler():
     _sched = BackgroundScheduler(timezone=KST)
     _add_market_jobs(_sched, "KR", KR_SCHEDULE_TIMES, KST)
     _add_market_jobs(_sched, "US", US_SCHEDULE_TIMES, NEW_YORK)
+    _sched.add_job(
+        _run_monthly_allocation,
+        CronTrigger(day="1", hour=8, minute=0, timezone=NEW_YORK),
+        id="asset_allocation_monthly",
+        name="자산배분 월 1회 계산 · 매월 1일 08:00 ET",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
     _sched.start()
     logger.info("스케줄러 시작")
 
