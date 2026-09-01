@@ -8,7 +8,7 @@ import math
 import re
 import secrets
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from fastapi import FastAPI, Request, Depends, HTTPException, BackgroundTasks, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -39,6 +39,15 @@ logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 SITES_API_KEY = os.getenv("SITES_API_KEY", "").strip()
 KIWOOM_WEB_ENABLED = os.getenv("KIWOOM_WEB_ENABLED", "false").lower() == "true"
+
+
+def _utc_iso(value: Optional[datetime]) -> Optional[str]:
+    """DB의 naive datetime은 UTC로 저장되므로 명시적인 Z 표식으로 직렬화한다."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 app = FastAPI(title="Weinstein Stock Scanner", version="1.0.0")
 app.include_router(asset_allocation_router)
@@ -522,8 +531,8 @@ async def get_chart_ohlcv(
 async def get_scan_logs(limit: int = 20, db: Session = Depends(get_db)):
     logs = db.query(ScanLog).order_by(ScanLog.started_at.desc()).limit(limit).all()
     return [{"id": l.id,
-             "started_at": l.started_at.isoformat() if l.started_at else None,
-             "finished_at": l.finished_at.isoformat() if l.finished_at else None,
+             "started_at": _utc_iso(l.started_at),
+             "finished_at": _utc_iso(l.finished_at),
              "market": l.market, "total_scanned": l.total_scanned,
              "signals_found": l.signals_found, "status": l.status,
              "triggered_by": l.triggered_by, "error_msg": l.error_msg}

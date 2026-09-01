@@ -70,7 +70,11 @@ def get_next_run_times() -> list:
     if not _sched or not _sched.running:
         return []
     result = []
-    for job in _sched.get_jobs():
+    jobs = sorted(
+        (job for job in _sched.get_jobs() if job.next_run_time),
+        key=lambda job: job.next_run_time,
+    )
+    for job in jobs:
         if job.next_run_time:
             result.append({
                 "name":     job.name,
