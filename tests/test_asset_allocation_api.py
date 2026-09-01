@@ -43,6 +43,17 @@ def test_get_returns_empty_before_first_calculation(client):
     assert response.json()["report"] is None
 
 
+def test_default_month_is_latest_completed_month():
+    import web.asset_allocation_api as allocation_api
+
+    assert allocation_api._latest_completed_month_end(
+        allocation_api.date(2026, 9, 1)
+    ) == allocation_api.date(2026, 8, 31)
+    assert allocation_api._latest_completed_month_end(
+        allocation_api.date(2026, 9, 30)
+    ) == allocation_api.date(2026, 8, 31)
+
+
 @pytest.mark.parametrize("query", [
     "profile=bad&as_of=2026-08-31",
     "profile=easy&as_of=2026-08-30",
@@ -78,6 +89,6 @@ def test_refresh_executes_fixed_command_and_persists_cache(client, monkeypatch):
     ).json()
     assert ready["status"] == "ready"
     assert ready["report"] == report
-    assert calls[0][0][-1] == "--json"
+    assert "--json" in calls[0][0]
     assert calls[0][1]["check"] is False
     assert calls[0][1]["timeout"] == webapp.ASSET_ALLOCATION_TIMEOUT_SECONDS

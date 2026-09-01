@@ -29,6 +29,13 @@ _allocation_lock = threading.Lock()
 _allocation_runtime = {}
 
 
+def _latest_completed_month_end(today: Optional[date] = None) -> date:
+    """월간 신호에는 진행 중인 달이 아닌 직전 완료월을 사용한다."""
+    current = today or date.today()
+    first_of_month = current.replace(day=1)
+    return first_of_month.fromordinal(first_of_month.toordinal() - 1)
+
+
 def _allocation_params(profile: str, as_of: Optional[str]):
     normalized_profile = profile.strip().lower()
     if normalized_profile not in ALLOCATION_PROFILES:
@@ -40,8 +47,7 @@ def _allocation_params(profile: str, as_of: Optional[str]):
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="as_of는 YYYY-MM-DD 형식이어야 합니다.") from exc
     else:
-        today = date.today()
-        requested = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+        requested = _latest_completed_month_end()
 
     if requested.day != calendar.monthrange(requested.year, requested.month)[1]:
         raise HTTPException(status_code=422, detail="as_of는 해당 월의 달력상 월말이어야 합니다.")
