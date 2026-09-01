@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import secrets
 import threading
 import time
@@ -17,6 +18,7 @@ from web.kiwoom_holdings import _get_token, get_kiwoom_holdings
 
 
 router = APIRouter(prefix="/api/kiwoom/orders", tags=["kiwoom-orders"])
+logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _previews: dict[str, dict[str, Any]] = {}
 PREVIEW_TTL_SECONDS = 300
@@ -158,5 +160,6 @@ async def execute_sell(body: SellExecuteRequest):
         # KiwoomError contains the broker's rejection message, not credentials.
         # Returning it lets the user correct price, quantity, session, or account
         # restrictions instead of seeing an opaque 502 error.
-        raise HTTPException(status_code=502, detail=str(exc))
+        logger.warning("Kiwoom rejected US sell order: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc))
     return {"status": "submitted", **result}
