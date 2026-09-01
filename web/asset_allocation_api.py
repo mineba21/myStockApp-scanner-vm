@@ -12,6 +12,8 @@ from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
+from web.asset_allocation_sizing import build_live_allocation_sizing
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["asset-allocation"])
 
@@ -142,12 +144,22 @@ async def get_asset_allocation(profile: str = "easy", as_of: Optional[str] = Non
     with _allocation_lock:
         runtime = dict(_allocation_runtime.get(key, {}))
     is_running = bool(runtime.get("is_running"))
+    sizing = None
+    sizing_error = None
+    if cached:
+        try:
+            sizing = build_live_allocation_sizing(cached["report"])
+        except Exception as exc:
+            logger.warning("자산배분 매수수량 계산 실패: %s", type(exc).__name__)
+            sizing_error = "퀀트투자 계좌의 매수수량을 계산하지 못했습니다."
     return {
         "status": "running" if is_running else "ready" if cached else "error" if runtime.get("error") else "empty",
         "is_running": is_running,
         "error": runtime.get("error"),
         "updated_at": cached.get("updated_at") if cached else runtime.get("updated_at"),
         "report": cached.get("report") if cached else None,
+        "sizing": sizing,
+        "sizing_error": sizing_error,
     }
 
 
