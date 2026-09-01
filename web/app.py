@@ -33,6 +33,7 @@ from web.asset_allocation_api import router as asset_allocation_router
 from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holdings
 from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
 from web.kiwoom_sizing import apply_live_position_sizing
+from web.kiwoom_order_api import router as kiwoom_order_router
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
@@ -41,6 +42,7 @@ KIWOOM_WEB_ENABLED = os.getenv("KIWOOM_WEB_ENABLED", "false").lower() == "true"
 
 app = FastAPI(title="Weinstein Stock Scanner", version="1.0.0")
 app.include_router(asset_allocation_router)
+app.include_router(kiwoom_order_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
