@@ -152,6 +152,11 @@ async def execute_sell(body: SellExecuteRequest):
             quantity=preview["quantity"],
             price=preview["limit_price"],
         )
-    except (KeyError, KiwoomError):
-        raise HTTPException(status_code=502, detail="키움 매도 주문을 완료하지 못했습니다.")
+    except KeyError:
+        raise HTTPException(status_code=502, detail="키움 매도 주문 설정을 확인하지 못했습니다.")
+    except KiwoomError as exc:
+        # KiwoomError contains the broker's rejection message, not credentials.
+        # Returning it lets the user correct price, quantity, session, or account
+        # restrictions instead of seeing an opaque 502 error.
+        raise HTTPException(status_code=502, detail=str(exc))
     return {"status": "submitted", **result}
