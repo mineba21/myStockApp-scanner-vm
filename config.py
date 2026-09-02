@@ -199,16 +199,6 @@ STRICT_NOTIFY_INCLUDE_REASONS               = os.getenv("STRICT_NOTIFY_INCLUDE_R
 KR_SCHEDULE_TIMES = os.getenv("KR_SCHEDULE_TIMES", "16:10").split(",")
 US_SCHEDULE_TIMES = os.getenv("US_SCHEDULE_TIMES", "16:30").split(",")
 
-KIS_APP_KEY         = os.getenv("KIS_APP_KEY", "")
-KIS_APP_SECRET      = os.getenv("KIS_APP_SECRET", "")
-KIS_ACCOUNT_NO      = os.getenv("KIS_ACCOUNT_NO", "")
-KIS_ACCOUNT_PROD_CD = os.getenv("KIS_ACCOUNT_PROD_CD", "01")
-KIS_IS_PAPER        = os.getenv("KIS_IS_PAPER", "true").lower() == "true"
-
-
-DATABASE_URL=os.getenv("DATABASE_URL", "")
-DATABASE_DIRECT_URL=os.getenv("DATABASE_DIRECT_URL", "")
-
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "sqlite:///./stock_scanner.db"

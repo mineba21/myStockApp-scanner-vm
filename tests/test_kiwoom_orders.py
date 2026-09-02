@@ -110,7 +110,11 @@ def test_preview_rejects_us_price_beyond_two_decimal_places():
     assert "소수점 둘째 자리" in exc.value.detail
 
 
-def test_execute_is_blocked_without_explicit_server_flag():
+def test_execute_is_blocked_without_explicit_server_flag(monkeypatch):
+    # 주변 환경(운영 호스트의 .env 는 KIWOOM_TRADING_ENABLED=true)에 의존하지
+    # 않도록 명시적으로 지운다. 이 줄이 없으면 주문이 켜진 호스트에서 503 대신
+    # 410(preview 만료)이 나와, 킬스위치 검증이 조용히 무력화된다.
+    monkeypatch.delenv("KIWOOM_TRADING_ENABLED", raising=False)
     with pytest.raises(HTTPException) as exc:
         asyncio.run(kiwoom_order_api.execute_sell(
             kiwoom_order_api.SellExecuteRequest(

@@ -559,75 +559,70 @@ class TestSavePersistsStrictFields:
         finally:
             db.close()
 
-    def test_migrate_adds_missing_strict_columns_to_legacy_db(self):
-        """기존 DB(strict 컬럼 누락)에 _migrate() 적용 시 7개 컬럼이 모두 추가되어야 한다."""
-        from sqlalchemy import create_engine, text, inspect
-        # 임시 파일 SQLite (in-memory 는 다중 연결이 별도 DB)
-        import tempfile, os as _os
+    def test_baseline_migration_matches_models(self):
+        """`alembic upgrade head` 결과가 모델 정의와 정확히 일치해야 한다.
+
+        예전 `_migrate()` 는 dialect 별 ALTER 목록을 손으로 관리해 PostgreSQL
+        목록과 SQLite 목록이 어긋날 수 있었다(실제로 22 대 35 로 벌어져 있었다).
+        이 테스트는 그 계열의 회귀를 막는다 — 모델에 컬럼을 추가하고 마이그레이션을
+        만들지 않으면 여기서 바로 실패한다.
+        """
+        import os as _os
+        import tempfile
+
+        from alembic import command
+        from alembic.config import Config as AlembicConfig
+        from sqlalchemy import create_engine, inspect
+
+        from database.models import Base
+
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
+        root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        url = f"sqlite:///{tmp.name}"
         try:
-            url = f"sqlite:///{tmp.name}"
-            eng = create_engine(url, connect_args={"check_same_thread": False})
-
-            # 1) strict 컬럼이 없는 legacy 형태로 테이블 생성
-            #    (SQLAlchemy 1.4 legacy 모드 — DDL 은 자동 커밋)
-            with eng.connect() as conn:
-                conn.execute(text("""
-                    CREATE TABLE scan_results (
-                        id INTEGER PRIMARY KEY,
-                        scan_time DATETIME, market VARCHAR(10),
-                        ticker VARCHAR(20), name VARCHAR(100),
-                        signal_type VARCHAR(20), stage VARCHAR(10),
-                        price REAL, ma150 REAL,
-                        volume REAL, volume_avg REAL, volume_ratio REAL,
-                        signal_date VARCHAR(10), notified BOOLEAN
-                    )
-                """))
-                conn.execute(text("""
-                    CREATE TABLE holdings (
-                        id INTEGER PRIMARY KEY,
-                        account_id INTEGER,
-                        ticker VARCHAR(20), name VARCHAR(100), market VARCHAR(10),
-                        quantity REAL, avg_price REAL,
-                        current_price REAL, price_updated_at DATETIME,
-                        memo TEXT, is_active BOOLEAN, created_at DATETIME
-                    )
-                """))
-
-            # 2) 동일 DB URL 로 _migrate() 실행 — engine 을 monkeypatch
-            from database import models as _models
-            orig_engine = _models.engine
-            _models.engine = eng
+            cfg = AlembicConfig(_os.path.join(root, "alembic.ini"))
+            cfg.set_main_option("script_location", _os.path.join(root, "alembic"))
+            cfg.attributes["configure_logger"] = False
+            # env.py 는 config.DATABASE_DIRECT_URL 을 읽으므로 env 로 주입한다
+            # (load_dotenv(override=False) 라 셸 env 가 .env 를 이긴다).
+            prev = {k: _os.environ.get(k)
+                    for k in ("DATABASE_URL", "DATABASE_DIRECT_URL")}
+            _os.environ["DATABASE_URL"] = url
+            _os.environ["DATABASE_DIRECT_URL"] = url
             try:
-                _models._migrate()
+                import config as _config
+                import importlib
+                importlib.reload(_config)
+                command.upgrade(cfg, "head")
             finally:
-                _models.engine = orig_engine
+                for k, v in prev.items():
+                    if v is None:
+                        _os.environ.pop(k, None)
+                    else:
+                        _os.environ[k] = v
+                import config as _config
+                import importlib
+                importlib.reload(_config)
 
-            # 3) ALTER 적용 확인
-            cols = {c["name"] for c in inspect(eng).get_columns("scan_results")}
-            need = {
-                "stop_loss", "sector_name", "sector_stage",
-                "rs_trend", "rs_zero_crossed",
-                "strict_filter_passed", "filter_reasons",
-                "base_start_date", "base_end_date", "tight_start_date",
-                "base_high", "base_low", "tight_high", "tight_low",
-                "base_width_pct", "tight_width_pct", "contraction_ratio",
-                "base_mode", "pivot_ext_pct", "upthrust_failed",
-                "cur_ext_pct", "cur_stop_pct", "entry_warnings",
-                "suggested_qty", "r_per_share", "risk_amount", "position_pct",
-                "sizing_constrained_by", "equity_snapshot",
-            }
-            missing = need - cols
-            assert not missing, f"_migrate() 가 추가 못한 컬럼: {missing}"
+            eng = create_engine(url)
+            insp = inspect(eng)
 
-            holding_cols = {c["name"] for c in inspect(eng).get_columns("holdings")}
-            holding_need = {
-                "entry_price", "initial_stop_loss", "current_stop_loss", "initial_r",
-                "last_alert_severity", "last_alert_reason", "last_alert_at",
-            }
-            holding_missing = holding_need - holding_cols
-            assert not holding_missing, f"_migrate() 가 추가 못한 Holding 컬럼: {holding_missing}"
+            migrated_tables = set(insp.get_table_names()) - {"alembic_version"}
+            model_tables = set(Base.metadata.tables)
+            assert migrated_tables == model_tables, (
+                f"테이블 불일치 — 마이그레이션에만: {migrated_tables - model_tables}, "
+                f"모델에만: {model_tables - migrated_tables}"
+            )
+
+            for table in sorted(model_tables):
+                migrated_cols = {c["name"] for c in insp.get_columns(table)}
+                model_cols = set(Base.metadata.tables[table].columns.keys())
+                assert migrated_cols == model_cols, (
+                    f"{table} 컬럼 불일치 — 마이그레이션에만: "
+                    f"{migrated_cols - model_cols}, 모델에만: {model_cols - migrated_cols}"
+                )
+            eng.dispose()
         finally:
             _os.unlink(tmp.name)
 

@@ -260,8 +260,19 @@ class WatchList(Base):
 
 
 def init_db():
-    Base.metadata.create_all(bind=engine)
-    _migrate()
+    """스키마를 최신 리비전으로 올리고 기본 계좌를 시드한다.
+
+    스키마 소유권은 Alembic 에 있다 (``alembic/versions/``). 예전의
+    ``_migrate()`` 는 dialect 별로 ``ALTER TABLE`` 목록을 손으로 관리해
+    PostgreSQL 목록과 SQLite 목록이 어긋나도 아무 경고가 없었다 —
+    Alembic 은 리비전 하나로 두 dialect 를 모두 처리한다.
+
+    Alembic 도입 이전에 만들어진 DB 는 배포 시 **1회** 기준선을 찍어야
+    한다 (README 참고)::
+
+        alembic stamp 8fcb87470f2e
+    """
+    run_migrations()
     db = SessionLocal()
     try:
         if db.query(Account).count() == 0:
@@ -272,147 +283,17 @@ def init_db():
         db.close()
 
 
-def _migrate():
-    """기존 DB에 새 컬럼이 없으면 추가한다 (SQLite / PostgreSQL)."""
-    from sqlalchemy import text as _text
+def run_migrations() -> None:
+    """``alembic upgrade head`` 를 앱 프로세스 안에서 실행한다."""
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
 
-    scan_result_ddls = [
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_start_date VARCHAR(10)",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_end_date VARCHAR(10)",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS tight_start_date VARCHAR(10)",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_high DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_low DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS tight_high DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS tight_low DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_width_pct DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS tight_width_pct DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS contraction_ratio DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS base_mode VARCHAR(5)",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS pivot_ext_pct DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS upthrust_failed BOOLEAN",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS cur_ext_pct DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS cur_stop_pct DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS entry_warnings TEXT",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS suggested_qty INTEGER",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS r_per_share DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS risk_amount DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS position_pct DOUBLE PRECISION",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS sizing_constrained_by VARCHAR(20)",
-        "ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS equity_snapshot DOUBLE PRECISION",
-    ]
-
-    if engine.dialect.name != "sqlite":
-        holding_ddls = [
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_status VARCHAR(20) DEFAULT 'PENDING'",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_severity VARCHAR(10)",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_reason TEXT",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS sell_checked_at TIMESTAMP",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS entry_price DOUBLE PRECISION",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS initial_stop_loss DOUBLE PRECISION",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS current_stop_loss DOUBLE PRECISION",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS initial_r DOUBLE PRECISION",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_alert_severity VARCHAR(10)",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_alert_reason VARCHAR(200)",
-            "ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_alert_at TIMESTAMP",
-        ]
-        with engine.begin() as conn:
-            for ddl in scan_result_ddls + holding_ddls:
-                conn.execute(_text(ddl))
-        return
-
-    with engine.connect() as conn:
-        def _existing_cols(table):
-            return {row[1] for row in conn.execute(_text(f"PRAGMA table_info({table})"))}
-
-        # accounts 테이블
-        acct_cols = _existing_cols("accounts")
-        for col, ddl in [
-            ("account_type", "ALTER TABLE accounts ADD COLUMN account_type VARCHAR(20) DEFAULT 'KR_STOCK'"),
-            ("broker",       "ALTER TABLE accounts ADD COLUMN broker VARCHAR(50) DEFAULT ''"),
-        ]:
-            if col not in acct_cols:
-                try:
-                    conn.execute(_text(ddl)); conn.commit()
-                except Exception:
-                    pass
-
-        # scan_results 테이블 — 새 메타데이터 컬럼
-        sr_cols = _existing_cols("scan_results")
-        for col, ddl in [
-            ("pivot_price",          "ALTER TABLE scan_results ADD COLUMN pivot_price REAL"),
-            ("support_level",        "ALTER TABLE scan_results ADD COLUMN support_level REAL"),
-            ("market_condition",     "ALTER TABLE scan_results ADD COLUMN market_condition VARCHAR(20)"),
-            ("signal_quality",       "ALTER TABLE scan_results ADD COLUMN signal_quality VARCHAR(10)"),
-            ("rs_value",             "ALTER TABLE scan_results ADD COLUMN rs_value REAL"),
-            ("grade",                "ALTER TABLE scan_results ADD COLUMN grade VARCHAR(5)"),
-            # Scanner decision snapshot (chart overlay)
-            ("base_start_date",      "ALTER TABLE scan_results ADD COLUMN base_start_date VARCHAR(10)"),
-            ("base_end_date",        "ALTER TABLE scan_results ADD COLUMN base_end_date VARCHAR(10)"),
-            ("tight_start_date",     "ALTER TABLE scan_results ADD COLUMN tight_start_date VARCHAR(10)"),
-            ("base_high",            "ALTER TABLE scan_results ADD COLUMN base_high REAL"),
-            ("base_low",             "ALTER TABLE scan_results ADD COLUMN base_low REAL"),
-            ("tight_high",           "ALTER TABLE scan_results ADD COLUMN tight_high REAL"),
-            ("tight_low",            "ALTER TABLE scan_results ADD COLUMN tight_low REAL"),
-            ("base_width_pct",       "ALTER TABLE scan_results ADD COLUMN base_width_pct REAL"),
-            ("tight_width_pct",      "ALTER TABLE scan_results ADD COLUMN tight_width_pct REAL"),
-            ("contraction_ratio",    "ALTER TABLE scan_results ADD COLUMN contraction_ratio REAL"),
-            ("base_mode",            "ALTER TABLE scan_results ADD COLUMN base_mode VARCHAR(5)"),
-            # Step 4 entry-control observations
-            ("pivot_ext_pct",        "ALTER TABLE scan_results ADD COLUMN pivot_ext_pct REAL"),
-            ("upthrust_failed",      "ALTER TABLE scan_results ADD COLUMN upthrust_failed BOOLEAN"),
-            ("cur_ext_pct",          "ALTER TABLE scan_results ADD COLUMN cur_ext_pct REAL"),
-            ("cur_stop_pct",         "ALTER TABLE scan_results ADD COLUMN cur_stop_pct REAL"),
-            ("entry_warnings",       "ALTER TABLE scan_results ADD COLUMN entry_warnings TEXT"),
-            # Step 5 position-sizing snapshot
-            ("suggested_qty",         "ALTER TABLE scan_results ADD COLUMN suggested_qty INTEGER"),
-            ("r_per_share",           "ALTER TABLE scan_results ADD COLUMN r_per_share REAL"),
-            ("risk_amount",           "ALTER TABLE scan_results ADD COLUMN risk_amount REAL"),
-            ("position_pct",          "ALTER TABLE scan_results ADD COLUMN position_pct REAL"),
-            ("sizing_constrained_by", "ALTER TABLE scan_results ADD COLUMN sizing_constrained_by VARCHAR(20)"),
-            ("equity_snapshot",       "ALTER TABLE scan_results ADD COLUMN equity_snapshot REAL"),
-            # Strict Weinstein filter (Phase 1)
-            ("stop_loss",            "ALTER TABLE scan_results ADD COLUMN stop_loss REAL"),
-            ("sector_name",          "ALTER TABLE scan_results ADD COLUMN sector_name VARCHAR(50)"),
-            ("sector_stage",         "ALTER TABLE scan_results ADD COLUMN sector_stage VARCHAR(10)"),
-            ("rs_trend",             "ALTER TABLE scan_results ADD COLUMN rs_trend VARCHAR(10)"),
-            ("rs_zero_crossed",      "ALTER TABLE scan_results ADD COLUMN rs_zero_crossed BOOLEAN"),
-            ("strict_filter_passed", "ALTER TABLE scan_results ADD COLUMN strict_filter_passed BOOLEAN"),
-            ("filter_reasons",       "ALTER TABLE scan_results ADD COLUMN filter_reasons TEXT"),
-        ]:
-            if col not in sr_cols:
-                try:
-                    conn.execute(_text(ddl)); conn.commit()
-                except Exception:
-                    pass
-
-        # strict_filter_passed 인덱스 (자주 쓰는 필터)
-        try:
-            conn.execute(_text(
-                "CREATE INDEX IF NOT EXISTS ix_scan_results_strict_filter_passed "
-                "ON scan_results(strict_filter_passed)"
-            )); conn.commit()
-        except Exception:
-            pass
-
-        holding_cols = _existing_cols("holdings")
-        for col, ddl in [
-            ("sell_status", "ALTER TABLE holdings ADD COLUMN sell_status VARCHAR(20) DEFAULT 'PENDING'"),
-            ("sell_severity", "ALTER TABLE holdings ADD COLUMN sell_severity VARCHAR(10)"),
-            ("sell_reason", "ALTER TABLE holdings ADD COLUMN sell_reason TEXT"),
-            ("sell_checked_at", "ALTER TABLE holdings ADD COLUMN sell_checked_at DATETIME"),
-            ("entry_price", "ALTER TABLE holdings ADD COLUMN entry_price REAL"),
-            ("initial_stop_loss", "ALTER TABLE holdings ADD COLUMN initial_stop_loss REAL"),
-            ("current_stop_loss", "ALTER TABLE holdings ADD COLUMN current_stop_loss REAL"),
-            ("initial_r", "ALTER TABLE holdings ADD COLUMN initial_r REAL"),
-            ("last_alert_severity", "ALTER TABLE holdings ADD COLUMN last_alert_severity VARCHAR(10)"),
-            ("last_alert_reason", "ALTER TABLE holdings ADD COLUMN last_alert_reason VARCHAR(200)"),
-            ("last_alert_at", "ALTER TABLE holdings ADD COLUMN last_alert_at DATETIME"),
-        ]:
-            if col not in holding_cols:
-                try:
-                    conn.execute(_text(ddl)); conn.commit()
-                except Exception:
-                    pass
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = AlembicConfig(os.path.join(root, "alembic.ini"))
+    cfg.set_main_option("script_location", os.path.join(root, "alembic"))
+    # 앱이 이미 설정한 로깅을 alembic.ini 의 fileConfig 가 덮어쓰지 않도록.
+    cfg.attributes["configure_logger"] = False
+    command.upgrade(cfg, "head")
 
 
 def get_db():

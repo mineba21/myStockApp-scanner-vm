@@ -1,0 +1,48 @@
+# DB 마이그레이션 (Alembic)
+
+스키마의 소유권은 `alembic/versions/` 에 있다. 모델(`database/models.py`)만
+고치고 마이그레이션을 만들지 않으면 `tests/test_scan_engine.py` 의
+`test_baseline_migration_matches_models` 가 실패한다.
+
+접속 URL 은 `alembic.ini` 가 아니라 `config.DATABASE_DIRECT_URL` 에서 읽는다
+(운영 자격증명을 커밋하지 않기 위함). DDL 은 Neon pooler 가 아니라 direct
+엔드포인트로 나간다.
+
+## 앱 기동 시
+
+`web/app.py` 의 startup 이 `init_db()` → `run_migrations()` → `alembic upgrade
+head` 를 실행한다. 별도 조작이 필요 없다.
+
+## 컬럼/테이블을 추가할 때
+
+    # 1) database/models.py 수정
+    # 2) 마이그레이션 자동 생성
+    venv/bin/alembic revision --autogenerate -m "add xxx"
+    # 3) 생성된 파일을 반드시 눈으로 확인 (autogenerate 는 완벽하지 않다)
+    # 4) 적용
+    venv/bin/alembic upgrade head
+
+## Alembic 도입 이전 DB 를 처음 올릴 때 — 1회만
+
+기존 운영 DB(Neon)에는 이미 baseline 과 동일한 스키마가 들어 있다. 그래서
+baseline 을 *실행* 하면 안 되고, "이미 이 상태다" 라고 표시만 해야 한다.
+
+    # 백업 후 실행할 것. alembic_version 테이블 하나만 만들고 한 행을 넣는다.
+    venv/bin/alembic stamp 8fcb87470f2e
+
+되돌리려면 `DROP TABLE alembic_version;` 이면 된다.
+
+이 단계를 건너뛰고 앱을 기동하면 `upgrade head` 가 baseline 의
+`CREATE TABLE` 을 실행하려다 "already exists" 로 실패한다.
+
+## 로컬/테스트
+
+테스트는 마이그레이션을 쓰지 않고 `Base.metadata.create_all()` 로 임시
+스키마를 만든다 (빠르고 격리됨). 예외는 위 baseline 대조 테스트뿐이다.
+
+운영 호스트에서 테스트를 돌릴 때는 반드시 DB 를 격리한다 — 그러지 않으면
+모듈 레벨 엔진이 운영 Neon 에 바인딩된다::
+
+    DATABASE_URL=sqlite:////tmp/pytest.db \
+    DATABASE_DIRECT_URL=sqlite:////tmp/pytest.db \
+      .venv/bin/python -m pytest tests/ -q
