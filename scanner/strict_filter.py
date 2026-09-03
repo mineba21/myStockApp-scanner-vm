@@ -57,6 +57,7 @@ from config import (
     STRICT_REQUIRE_MARKET_CONFIRMATION,
     STRICT_BLOCK_CAUTION_BREAKOUTS,
     STRICT_REQUIRE_SECTOR_STAGE2,
+    SECTOR_GATE_EXEMPT_MARKETS,
     STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA,
     STRICT_REQUIRE_PRICE_ABOVE_DAILY_150MA,
     STRICT_REQUIRE_BREAKOUT_VOLUME,
@@ -180,6 +181,10 @@ def _check_sector(signal: Dict[str, Any],
         ctx: 필요 키: sector_stage (str | None).
     """
     if not STRICT_REQUIRE_SECTOR_STAGE2:
+        return
+    # 매핑 소스가 없는 시장은 면제한다 — 없으면 None 이 전부 실패로 잡혀
+    # 해당 시장 시그널이 통째로 사라진다 (config 주석 참고).
+    if str(signal.get("market") or "").upper() in SECTOR_GATE_EXEMPT_MARKETS:
         return
     sector_stage = ctx.get("sector_stage")
     if sector_stage == "STAGE4":

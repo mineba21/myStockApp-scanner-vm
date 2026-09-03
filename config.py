@@ -167,8 +167,20 @@ STRICT_WEINSTEIN_MODE                       = os.getenv("STRICT_WEINSTEIN_MODE",
 STRICT_REQUIRE_MARKET_CONFIRMATION          = os.getenv("STRICT_REQUIRE_MARKET_CONFIRMATION", "true").lower() == "true"
 STRICT_BLOCK_CAUTION_BREAKOUTS              = os.getenv("STRICT_BLOCK_CAUTION_BREAKOUTS", "true").lower() == "true"
 
-# Gate 2 — Sector (스텁; 종목당 sector 매핑은 후속 plan)
+# Gate 2 — Sector
 STRICT_REQUIRE_SECTOR_STAGE2                = os.getenv("STRICT_REQUIRE_SECTOR_STAGE2", "false").lower() == "true"
+# Gate 2 를 적용하지 않을 시장 (쉼표 구분).
+#
+# 국내는 종목→섹터 매핑 소스가 아직 없다 — FinanceDataReader 의 KRX 목록에는
+# 섹터 컬럼이 없고, KRX-DESC 의 Industry 는 KSIC 158종이라 섹터 ETF 로 환원되지
+# 않는다. 그래서 KR 시그널은 sector_stage 가 항상 None 인데, _check_sector 는
+# None 을 통과가 아니라 **실패**(sector_not_stage2)로 취급한다. 면제하지 않으면
+# 공통 플래그를 켜는 순간 KR 시그널이 전멸한다.
+SECTOR_GATE_EXEMPT_MARKETS = {
+    _m.strip().upper()
+    for _m in os.getenv("SECTOR_GATE_EXEMPT_MARKETS", "KR").split(",")
+    if _m.strip()
+}
 
 # Gate 3 — Stock Weekly/Daily Stage
 STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA      = os.getenv("STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA", "true").lower() == "true"

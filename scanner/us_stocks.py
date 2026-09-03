@@ -60,69 +60,51 @@ def get_sp500_tickers() -> list:
         logger.error(f"S&P500 목록 실패: {e}"); return []
 
 
+NASDAQ100_API = "https://api.nasdaq.com/api/quote/list-type/nasdaq100"
+
+
+def _strip_security_suffix(name: str) -> str:
+    """'Apple Inc. Common Stock' → 'Apple Inc.'"""
+    cleaned = str(name).strip()
+    for suffix in (" Common Stock", " Ordinary Shares", " Class A", " Class C"):
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)].strip()
+    return cleaned
+
+
 def get_nasdaq100_tickers() -> list:
-    """NASDAQ-100 구성 종목 — Nasdaq 공식 페이지"""
+    """NASDAQ-100 구성 종목 — Nasdaq 공식 JSON API.
+
+    예전에는 nasdaq.com 의 HTML 표를 ``pd.read_html`` 로 긁었으나 페이지가
+    JS 렌더링으로 바뀌면서 Symbol 컬럼을 찾지 못해 **조용히 빈 목록**을
+    반환했다(운영 실측: ``universe=nasdaq100`` 스캔이 total_scanned=0 으로
+    완료). 같은 데이터를 주는 JSON 엔드포인트로 교체한다.
+
+    응답의 ``sector`` 필드는 전 종목 빈 문자열이라 쓰지 않는다. NASDAQ-100 의
+    대부분(실측 87/102)은 S&P500 과 겹치고, ``get_all_us_tickers`` 가 S&P500 을
+    먼저 넣으므로 그 종목들은 GICS 섹터를 그대로 물려받는다. 겹치지 않는
+    나머지(ASML·ARM·PDD 등 외국 발행사)는 sector 가 None 으로 남는다.
+    """
     try:
-        url = "https://www.nasdaq.com/solutions/global-indexes/nasdaq-100/companies"
-
-        resp = requests.get(url, headers=_HEADERS, timeout=20)
+        resp = requests.get(NASDAQ100_API, headers=_HEADERS, timeout=20)
         resp.raise_for_status()
-
-        tables = pd.read_html(io.StringIO(resp.text))
-
-        if not tables:
-            return []
-
-        df = tables[0].copy()
-
-        # Nasdaq 페이지는 첫 번째 행이 실제 header로 들어오는 경우가 있음
-        if len(df) > 0:
-            first_row = [str(v).strip() for v in df.iloc[0].tolist()]
-
-            if "Symbol" in first_row:
-                df.columns = first_row
-                df = df.iloc[1:].reset_index(drop=True)
-
-        # 혹시 정상 header로 파싱된 경우도 대응
-        symbol_col = next(
-            (c for c in df.columns if str(c).strip().lower() == "symbol"),
-            None
-        )
-        name_col = next(
-            (
-                c for c in df.columns
-                if "company" in str(c).strip().lower()
-                or "name" in str(c).strip().lower()
-            ),
-            None
-        )
-
-        if symbol_col is None:
-            logger.error("NASDAQ100: Symbol 컬럼을 찾지 못함")
+        rows = (resp.json() or {}).get("data", {}).get("data", {}).get("rows") or []
+        if not rows:
+            logger.error("NASDAQ100: 응답에 rows 가 없음")
             return []
 
         results = []
-
-        for _, row in df.iterrows():
-            ticker = str(row[symbol_col]).strip()
-
-            if not ticker or ticker.lower() == "nan":
+        for row in rows:
+            ticker = str(row.get("symbol") or "").strip().replace(".", "-")
+            if not ticker:
                 continue
-
-            ticker = ticker.replace(".", "-")
-
-            name = (
-                str(row[name_col]).strip()
-                if name_col is not None
-                else ticker
-            )
-
             results.append({
                 "ticker": ticker,
-                "name": name,
+                "name": _strip_security_suffix(row.get("companyName") or ticker),
                 "market_type": "NASDAQ100",
             })
-
+        if not results:
+            logger.error("NASDAQ100: 파싱 결과가 비어 있음")
         return results
 
     except Exception as e:

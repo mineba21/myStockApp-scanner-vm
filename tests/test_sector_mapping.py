@@ -169,3 +169,65 @@ class TestStrictFilterSectorInjection:
         assert strict_filter.SECTOR_STAGE4 not in reasons
         assert strict_filter.SECTOR_NOT_STAGE2 not in reasons
         assert sig["sector_stage"] == "STAGE4"   # 관측은 되고 있어야 한다
+
+
+# ── 시장별 면제 (Gate 2 를 켰을 때) ────────────────────────────────
+
+class TestSectorGateMarketExemption:
+    """게이트를 켜도 국내는 면제된다.
+
+    ``_check_sector`` 는 sector_stage=None 을 통과가 아니라 **실패**로
+    취급한다. 국내는 종목→섹터 매핑 소스가 없어 항상 None 이므로, 면제가
+    없으면 공통 플래그를 켜는 순간 KR 시그널이 전멸한다.
+    """
+
+    def _on(self, monkeypatch, exempt={"KR"}):
+        from scanner import strict_filter
+        monkeypatch.setattr(strict_filter, "STRICT_REQUIRE_SECTOR_STAGE2", True)
+        monkeypatch.setattr(strict_filter, "SECTOR_GATE_EXEMPT_MARKETS", exempt)
+        return strict_filter
+
+    def test_kr_is_exempt_even_with_gate_on(self, monkeypatch):
+        sf = self._on(monkeypatch)
+        reasons = []
+        sf._check_sector({"market": "KR"}, {"sector_stage": None}, reasons)
+        assert reasons == []
+
+    def test_kr_exempt_regardless_of_sector_stage(self, monkeypatch):
+        sf = self._on(monkeypatch)
+        for stage in (None, "STAGE1", "STAGE3", "STAGE4"):
+            reasons = []
+            sf._check_sector({"market": "KR"}, {"sector_stage": stage}, reasons)
+            assert reasons == [], f"KR 이 {stage} 로 차단됨"
+
+    def test_us_is_still_gated(self, monkeypatch):
+        sf = self._on(monkeypatch)
+        reasons = []
+        sf._check_sector({"market": "US"}, {"sector_stage": "STAGE4"}, reasons)
+        assert sf.SECTOR_STAGE4 in reasons
+
+    def test_us_unmapped_still_fails(self, monkeypatch):
+        """면제 목록에 없는 시장은 미매핑이 여전히 실패다 — 켤 때의 주의점."""
+        sf = self._on(monkeypatch)
+        reasons = []
+        sf._check_sector({"market": "US"}, {"sector_stage": None}, reasons)
+        assert sf.SECTOR_NOT_STAGE2 in reasons
+
+    def test_exempt_list_is_configurable(self, monkeypatch):
+        sf = self._on(monkeypatch, exempt={"KR", "US"})
+        reasons = []
+        sf._check_sector({"market": "US"}, {"sector_stage": "STAGE4"}, reasons)
+        assert reasons == []
+
+    def test_market_matching_is_case_insensitive(self, monkeypatch):
+        sf = self._on(monkeypatch)
+        reasons = []
+        sf._check_sector({"market": "kr"}, {"sector_stage": "STAGE4"}, reasons)
+        assert reasons == []
+
+    def test_missing_market_key_is_not_exempt(self, monkeypatch):
+        """market 이 없는 시그널을 조용히 면제하지 않는다."""
+        sf = self._on(monkeypatch)
+        reasons = []
+        sf._check_sector({}, {"sector_stage": "STAGE4"}, reasons)
+        assert sf.SECTOR_STAGE4 in reasons
