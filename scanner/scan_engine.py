@@ -25,13 +25,24 @@ def _evaluate_strict_filter(signal: dict,
 
     signal dict 에 ``strict_filter_passed`` / ``filter_reasons`` 도 in-place
     로 기록하여 _save() / _notify() 가 그 값을 그대로 영속/표시할 수 있게 한다.
-    Phase 5 의 sector 매핑이 들어오기 전까지는 sector_stage 는 항상 None.
+
+    섹터(Gate 2)는 ``_gics_sector``(유니버스 목록에서 실려온 GICS 원문)를
+    표시 라벨과 주봉 Stage 로 풀어 ``sector_name`` / ``sector_stage`` 에 기록한다.
+    매핑이 없는 종목(국내 전체, S&P500 밖의 미국 종목)은 둘 다 None 으로 남고,
+    ``STRICT_REQUIRE_SECTOR_STAGE2`` 가 꺼져 있는 동안에는 판정에 영향이 없다.
     """
+    from scanner.market_analysis import get_sector_stage
     from scanner.strict_filter import apply_strict_filter
+
+    sector_name, sector_stage = get_sector_stage(
+        signal.get("_gics_sector"), signal.get("market"),
+    )
+    signal["sector_name"]  = sector_name
+    signal["sector_stage"] = sector_stage
 
     ctx = {
         "market_condition":  market_condition,
-        "sector_stage":      None,                          # Phase 5 까지 None
+        "sector_stage":      sector_stage,
         "benchmark_present": benchmark_close is not None,
     }
     passed, reasons = apply_strict_filter(signal, ctx)
@@ -823,6 +834,10 @@ def _scan_us(db, universe, benchmark_close=None, market_condition=None,
         diag: Optional[dict] = {} if funnel is not None else None
         res = analyze_stock(df, info["ticker"], info["name"], "US",
                             benchmark_close, market_condition, diag=diag)
+        if res is not None:
+            # Gate 2 입력. analyze_stock 은 순수 계산이라 유니버스 메타데이터를
+            # 모르므로 여기서 실어 준다 (S&P500 목록에만 존재).
+            res["_gics_sector"] = info.get("sector")
         count += 1
         notified = bool(res and _process_signal(db, res, "US",
                                                 market_condition, benchmark_close))
@@ -1173,8 +1188,10 @@ def _sector_summary(market: str) -> str:
         etfs   = stages.get(key, [])
         if not etfs:
             return ""
-        bull = [e["name"] for e in etfs if e["stage"] == "STAGE2"]
-        bear = [e["name"] for e in etfs if e["stage"] == "STAGE4"]
+        # Gate 2 와 같은 주봉 기준을 쓴다 — 알림 요약과 게이트가 서로 다른
+        # Stage 를 말하지 않도록. 산출 실패분(None)은 자연히 빠진다.
+        bull = [e["name"] for e in etfs if e.get("stage_weekly") == "STAGE2"]
+        bear = [e["name"] for e in etfs if e.get("stage_weekly") == "STAGE4"]
         parts = []
         if bull: parts.append(f"강세: {', '.join(bull[:3])}")
         if bear: parts.append(f"약세: {', '.join(bear[:3])}")

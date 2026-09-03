@@ -20,14 +20,23 @@ KR_INDICES = [
 ]
 
 # ── 섹터 ETF (Forest-to-Trees 보조) ─────────────────────────────
+# ``gics`` 는 위키 S&P500 표의 ``GICS Sector`` 원문이며 종목→섹터 매핑의 키다.
+# ``name`` 은 UI 배지·알림에 그대로 노출되는 표시 라벨.
 US_SECTOR_ETFS = [
-    {"ticker": "XLK", "name": "기술"},
-    {"ticker": "XLF", "name": "금융"},
-    {"ticker": "XLV", "name": "헬스케어"},
-    {"ticker": "XLE", "name": "에너지"},
-    {"ticker": "XLI", "name": "산업재"},
-    {"ticker": "XLY", "name": "경기소비재"},
+    {"ticker": "XLK",  "name": "기술",         "gics": "Information Technology"},
+    {"ticker": "XLF",  "name": "금융",         "gics": "Financials"},
+    {"ticker": "XLV",  "name": "헬스케어",     "gics": "Health Care"},
+    {"ticker": "XLE",  "name": "에너지",       "gics": "Energy"},
+    {"ticker": "XLI",  "name": "산업재",       "gics": "Industrials"},
+    {"ticker": "XLY",  "name": "경기소비재",   "gics": "Consumer Discretionary"},
+    {"ticker": "XLP",  "name": "필수소비재",   "gics": "Consumer Staples"},
+    {"ticker": "XLU",  "name": "유틸리티",     "gics": "Utilities"},
+    {"ticker": "XLRE", "name": "부동산",       "gics": "Real Estate"},
+    {"ticker": "XLB",  "name": "소재",         "gics": "Materials"},
+    {"ticker": "XLC",  "name": "커뮤니케이션", "gics": "Communication Services"},
 ]
+# 국내는 종목→섹터 매핑 소스가 아직 없어 ``gics`` 키가 없다. 알림의 섹터 요약
+# 에만 쓰이고 Gate 2 에는 참여하지 않는다 (sector_name 이 NULL 로 남는다).
 KR_SECTOR_ETFS = [
     {"ticker": "091160", "name": "반도체"},    # KODEX 반도체
     {"ticker": "305720", "name": "2차전지"},   # KODEX 2차전지산업
@@ -113,6 +122,10 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list)
             "name":   idx["name"],
             "market": market,
             "stage":  stage,
+            # 종목 판정(Gate 3)과 같은 주봉 30-SMA 기준. Gate 2 와 섹터 요약이
+            # 이 값을 쓴다. 위의 일봉 ``stage`` 는 _condition() → market_condition
+            # 이 계속 사용하므로 시장 필터 동작은 불변이다.
+            "stage_weekly": _weekly_stage(df),
             "price":  round(cur_p, 2),
             "ma150":  round(cur_ma, 2),
             "pct_vs_ma": round(pct, 2),
@@ -121,6 +134,57 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list)
         })
     except Exception as e:
         logger.error(f"지수 분석 실패 {idx['ticker']}: {e}")
+
+
+def _weekly_stage(df) -> "str | None":
+    """일봉 OHLCV 로 주봉 30-SMA Stage 를 구한다 (실패 시 None).
+
+    종목 판정과 동일한 ``weinstein.classify_stage`` 를 그대로 재사용해, 섹터와
+    종목이 서로 다른 기준으로 Stage 를 받는 일이 없게 한다.
+    """
+    try:
+        from scanner.weinstein import (
+            _build_indicators, classify_stage, compute_weekly_indicators,
+            to_weekly_ohlcv,
+        )
+        weekly_df = to_weekly_ohlcv(df)
+        if weekly_df is None or len(weekly_df) == 0:
+            return None
+        weekly_ind = compute_weekly_indicators(weekly_df, df)
+        if weekly_ind is None:
+            return None
+        return classify_stage(weekly_ind, _build_indicators(df))
+    except Exception as e:
+        logger.warning("주봉 Stage 산출 실패: %s", e)
+        return None
+
+
+def get_sector_stage(gics_sector: str, market: str = "US") -> tuple:
+    """GICS 섹터명 → ``(표시 라벨, 주봉 Stage)``.
+
+    Strict Gate 2 의 입력이다. 매핑에 없거나 ETF 데이터가 모자라면
+    ``(None, None)`` 을 돌려주고, 호출부는 그대로 sector_name/sector_stage 를
+    NULL 로 남긴다 (게이트가 꺼져 있는 동안에는 무해).
+
+    ``get_market_stages()`` 의 60분 캐시를 그대로 타므로 추가 fetch 가 없다.
+    """
+    if not gics_sector or market != "US":
+        return None, None
+    entry = next(
+        (e for e in US_SECTOR_ETFS if e.get("gics") == str(gics_sector).strip()),
+        None,
+    )
+    if entry is None:
+        return None, None
+    try:
+        sectors = get_market_stages().get("US_SECTORS", [])
+    except Exception as e:
+        logger.warning("섹터 Stage 조회 실패: %s", e)
+        return entry["name"], None
+    row = next((r for r in sectors if r["ticker"] == entry["ticker"]), None)
+    if row is None:
+        return entry["name"], None
+    return entry["name"], row.get("stage_weekly")
 
 
 def _condition(indices: list) -> str:

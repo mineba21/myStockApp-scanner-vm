@@ -31,13 +31,31 @@ def _read_html_wiki(url: str) -> list:
 
 
 def get_sp500_tickers() -> list:
+    """S&P500 구성 종목. ``sector`` 는 위키 표의 GICS Sector 원문이다.
+
+    Strict Gate 2 (섹터) 의 유일한 종목→섹터 소스이며, 목록을 받을 때 이미
+    같은 표에 실려 오므로 추가 네트워크 호출이 없다. 위키 표 구조가 바뀌어
+    컬럼이 사라져도 종목 목록 자체는 계속 나와야 하므로 방어적으로 읽는다
+    (그 경우 sector=None → sector_name 이 NULL 로 남는다).
+    """
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         tables = _read_html_wiki(url)
         df = tables[0]
-        return [{"ticker": str(r["Symbol"]).replace(".", "-"),
-                 "name": str(r["Security"]), "market_type": "SP500"}
-                for _, r in df.iterrows()]
+        has_sector = "GICS Sector" in df.columns
+        if not has_sector:
+            logger.warning("S&P500 표에 'GICS Sector' 컬럼 없음 — 섹터 매핑 생략")
+        rows = []
+        for _, r in df.iterrows():
+            sector = None
+            if has_sector:
+                value = r["GICS Sector"]
+                if pd.notna(value):
+                    sector = str(value).strip() or None
+            rows.append({"ticker": str(r["Symbol"]).replace(".", "-"),
+                         "name": str(r["Security"]), "market_type": "SP500",
+                         "sector": sector})
+        return rows
     except Exception as e:
         logger.error(f"S&P500 목록 실패: {e}"); return []
 

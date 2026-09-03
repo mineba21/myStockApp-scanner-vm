@@ -162,16 +162,19 @@ def _check_market(signal: Dict[str, Any],
             reasons.append(MARKET_CAUTION_BREAKOUT)
 
 
-# ── Gate 2 — Sector (stub) ─────────────────────────────────────────
+# ── Gate 2 — Sector ────────────────────────────────────────────────
 def _check_sector(signal: Dict[str, Any],
                   ctx: Dict[str, Any],
                   reasons: List[str]) -> None:
-    """Gate 2 — Sector (stub).
+    """Gate 2 — 섹터가 Stage2 인가.
 
-    종목당 sector 매핑은 별도 plan(``strict-weinstein-sector-mapping.md``)
-    으로 분리되어 본 plan 범위에서는 ``ctx.sector_stage`` 가 항상 None.
-    ``STRICT_REQUIRE_SECTOR_STAGE2`` 기본 False 라 noop. 매핑 구현 후
-    True 로 토글하면 활성화된다.
+    ``ctx.sector_stage`` 는 scan_engine 이 ``market_analysis.get_sector_stage``
+    로 풀어 넣는다 (미국은 위키 GICS 섹터 → SPDR 섹터 ETF 의 주봉 Stage).
+    매핑이 없는 종목 — 국내 전체, S&P500 밖의 미국 종목 — 은 None 이다.
+
+    **None 은 통과가 아니라 실패**(``sector_not_stage2``)로 취급하므로,
+    ``STRICT_REQUIRE_SECTOR_STAGE2`` 를 켤 때는 미매핑 종목이 전부 탈락한다는
+    점을 먼저 확인해야 한다. 기본값 False 에서는 noop 이다.
 
     Args:
         ctx: 필요 키: sector_stage (str | None).
