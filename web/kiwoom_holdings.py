@@ -6,7 +6,7 @@ import hashlib
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from trading.kiwoom_readonly import (
@@ -165,17 +165,67 @@ def _token_key(profile: str, config: KiwoomConfig) -> str:
     return f"{profile}:{config.mode}:{fingerprint}"
 
 
-def _get_token(profile: str, config: KiwoomConfig, client: KiwoomReadOnlyClient) -> str:
+# 키움은 같은 App Key 로 재발급을 요청하면 **기존 토큰을 그대로 돌려준다**
+# (실측: 두 번 발급한 토큰이 동일하고 첫 토큰도 계속 유효). 즉 issue_token()
+# 은 만료 시계를 초기화하지 않는다. 그래서 "발급 시각 + 23시간" 으로 캐시하면
+# 수명이 얼마 안 남은 토큰을 23시간짜리로 붙들게 되고, 토큰이 죽은 뒤에도
+# 캐시가 계속 그것을 내주어 8005(Token이 유효하지 않습니다)가 반복된다
+# (운영 실측: 서비스 시작 Sep 03 03:52 UTC → 캐시 만료 예정 Sep 04 02:52 인데
+#  실제 오류는 그 창 안쪽인 Sep 03 23:30 부터 발생).
+#
+# 응답의 ``expires_dt`` 를 실제 만료 시각으로 사용한다. 표기는 **KST** 다 —
+# UTC 로 읽으면 잔여 수명이 32.9시간으로 나와 키움이 명시한 최대 24시간을
+# 넘어버린다(KST 로 읽으면 23.9시간으로 맞다).
+_KST = timezone(timedelta(hours=9))
+_TOKEN_EXPIRY_MARGIN_SECONDS = 600      # 만료 직전 경계에서 쓰지 않도록 10분 여유
+_TOKEN_FALLBACK_TTL_SECONDS = 1800      # expires_dt 파싱 실패 시 짧게만 재사용
+
+
+def _token_ttl_seconds(token_data: dict[str, Any]) -> float:
+    """``expires_dt``(KST) 를 지금부터 남은 초로 환산한다.
+
+    파싱할 수 없으면 짧은 폴백 TTL 을 쓴다 — 형식이 바뀌었을 때 조용히
+    23시간짜리 캐시로 되돌아가지 않게 하기 위함이다.
+    """
+    raw = str(token_data.get("expires_dt") or "").strip()
+    if len(raw) != 14 or not raw.isdigit():
+        return _TOKEN_FALLBACK_TTL_SECONDS
+    try:
+        expires_at = datetime.strptime(raw, "%Y%m%d%H%M%S").replace(tzinfo=_KST)
+    except ValueError:
+        return _TOKEN_FALLBACK_TTL_SECONDS
+    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    return max(0.0, remaining - _TOKEN_EXPIRY_MARGIN_SECONDS)
+
+
+def _get_token(
+    profile: str,
+    config: KiwoomConfig,
+    client: KiwoomReadOnlyClient,
+    *,
+    force: bool = False,
+) -> str:
     key = _token_key(profile, config)
-    cached = _TOKEN_CACHE.get(key)
     now = time.monotonic()
-    if cached and cached[0] > now:
-        return cached[1]
+    if not force:
+        cached = _TOKEN_CACHE.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
     token_data = client.issue_token()
     token = str(token_data["token"])
-    # 공식 유효기간은 24시간. 서버 시각 파싱에 의존하지 않고 23시간만 재사용한다.
-    _TOKEN_CACHE[key] = (now + 23 * 60 * 60, token)
+    ttl = _token_ttl_seconds(token_data)
+    if ttl > 0:
+        _TOKEN_CACHE[key] = (now + ttl, token)
+    else:
+        # 이미 만료됐거나 여유분도 안 남았다 — 캐시하지 않는다.
+        _TOKEN_CACHE.pop(key, None)
     return token
+
+
+def _is_invalid_token_error(exc: KiwoomError) -> bool:
+    """8005(Token이 유효하지 않습니다) 계열인지."""
+    text = str(exc)
+    return "8005" in text or "Token이 유효하지 않" in text
 
 
 def _currency_item(report: dict[str, Any], currency: str = "USD") -> dict[str, Any]:
@@ -197,6 +247,10 @@ def _safe_overseas_call(call: Callable[[], dict[str, Any]]) -> dict[str, Any]:
     try:
         return call()
     except KiwoomError as exc:
+        # 토큰 만료는 "계좌 권한 없음" 과 성격이 다르다 — 빈 결과로 덮으면
+        # 호출부의 재시도가 발동하지 못하고 잔고가 조용히 0 으로 보인다.
+        if _is_invalid_token_error(exc):
+            raise
         # 국내전용 계좌가 미국주식 조회 TR을 호출하면 508540을 반환한다.
         message = str(exc)
         if "508540" in message or "조회내역이 없습니다" in message or "실패 (20)" in message:
@@ -291,21 +345,42 @@ def _load_kiwoom_portfolio(
         updated_at = datetime.now(timezone.utc).isoformat()
         for profile, config in load_profile_configs().items():
             client = client_factory(config)
-            token = _get_token(profile, config, client)
-            balance = client.get_account_balance(token)
-            domestic_deposit = _optional_report(client, "get_domestic_deposit", token)
-            overseas_balance = _safe_overseas_call(
-                lambda: client.get_overseas_account_balance(token)
-            )
-            overseas_deposit = _safe_overseas_call(
-                lambda: _optional_report(client, "get_overseas_deposit", token)
-            )
-            overseas_currency = _safe_overseas_call(
-                lambda: _optional_report(client, "get_overseas_currency_valuation", token)
-            )
-            overseas_valuation = _safe_overseas_call(
-                lambda: _optional_report(client, "get_overseas_valuation", token)
-            )
+
+            def _fetch(token: str) -> dict[str, Any]:
+                """한 계좌의 조회 TR 묶음. 토큰이 죽으면 통째로 재시도한다."""
+                return {
+                    "balance": client.get_account_balance(token),
+                    "domestic_deposit": _optional_report(
+                        client, "get_domestic_deposit", token),
+                    "overseas_balance": _safe_overseas_call(
+                        lambda: client.get_overseas_account_balance(token)),
+                    "overseas_deposit": _safe_overseas_call(
+                        lambda: _optional_report(client, "get_overseas_deposit", token)),
+                    "overseas_currency": _safe_overseas_call(
+                        lambda: _optional_report(
+                            client, "get_overseas_currency_valuation", token)),
+                    "overseas_valuation": _safe_overseas_call(
+                        lambda: _optional_report(
+                            client, "get_overseas_valuation", token)),
+                }
+
+            try:
+                fetched = _fetch(_get_token(profile, config, client))
+            except KiwoomError as exc:
+                if not _is_invalid_token_error(exc):
+                    raise
+                # 캐시된 토큰이 서버에서 이미 죽은 경우 — 강제 재발급 후 1회만
+                # 재시도한다. 이 재시도가 없으면 캐시가 만료될 때까지 계속
+                # 실패하고, 사실상 서비스 재시작으로만 복구된다.
+                _TOKEN_CACHE.pop(_token_key(profile, config), None)
+                fetched = _fetch(_get_token(profile, config, client, force=True))
+
+            balance = fetched["balance"]
+            domestic_deposit = fetched["domestic_deposit"]
+            overseas_balance = fetched["overseas_balance"]
+            overseas_deposit = fetched["overseas_deposit"]
+            overseas_currency = fetched["overseas_currency"]
+            overseas_valuation = fetched["overseas_valuation"]
             allowed_markets = ACCOUNT_MARKETS.get(profile, frozenset({"KR", "US"}))
             if "KR" in allowed_markets:
                 rows.extend(
