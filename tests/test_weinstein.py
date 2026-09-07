@@ -1074,6 +1074,15 @@ class TestStage2BreakoutV4:
 
 class TestStageBoundary:
 
+    def test_stage3_bear_market_rally_above_falling_ma(self):
+        """하락 중인 30주선 위 급반등은 Stage1이 아니라 STAGE3."""
+        from scanner.weinstein import classify_stage
+
+        # sma10 >= close*0.98이라 기존 보조 조건으로는 STAGE3가 아니던 조합.
+        ind = {"cur_close_w": 110.0, "cur_sma30w": 100.0,
+               "cur_sma10w": 109.0,  "slope30w": -0.10}
+        assert classify_stage(ind, None) == "STAGE3"
+
     def test_stage3_above_ma_flat_slope(self):
         """close > sma30w + slope ≈ 0 → STAGE3 (분배)."""
         from scanner.weinstein import classify_stage

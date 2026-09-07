@@ -442,6 +442,9 @@ def classify_stage(weekly_ind: Optional[Dict], daily_ind: Optional[Dict]) -> str
     # Stage2: 주봉 close > 30w SMA > 10w 도 참고 (강한 상승 추세)
     if above and rising:
         return "STAGE2"
+    # 하락 중인 30w SMA 위로 급반등한 경우는 Stage1 베이스가 아니라 베어마켓 랠리
+    if above and falling:
+        return "STAGE3"
     # Stage3: 30w 위지만 기울기 둔화/평평 (분배)
     if above and (flat or (slope <= _RISING_SLOPE and sma10 < close * 0.98)):
         return "STAGE3"
