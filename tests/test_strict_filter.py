@@ -152,6 +152,7 @@ def _force_all_strict_flags(monkeypatch, *,
                             require_sector_stage2: bool = False,
                             require_price_above_weekly_30ma: bool = True,
                             require_price_above_daily_150ma: bool = True,
+                            min_slope30w: float = 0.0,
                             require_breakout_volume: bool = True,
                             require_rs_positive: bool = True,
                             require_rs_rising: bool = True,
@@ -168,6 +169,7 @@ def _force_all_strict_flags(monkeypatch, *,
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_SECTOR_STAGE2",       require_sector_stage2)
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA", require_price_above_weekly_30ma)
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_PRICE_ABOVE_DAILY_150MA", require_price_above_daily_150ma)
+    _force_strict_flag(monkeypatch, "STRICT_MIN_SLOPE30W",                   min_slope30w)
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_BREAKOUT_VOLUME",     require_breakout_volume)
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_RS_POSITIVE",         require_rs_positive)
     _force_strict_flag(monkeypatch, "STRICT_REQUIRE_RS_RISING",           require_rs_rising)
@@ -338,6 +340,7 @@ class TestStageGate:
     def _flags(self, monkeypatch):
         _force_strict_flag(monkeypatch, "STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA", True)
         _force_strict_flag(monkeypatch, "STRICT_REQUIRE_PRICE_ABOVE_DAILY_150MA", True)
+        _force_strict_flag(monkeypatch, "STRICT_MIN_SLOPE30W", 0.0)
 
     def test_weekly_data_missing_blocks(self, monkeypatch):
         from scanner.strict_filter import _check_weekly_stage, WEEKLY_DATA_MISSING
@@ -409,6 +412,59 @@ class TestStageGate:
                              "strict_ma150": 100.0, "strict_sma30w": 95.0,
                              "strict_slope30w": -0.1, "strict_weekly_stage": "STAGE2"}, reasons)
         assert WEEKLY_30MA_SLOPE_NEGATIVE in reasons
+
+    @pytest.mark.parametrize("signal_type", ["BREAKOUT", "RE_BREAKOUT", "REBOUND"])
+    def test_negative_slope_blocks_every_signal_type(self, monkeypatch, signal_type):
+        """30주선 하락은 stage 및 signal_type과 무관하게 차단."""
+        from scanner.strict_filter import _check_weekly_stage, WEEKLY_30MA_SLOPE_NEGATIVE
+        self._flags(monkeypatch)
+
+        reasons = []
+        _check_weekly_stage({"signal_type": signal_type, "strict_price": 110.0,
+                             "strict_ma150": 100.0, "strict_sma30w": 95.0,
+                             "strict_slope30w": -0.1, "strict_weekly_stage": "STAGE1"}, reasons)
+        assert WEEKLY_30MA_SLOPE_NEGATIVE in reasons
+
+    def test_flat_slope_passes_at_default_threshold(self, monkeypatch):
+        """기본 하한 0.0은 평평한 30주선을 허용."""
+        from scanner.strict_filter import _check_weekly_stage
+        self._flags(monkeypatch)
+
+        reasons = []
+        _check_weekly_stage({"signal_type": "REBOUND", "strict_price": 110.0,
+                             "strict_ma150": 100.0, "strict_sma30w": 95.0,
+                             "strict_slope30w": 0.0, "strict_weekly_stage": "STAGE1"}, reasons)
+        assert reasons == []
+
+    def test_configured_minimum_slope_is_inclusive(self, monkeypatch):
+        """환경 설정 하한 미만만 거부하고 경계값은 허용."""
+        from scanner.strict_filter import _check_weekly_stage, WEEKLY_30MA_SLOPE_NEGATIVE
+        self._flags(monkeypatch)
+        _force_strict_flag(monkeypatch, "STRICT_MIN_SLOPE30W", 0.2)
+
+        base = {"signal_type": "BREAKOUT", "strict_price": 110.0,
+                "strict_ma150": 100.0, "strict_sma30w": 95.0,
+                "strict_weekly_stage": "STAGE1"}
+        below_reasons = []
+        _check_weekly_stage({**base, "strict_slope30w": 0.199}, below_reasons)
+        assert WEEKLY_30MA_SLOPE_NEGATIVE in below_reasons
+
+        boundary_reasons = []
+        _check_weekly_stage({**base, "strict_slope30w": 0.2}, boundary_reasons)
+        assert boundary_reasons == []
+
+    def test_minimum_slope_env_override(self):
+        """STRICT_MIN_SLOPE30W는 config 재로딩 시 env 값을 읽는다."""
+        import subprocess
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = os.environ.copy()
+        env["STRICT_MIN_SLOPE30W"] = "0.125"
+        result = subprocess.run(
+            [sys.executable, "-c", "import config; print(config.STRICT_MIN_SLOPE30W)"],
+            cwd=repo_root, env=env, capture_output=True, text=True, check=True,
+        )
+        assert float(result.stdout.strip()) == 0.125
 
     def test_stage2_with_positive_slope_passes(self, monkeypatch):
         from scanner.strict_filter import _check_weekly_stage

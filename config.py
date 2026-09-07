@@ -185,6 +185,7 @@ SECTOR_GATE_EXEMPT_MARKETS = {
 # Gate 3 — Stock Weekly/Daily Stage
 STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA      = os.getenv("STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA", "true").lower() == "true"
 STRICT_REQUIRE_PRICE_ABOVE_DAILY_150MA      = os.getenv("STRICT_REQUIRE_PRICE_ABOVE_DAILY_150MA", "true").lower() == "true"
+STRICT_MIN_SLOPE30W                        = float(os.getenv("STRICT_MIN_SLOPE30W", "0.0"))
 
 # Gate 5 — Breakout Volume
 STRICT_REQUIRE_BREAKOUT_VOLUME              = os.getenv("STRICT_REQUIRE_BREAKOUT_VOLUME", "true").lower() == "true"

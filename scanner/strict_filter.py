@@ -60,6 +60,7 @@ from config import (
     SECTOR_GATE_EXEMPT_MARKETS,
     STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA,
     STRICT_REQUIRE_PRICE_ABOVE_DAILY_150MA,
+    STRICT_MIN_SLOPE30W,
     STRICT_REQUIRE_BREAKOUT_VOLUME,
     STRICT_REQUIRE_RS_POSITIVE,
     STRICT_REQUIRE_RS_RISING,
@@ -199,7 +200,7 @@ def _check_weekly_stage(signal: Dict[str, Any],
                         reasons: List[str]) -> None:
     """Gate 3 — Stock weekly stage.
 
-    주봉 30MA 위 상승 진행(STAGE2 + slope>0) + (BREAKOUT 만)일봉 MA150 위.
+    주봉 30MA 위 + 30주선 기울기 하한 충족 + (BREAKOUT 만)일봉 MA150 위.
 
     **모든 입력은 signal-date 스냅샷 필드(``strict_*``) 사용.** 공개 필드
     ``price``/``ma150``/``sma30w``/``weekly_stage``/``slope30w`` 는 last-bar
@@ -212,8 +213,8 @@ def _check_weekly_stage(signal: Dict[str, Any],
       3. BREAKOUT + STRICT_REQUIRE_PRICE_ABOVE_DAILY_150MA
          strict_price < strict_ma150                 → "below_daily_150ma"
       4. strict_weekly_stage in {STAGE3, STAGE4}     → "stage_stage3" / "stage_stage4"
-      5. strict_weekly_stage == STAGE2 + strict_slope30w <= 0
-                                                    → "weekly_30ma_slope_negative"
+      5. strict_slope30w < STRICT_MIN_SLOPE30W      → "weekly_30ma_slope_negative"
+         (stage / signal_type 무관, 기본 0.0은 평평 허용·하락 거부)
 
     Args:
         signal: 필요 키: signal_type, strict_price, strict_ma150,
@@ -247,11 +248,10 @@ def _check_weekly_stage(signal: Dict[str, Any],
     elif weekly_stage == "STAGE4":
         reasons.append(STAGE_STAGE4)
 
-    # 5) STAGE2 인데 30W slope 음수 → 진짜 상승 아님
-    if weekly_stage == "STAGE2":
-        slope = signal.get("strict_slope30w")
-        if slope is not None and slope <= 0:
-            reasons.append(WEEKLY_30MA_SLOPE_NEGATIVE)
+    # 5) 모든 stage / signal_type 에서 30W slope 하한 강제
+    slope = signal.get("strict_slope30w")
+    if slope is not None and slope < STRICT_MIN_SLOPE30W:
+        reasons.append(WEEKLY_30MA_SLOPE_NEGATIVE)
 
 
 # ── Gate 4 — Base / Pivot ──────────────────────────────────────────

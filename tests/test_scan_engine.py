@@ -731,6 +731,7 @@ class TestStrictFilterFlow:
             ("STRICT_REQUIRE_SECTOR_STAGE2",                False),
             ("STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA",      True),
             ("STRICT_REQUIRE_PRICE_ABOVE_DAILY_150MA",      True),
+            ("STRICT_MIN_SLOPE30W",                          0.0),
             ("STRICT_REQUIRE_BREAKOUT_VOLUME",              True),
             ("STRICT_REQUIRE_RS_POSITIVE",                  True),
             ("STRICT_REQUIRE_RS_RISING",                    True),
