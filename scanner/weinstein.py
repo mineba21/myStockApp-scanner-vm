@@ -60,7 +60,8 @@ try:
     from config import (
         WEEKLY_MA_LONG, WEEKLY_MA_SHORT,
         DAILY_MA_FAST, DAILY_MA_SLOW,
-        BREAKOUT_WEEKLY_VOL_RATIO, BREAKOUT_DAILY_VOL_RATIO,
+        BREAKOUT_WEEKLY_VOL_RATIO, BREAKOUT_WEEKLY_VOL_QUALITY_RATIO,
+        BREAKOUT_DAILY_VOL_RATIO,
         RS_LOOKBACK_WEEKS, BASE_MIN_WEEKS, PIVOT_LOOKBACK_WEEKS,
     )
 except ImportError:
@@ -69,6 +70,7 @@ except ImportError:
     DAILY_MA_FAST             = 50
     DAILY_MA_SLOW             = 150
     BREAKOUT_WEEKLY_VOL_RATIO = 2.0
+    BREAKOUT_WEEKLY_VOL_QUALITY_RATIO = 1.2
     BREAKOUT_DAILY_VOL_RATIO  = 3.0
     RS_LOOKBACK_WEEKS         = 52
     BASE_MIN_WEEKS            = 5
@@ -352,6 +354,8 @@ def compute_weekly_indicators(weekly_df: pd.DataFrame,
     # 분모 평균은 항상 *완성 주만* 으로 계산한다. 부분 주가 rolling(10) 에
     # 섞이면 평균이 낮아져 비율이 부풀려진다 (CURRENT_NORMALIZED 경로도 동일).
     vol_series_for_avg = vol
+    # soft quality 분모는 분자 역할을 하는 주를 제외한 직전 완성 4주다.
+    previous_volume_for_quality = vol.iloc[:-1]
 
     if week_state is not None:
         week_elapsed, week_complete = week_state
@@ -367,6 +371,8 @@ def compute_weekly_indicators(weekly_df: pd.DataFrame,
             vol_series_for_avg = vol.iloc[:-1]
             vol_numerator = (float(vol_series_for_avg.iloc[-1])
                              if len(vol_series_for_avg) else 0.0)
+            # 분자가 직전 완성 주로 이동했으므로 그 주도 quality 분모에서 제외.
+            previous_volume_for_quality = vol.iloc[:-2]
 
     if vol_series_for_avg is vol:
         vol_avg_used = cur_volavg
@@ -378,6 +384,10 @@ def compute_weekly_indicators(weekly_df: pd.DataFrame,
 
     weekly_volume_ratio = (round(vol_numerator / vol_avg_used, 2)
                            if vol_avg_used > 0 else 0.0)
+    previous_4w_avg = (float(previous_volume_for_quality.iloc[-4:].mean())
+                       if len(previous_volume_for_quality) >= 4 else 0.0)
+    weekly_volume_ratio_4w = (round(vol_numerator / previous_4w_avg, 2)
+                              if previous_4w_avg > 0 else 0.0)
     weekly_volume_ratio_raw = (round(cur_vol / cur_volavg, 2)
                                if cur_volavg > 0 else 0.0)
 
@@ -403,6 +413,7 @@ def compute_weekly_indicators(weekly_df: pd.DataFrame,
         "cur_vol_w":   cur_vol,
         "cur_volavg_w": cur_volavg,
         "weekly_volume_ratio":     weekly_volume_ratio,
+        "weekly_volume_ratio_4w":  weekly_volume_ratio_4w,
         "weekly_volume_ratio_raw": weekly_volume_ratio_raw,
         "week_elapsed_days":       week_elapsed,
         "week_volume_basis":       week_basis,
@@ -1870,11 +1881,16 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
     strict_sma30w: Optional[float] = None
     strict_slope30w: Optional[float] = None
     strict_weekly_volume_ratio: Optional[float] = None
+    strict_weekly_volume_ratio_4w: Optional[float] = None
     if weekly_at_signal is not None:
         strict_sma30w              = round(weekly_at_signal["cur_sma30w"], 4)
         strict_slope30w            = round(weekly_at_signal["slope30w"],   6)
         wvr_sig                    = weekly_at_signal.get("weekly_volume_ratio")
         strict_weekly_volume_ratio = float(wvr_sig) if wvr_sig is not None else None
+        wvr_4w_sig = weekly_at_signal.get("weekly_volume_ratio_4w")
+        strict_weekly_volume_ratio_4w = (
+            float(wvr_4w_sig) if wvr_4w_sig is not None else None
+        )
 
     # ── Mansfield RS (v4) + legacy ratio RS — signal 시점까지의 시리즈로 산출 ──
     rs_value, rs_trend = (None, None)
@@ -1925,6 +1941,13 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
         warning_flags.append(f"Mansfield RS < 0 ({rs_value:+.1f})")
     if rs_trend == "FALLING":
         warning_flags.append("RS 하락 추세")
+
+    weekly_volume_quality_passed: Optional[bool] = None
+    if (sig["signal_type"] == "BREAKOUT"
+            and strict_weekly_volume_ratio_4w is not None):
+        weekly_volume_quality_passed = (
+            strict_weekly_volume_ratio_4w >= BREAKOUT_WEEKLY_VOL_QUALITY_RATIO
+        )
 
     result = {
         "ticker":          ticker,
@@ -1995,12 +2018,17 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
         "strict_sma30w":              strict_sma30w,
         "strict_slope30w":            strict_slope30w,
         "strict_weekly_volume_ratio": strict_weekly_volume_ratio,
+        "strict_weekly_volume_ratio_4w": strict_weekly_volume_ratio_4w,
+        # 직전 4주 1.2x는 soft quality 정보이며 strict gate에는 사용하지 않는다.
+        "weekly_volume_quality_passed": weekly_volume_quality_passed,
+        "weekly_volume_quality_threshold": BREAKOUT_WEEKLY_VOL_QUALITY_RATIO,
     }
     if weekly_ind is not None:
         # 공개 필드 — last-bar 기준 (display/persist 의미 보존)
         result["sma30w"] = round(weekly_ind["cur_sma30w"], 4)
         result["sma10w"] = round(weekly_ind["cur_sma10w"], 4)
         result["weekly_volume_ratio"] = weekly_ind.get("weekly_volume_ratio")
+        result["weekly_volume_ratio_4w"] = weekly_ind.get("weekly_volume_ratio_4w")
         result["slope30w"] = round(weekly_ind["slope30w"], 6)
     # Step 4는 이미 생성된 신호를 관측만 한다. base/pivot 탐지 입력이나
     # strict_* signal-date 스냅샷에는 손대지 않는다.

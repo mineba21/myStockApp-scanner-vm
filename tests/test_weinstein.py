@@ -1001,6 +1001,17 @@ class TestStage2BreakoutV4:
         assert "base_quality"  in res
         assert res["base_quality"] in ("STRONG", "WEAK")            # legacy 매핑
 
+    def test_previous_four_quality_threshold_does_not_block(self, monkeypatch):
+        """직전 4주 기준은 임계값에 미달해도 BREAKOUT을 차단하지 않는다."""
+        from scanner import weinstein
+
+        monkeypatch.setattr(weinstein, "BREAKOUT_WEEKLY_VOL_QUALITY_RATIO", 999.0)
+        res = weinstein.analyze_stock(self._stage2_setup(), "TEST", "테스트", "US")
+
+        assert res is not None
+        assert res["signal_type"] == "BREAKOUT"
+        assert res["weekly_volume_quality_passed"] is False
+
     def test_v4_blocked_by_low_daily_volume(self):
         """일봉 거래량 < BREAKOUT_DAILY_VOL_RATIO(Step 2: 1.5x) → 신호 없음 (hard block)."""
         from scanner.weinstein import analyze_stock
@@ -1774,6 +1785,8 @@ class TestNoLookAhead:
                     f"got={res['weekly_volume_ratio']} last={wvr_last} "
                     f"sig={w_sig.get('weekly_volume_ratio')}"
                 )
+            wvr_4w_last = w_last.get("weekly_volume_ratio_4w")
+            assert res.get("weekly_volume_ratio_4w") == wvr_4w_last
 
         # ══════════════════════════════════════════════════════════════
         # Invariant B — strict_* 스냅샷은 *signal-date* 값
@@ -1808,6 +1821,13 @@ class TestNoLookAhead:
                 assert abs(float(res["strict_weekly_volume_ratio"]) - float(wvr_sig)) < 1e-3, (
                     f"result['strict_weekly_volume_ratio'] 는 signal-date 비율이어야 함. "
                     f"got={res['strict_weekly_volume_ratio']} sig={wvr_sig}"
+                )
+            wvr_4w_sig = w_sig.get("weekly_volume_ratio_4w")
+            assert res.get("strict_weekly_volume_ratio_4w") == wvr_4w_sig
+            if res["signal_type"] == "BREAKOUT":
+                from config import BREAKOUT_WEEKLY_VOL_QUALITY_RATIO
+                assert res["weekly_volume_quality_passed"] is (
+                    wvr_4w_sig >= BREAKOUT_WEEKLY_VOL_QUALITY_RATIO
                 )
 
 

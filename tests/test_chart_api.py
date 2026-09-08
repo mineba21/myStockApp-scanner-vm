@@ -390,6 +390,22 @@ class TestChartOverlayRouting:
             snapshots.append((overlay["base"], overlay["tight"]))
         assert snapshots[0] == snapshots[1] == snapshots[2]
 
+    def test_overlay_exposes_signal_date_weekly_volume_multiples(self):
+        import web.app as webapp
+        row = _overlay_row(
+            weekly_volume_ratio=0.82,
+            weekly_volume_ratio_4w=1.37,
+            weekly_volume_quality_passed=True,
+        )
+        daily = pd.DataFrame(
+            {"Close": [110.0]}, index=pd.DatetimeIndex(["2024-06-03"])
+        )
+
+        at_signal = webapp._build_chart_overlay(row, daily)["at_signal"]
+        assert at_signal["weekly_volume_ratio"] == 0.82
+        assert at_signal["weekly_volume_ratio_4w"] == 1.37
+        assert at_signal["weekly_volume_quality_passed"] is True
+
 
 class TestOverlayWarnings:
     def _warnings(self, current_price, **row_overrides):

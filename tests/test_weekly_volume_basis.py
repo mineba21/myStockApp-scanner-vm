@@ -80,6 +80,7 @@ class TestWeekBasisPaths:
         assert ind["week_elapsed_days"] == 5
         # 매주 거래량이 동일하므로 비율은 1.0, 정규화 전후 동일
         assert ind["weekly_volume_ratio"] == pytest.approx(1.0, abs=0.01)
+        assert ind["weekly_volume_ratio_4w"] == pytest.approx(1.0, abs=0.01)
         assert ind["weekly_volume_ratio"] == ind["weekly_volume_ratio_raw"]
 
     def test_elapsed_3_days_normalizes_current_week(self):
@@ -94,6 +95,7 @@ class TestWeekBasisPaths:
         assert ind["weekly_volume_ratio_raw"] == pytest.approx(0.625, abs=0.02)
         # 정규화 + 부분 주 제외 분모 → 완성 주와 같은 수준(1.0)으로 복원
         assert ind["weekly_volume_ratio"] == pytest.approx(1.0, abs=0.02)
+        assert ind["weekly_volume_ratio_4w"] == pytest.approx(1.0, abs=0.02)
 
     def test_elapsed_2_days_falls_back_to_previous_week(self):
         """화요일 마감(경과 2일) → PREVIOUS_COMPLETE, 정규화 없음."""
@@ -105,6 +107,7 @@ class TestWeekBasisPaths:
         assert ind["week_elapsed_days"] == 2
         # 직전 완성 주(정상 거래량)를 쓰므로 1.0
         assert ind["weekly_volume_ratio"] == pytest.approx(1.0, abs=0.02)
+        assert ind["weekly_volume_ratio_4w"] == pytest.approx(1.0, abs=0.02)
         # raw: 분자 0.4주 / 분모(부분 주가 섞인 10주 평균 0.94) = 0.426
         assert ind["weekly_volume_ratio_raw"] == pytest.approx(0.426, abs=0.02)
 
@@ -125,6 +128,25 @@ class TestWeekBasisPaths:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestRollingAverageNotPolluted:
+
+    def test_quality_ratio_uses_previous_four_excluding_numerator_week(self):
+        """완성 주 분자는 직전 4주 평균에서 제외되고 10주 hard 비율과 독립적."""
+        idx = pd.date_range("2024-01-05", periods=40, freq="W-FRI")
+        close = [100.0 + i * 0.1 for i in range(40)]
+        # 직전 4주는 1/2/3/4M, 분자 주는 10M → 10 / 2.5 = 4.0.
+        # 그 이전 5주는 10M이라 현행 10주 rolling(분자 포함)과 값이 다르다.
+        volumes = [10_000_000.0] * 35 + [1_000_000.0, 2_000_000.0,
+                                                 3_000_000.0, 4_000_000.0,
+                                                10_000_000.0]
+        weekly = pd.DataFrame({
+            "Open": close, "High": close, "Low": close, "Close": close,
+            "Volume": volumes,
+        }, index=idx)
+
+        ind = compute_weekly_indicators(weekly)
+        assert ind is not None
+        assert ind["weekly_volume_ratio_4w"] == 4.0
+        assert ind["weekly_volume_ratio"] == pytest.approx(1.43, abs=0.01)
 
     def test_previous_complete_average_excludes_partial_week(self):
         """PREVIOUS_COMPLETE 경로에서 부분 주 거래량이 분모 평균에 섞이면 안 된다.

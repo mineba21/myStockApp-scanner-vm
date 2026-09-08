@@ -58,10 +58,10 @@ DAILY_MA_FAST     = int(os.getenv("DAILY_MA_FAST", "50"))    # 일봉 MA50
 DAILY_MA_SLOW     = int(os.getenv("DAILY_MA_SLOW", "150"))   # 일봉 MA150 (주봉 30 ≈ 일봉 150)
 
 # 거래량 확인 (주봉/일봉 모두)
-# Step 2 — 주봉 게이트는 "확실히 거래량 없는 종목만 조기 제외"하는 성능
-# 컷으로 재정의 (Step 1 A/B 실측: 게이트를 완전히 없애도 KR/US 실제 통과
-# 종목이 늘지 않음 — 병목은 base 정의였다). 2.0 → 0.5.
+# 현행 10주 분모의 0.5는 "확실히 거래량 없는 종목만 조기 제외"하는 hard floor.
+# 원전형 직전 4주(분자 주 제외) 1.2는 차단하지 않고 품질 표시로만 사용한다.
 BREAKOUT_WEEKLY_VOL_RATIO = float(os.getenv("BREAKOUT_WEEKLY_VOL_RATIO", "0.5"))
+BREAKOUT_WEEKLY_VOL_QUALITY_RATIO = float(os.getenv("BREAKOUT_WEEKLY_VOL_QUALITY_RATIO", "1.2"))
 # Step 2 — 실효 breakout 의 거래량 비율이 실측상 1.54x 부근(Weinstein 원전
 # 수준)이라 3.0 은 과했다. 1.5 로 완화.
 BREAKOUT_DAILY_VOL_RATIO  = float(os.getenv("BREAKOUT_DAILY_VOL_RATIO",  "1.5"))

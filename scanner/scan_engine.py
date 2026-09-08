@@ -1073,12 +1073,23 @@ def _save(db, signal: dict):
                 entry_warnings_json = json.dumps(entry_warnings, ensure_ascii=False)
             except Exception:
                 entry_warnings_json = None
+        # 주봉 거래량은 stale 스캔의 last-bar 값이 아니라 신호일 스냅샷을 저장.
+        weekly_volume_ratio = signal.get("strict_weekly_volume_ratio")
+        if weekly_volume_ratio is None:
+            weekly_volume_ratio = signal.get("weekly_volume_ratio")
+        weekly_volume_ratio_4w = signal.get("strict_weekly_volume_ratio_4w")
+        if weekly_volume_ratio_4w is None:
+            weekly_volume_ratio_4w = signal.get("weekly_volume_ratio_4w")
 
         if existing:
             # 최신 가격/품질만 업데이트
             existing.price            = signal["price"]
             existing.ma150            = signal["ma150"]
             existing.volume_ratio     = signal.get("volume_ratio", 0)
+            existing.weekly_volume_ratio = weekly_volume_ratio
+            existing.weekly_volume_ratio_4w = weekly_volume_ratio_4w
+            existing.weekly_volume_quality_passed = signal.get("weekly_volume_quality_passed")
+            existing.weekly_volume_quality_threshold = signal.get("weekly_volume_quality_threshold")
             existing.pivot_price      = signal.get("pivot_price")
             existing.support_level    = signal.get("support_level")
             existing.market_condition = signal.get("market_condition")
@@ -1132,6 +1143,10 @@ def _save(db, signal: dict):
                 volume           = signal.get("volume", 0),
                 volume_avg       = signal.get("volume_avg", 0),
                 volume_ratio     = signal.get("volume_ratio", 0),
+                weekly_volume_ratio = weekly_volume_ratio,
+                weekly_volume_ratio_4w = weekly_volume_ratio_4w,
+                weekly_volume_quality_passed = signal.get("weekly_volume_quality_passed"),
+                weekly_volume_quality_threshold = signal.get("weekly_volume_quality_threshold"),
                 signal_date      = signal.get("signal_date", ""),
                 pivot_price      = signal.get("pivot_price"),
                 support_level    = signal.get("support_level"),
@@ -1352,8 +1367,15 @@ def _notify(buys, sells, holding_signals_or_send=None, send_fn=None,
         holding_signals = holding_signals_or_send or []
 
     try:
-        from config import STRICT_NOTIFY_INCLUDE_REASONS, STRICT_WEINSTEIN_MODE
+        from config import (
+            BREAKOUT_WEEKLY_VOL_QUALITY_RATIO,
+            BREAKOUT_WEEKLY_VOL_RATIO,
+            STRICT_NOTIFY_INCLUDE_REASONS,
+            STRICT_WEINSTEIN_MODE,
+        )
     except ImportError:
+        BREAKOUT_WEEKLY_VOL_QUALITY_RATIO = 1.2
+        BREAKOUT_WEEKLY_VOL_RATIO         = 0.5
         STRICT_NOTIFY_INCLUDE_REASONS = False
         STRICT_WEINSTEIN_MODE         = False
 
@@ -1398,7 +1420,7 @@ def _notify(buys, sells, holding_signals_or_send=None, send_fn=None,
                         more = "" if len(reasons) <= 3 else f" +{len(reasons)-3}"
                         strict_str += f" | reasons={joined}{more}"
                 msg += (f"{ico}{gbadge}[{g}] *{s['name']}* ({s['ticker']})\n"
-                        f"  • {s['signal_type']} | {p} | 거래량 {s['volume_ratio']:.1f}x"
+                        f"  • {s['signal_type']} | {p} | 일봉 거래량 {s['volume_ratio']:.1f}x"
                         f"{bq_str}{flag_warn}{strict_str}\n")
                 if s.get("signal_type") == "BREAKOUT":
                     def _price(value):
@@ -1420,6 +1442,27 @@ def _notify(buys, sells, holding_signals_or_send=None, send_fn=None,
                     cur_stop = s.get("cur_stop_pct")
                     cur_ext_text = (f"{cur_ext:+.1f}%" if cur_ext is not None else "-")
                     cur_stop_text = (f"{cur_stop:.1f}%" if cur_stop is not None else "-")
+                    wvr_4w = s.get("strict_weekly_volume_ratio_4w")
+                    if wvr_4w is None:
+                        wvr_4w = s.get("weekly_volume_ratio_4w")
+                    wvr_hard = s.get("strict_weekly_volume_ratio")
+                    if wvr_hard is None:
+                        wvr_hard = s.get("weekly_volume_ratio")
+                    quality_threshold = s.get(
+                        "weekly_volume_quality_threshold",
+                        BREAKOUT_WEEKLY_VOL_QUALITY_RATIO,
+                    )
+                    if wvr_4w is not None:
+                        quality_passed = s.get("weekly_volume_quality_passed")
+                        if quality_passed is None:
+                            quality_passed = wvr_4w >= quality_threshold
+                        quality_mark = "✅ 충족" if quality_passed else "⚠️ 미달"
+                        msg += (f"  • 주봉 거래량 {wvr_4w:.2f}x (직전 4주) "
+                                f"| 품질 {quality_threshold:.2f}x {quality_mark}")
+                        if wvr_hard is not None:
+                            msg += (f" | hard 10주 {wvr_hard:.2f}x"
+                                    f"/{BREAKOUT_WEEKLY_VOL_RATIO:.2f}x")
+                        msg += "\n"
                     msg += (f"  • 신호일 {s['signal_date'][5:]}  진입 {_price(entry)}{stop_clause}\n"
                             f"  • 현재가 {_price(s.get('price'))}  피벗 대비 {cur_ext_text}  "
                             f"현재 기준 손절폭 {cur_stop_text}\n")

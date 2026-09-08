@@ -683,6 +683,9 @@ class TestStrictFilterFlow:
             "volume_avg":       1_000_000,
             "volume_ratio":      5.0,
             "weekly_volume_ratio": 2.5,
+            "weekly_volume_ratio_4w": 1.35,
+            "weekly_volume_quality_passed": True,
+            "weekly_volume_quality_threshold": 1.2,
             "sma30w":            95.0,
             "slope30w":           0.5,
             "signal_date":     "2024-07-01",
@@ -712,6 +715,7 @@ class TestStrictFilterFlow:
             "strict_sma30w":             95.0,
             "strict_slope30w":            0.5,
             "strict_weekly_volume_ratio": 2.5,
+            "strict_weekly_volume_ratio_4w": 1.35,
         }
         sig.update(overrides)
         return sig
@@ -760,6 +764,10 @@ class TestStrictFilterFlow:
             row = db.query(ScanResult).filter(ScanResult.ticker == "STR").one()
             assert row.strict_filter_passed is True
             assert row.filter_reasons       is None       # [] → NULL 정규화
+            assert row.weekly_volume_ratio == 2.5
+            assert row.weekly_volume_ratio_4w == 1.35
+            assert row.weekly_volume_quality_passed is True
+            assert row.weekly_volume_quality_threshold == 1.2
             assert sig["strict_filter_passed"] is True
             assert sig["filter_reasons"]      == []
         finally:
@@ -918,6 +926,23 @@ class TestStrictFilterFlow:
 
         assert len(telegram_messages) == 1
         assert slack_messages == telegram_messages
+
+    def test_breakout_notification_shows_daily_and_weekly_volume_multiples(self):
+        from scanner.scan_engine import _notify
+
+        messages = []
+        sig = self._passing_signal(
+            strict_weekly_volume_ratio=0.82,
+            strict_weekly_volume_ratio_4w=0.95,
+            weekly_volume_quality_passed=False,
+            weekly_volume_quality_threshold=1.2,
+        )
+        _notify([sig], [], messages.append)
+
+        assert "일봉 거래량 5.0x" in messages[0]
+        assert "주봉 거래량 0.95x (직전 4주)" in messages[0]
+        assert "품질 1.20x ⚠️ 미달" in messages[0]
+        assert "hard 10주 0.82x/0.50x" in messages[0]
 
     def test_rebreakout_notification_escapes_telegram_markdown_only(self):
         from scanner.scan_engine import _notify

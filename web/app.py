@@ -28,7 +28,8 @@ from scanner.scan_engine import run_scan, scan_status
 from scheduler import start_scheduler, stop_scheduler, get_next_run_times
 from notifications.telegram import test_telegram
 from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-                    MAX_PIVOT_EXT_PCT, ALERT_MAX_CUR_STOP_PCT)
+                    MAX_PIVOT_EXT_PCT, ALERT_MAX_CUR_STOP_PCT,
+                    BREAKOUT_WEEKLY_VOL_QUALITY_RATIO)
 from web.asset_allocation_api import router as asset_allocation_router
 from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holdings
 from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
@@ -185,6 +186,14 @@ async def get_results(market: str = "ALL", signal_type: str = "ALL",
              "signal_type": r.signal_type, "stage": r.stage,
              "price": r.price, "ma150": r.ma150,
              "volume_ratio": r.volume_ratio, "signal_date": r.signal_date,
+             "weekly_volume_ratio": r.weekly_volume_ratio,
+             "weekly_volume_ratio_4w": r.weekly_volume_ratio_4w,
+             "weekly_volume_quality_passed": r.weekly_volume_quality_passed,
+             "weekly_volume_quality_threshold": (
+                 r.weekly_volume_quality_threshold
+                 if r.weekly_volume_quality_threshold is not None
+                 else BREAKOUT_WEEKLY_VOL_QUALITY_RATIO
+             ),
              # Strict Weinstein 메타데이터 (Phase 4 P2 + UI Phase)
              "strict_filter_passed": r.strict_filter_passed,
              "filter_reasons": _parse_filter_reasons(r.filter_reasons),
@@ -390,6 +399,12 @@ def _build_chart_overlay(row, daily) -> dict:
             "ext_vs_pivot_pct": signal_ext_pct,
             "volume_ratio": (float(row.volume_ratio)
                              if row.volume_ratio is not None else None),
+            # 기존 DB 행/테스트 목에는 신규 속성이 없을 수 있으므로 nullable fallback.
+            "weekly_volume_ratio": getattr(row, "weekly_volume_ratio", None),
+            "weekly_volume_ratio_4w": getattr(row, "weekly_volume_ratio_4w", None),
+            "weekly_volume_quality_passed": getattr(
+                row, "weekly_volume_quality_passed", None
+            ),
         },
         "at_current": {
             "price": current_price,

@@ -348,6 +348,13 @@
                 :title="'종합 등급 '+r.grade"
                 x-text="r.grade"></span>
             </template>
+            <!-- 직전 4주 평균 대비 돌파 주 거래량: soft quality이며 매수 차단하지 않음 -->
+            <template x-if="r.signal_type==='BREAKOUT' && r.weekly_volume_ratio_4w!=null">
+              <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+                :class="r.weekly_volume_quality_passed===true?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'"
+                :title="'돌파 주 거래량: 직전 4주 평균 대비 '+r.weekly_volume_ratio_4w.toFixed(2)+'배 · 품질 기준 '+(r.weekly_volume_quality_threshold??1.2).toFixed(2)+'배 (soft flag) · 현행 hard 10주 '+(r.weekly_volume_ratio==null?'-':r.weekly_volume_ratio.toFixed(2)+'배')"
+                x-text="'주봉 '+r.weekly_volume_ratio_4w.toFixed(2)+'x '+(r.weekly_volume_quality_passed===true?'✓':'△')"></span>
+            </template>
             <!-- Sector 배지 (sector_name truthy 일 때만 — NULL 이면 미렌더) -->
             <template x-if="r.sector_name">
               <span class="text-xs px-2 py-0.5 rounded-full font-semibold bg-indigo-50 text-indigo-700"
@@ -370,7 +377,7 @@
             <div class="font-bold text-slate-800" x-text="r.market==='KR' ? r.ma150?.toLocaleString()+'원' : '$'+r.ma150?.toFixed(2)"></div>
           </div>
           <div class="bg-white/70 rounded-lg p-2 text-center">
-            <div class="text-slate-400 mb-0.5">거래량비</div>
+            <div class="text-slate-400 mb-0.5">일봉 거래량비</div>
             <div class="font-bold" :class="r.volume_ratio>=2?'text-red-600':r.volume_ratio>=1.5?'text-orange-500':'text-slate-700'"
               x-text="(r.volume_ratio||0).toFixed(1)+'x'"></div>
           </div>

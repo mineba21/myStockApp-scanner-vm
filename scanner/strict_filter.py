@@ -320,6 +320,8 @@ def _check_volume(signal: Dict[str, Any],
     ``volume_ratio`` 는 detect_* 가 신호 시점 비율을 반환하므로 그대로 사용.
     ``weekly_volume_ratio`` 는 last-bar 의 공개 필드 vs signal-date 스냅샷이
     다르므로 ``strict_weekly_volume_ratio`` 사용.
+    ``strict_weekly_volume_ratio_4w`` / ``weekly_volume_quality_passed`` 는
+    soft quality 정보이므로 이 hard gate에서는 의도적으로 읽지 않는다.
 
     Args:
         signal: 필요 키: signal_type, volume_ratio (sig 값),

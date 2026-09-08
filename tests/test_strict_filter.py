@@ -603,6 +603,21 @@ class TestBaseGate:
 # ══════════════════════════════════════════════════════════════════
 
 class TestVolumeGate:
+    def test_previous_four_quality_ratio_is_soft_only(self, monkeypatch):
+        """직전 4주 1.2 미달은 정보일 뿐 hard filter 사유를 추가하지 않는다."""
+        from scanner.strict_filter import _check_volume
+        _force_strict_flag(monkeypatch, "STRICT_REQUIRE_BREAKOUT_VOLUME", True)
+        _force_strict_flag(monkeypatch, "BREAKOUT_DAILY_VOL_RATIO", 1.5)
+        _force_strict_flag(monkeypatch, "BREAKOUT_WEEKLY_VOL_RATIO", 0.5)
+
+        reasons = []
+        _check_volume({"signal_type": "BREAKOUT",
+                       "volume_ratio": 2.0,
+                       "strict_weekly_volume_ratio": 0.8,
+                       "strict_weekly_volume_ratio_4w": 0.7,
+                       "weekly_volume_quality_passed": False}, reasons)
+        assert reasons == []
+
     def test_low_daily_volume_blocks_breakout(self, monkeypatch):
         from scanner.strict_filter import _check_volume, BREAKOUT_DAILY_VOLUME
         _force_strict_flag(monkeypatch, "STRICT_REQUIRE_BREAKOUT_VOLUME", True)

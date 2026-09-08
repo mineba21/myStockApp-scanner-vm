@@ -68,7 +68,10 @@ def client_with_db(monkeypatch):
 def _insert_result(session_factory, *, ticker, strict_filter_passed, filter_reasons=None,
                    market="US", signal_type="BREAKOUT", days_ago=0, sector_name=None,
                    sector_stage=None, grade=None, signal_quality=None,
-                   rs_value=None, rs_trend=None, pivot_price=None, stop_loss=None):
+                   rs_value=None, rs_trend=None, pivot_price=None, stop_loss=None,
+                   weekly_volume_ratio=None, weekly_volume_ratio_4w=None,
+                   weekly_volume_quality_passed=None,
+                   weekly_volume_quality_threshold=None):
     """ScanResult 한 행 삽입 후 id 반환."""
     from database.models import ScanResult
 
@@ -97,6 +100,10 @@ def _insert_result(session_factory, *, ticker, strict_filter_passed, filter_reas
             rs_trend=rs_trend,
             pivot_price=pivot_price,
             stop_loss=stop_loss,
+            weekly_volume_ratio=weekly_volume_ratio,
+            weekly_volume_ratio_4w=weekly_volume_ratio_4w,
+            weekly_volume_quality_passed=weekly_volume_quality_passed,
+            weekly_volume_quality_threshold=weekly_volume_quality_threshold,
         )
         db.add(row)
         db.commit()
@@ -189,7 +196,10 @@ class TestResultsRejectedFilter:
         _insert_result(session, ticker="RICH", strict_filter_passed=True,
                        sector_stage="STAGE2", grade="A", signal_quality="STRONG",
                        rs_value=1.42, rs_trend="RISING",
-                       pivot_price=99.5, stop_loss=88.0)
+                       pivot_price=99.5, stop_loss=88.0,
+                       weekly_volume_ratio=0.82, weekly_volume_ratio_4w=1.37,
+                       weekly_volume_quality_passed=True,
+                       weekly_volume_quality_threshold=1.2)
         _insert_result(session, ticker="BARE", strict_filter_passed=None)
 
         r = client.get("/api/results")
@@ -204,11 +214,17 @@ class TestResultsRejectedFilter:
         assert rich["rs_trend"] == "RISING"
         assert rich["pivot_price"] == 99.5
         assert rich["stop_loss"] == 88.0
+        assert rich["weekly_volume_ratio"] == 0.82
+        assert rich["weekly_volume_ratio_4w"] == 1.37
+        assert rich["weekly_volume_quality_passed"] is True
+        assert rich["weekly_volume_quality_threshold"] == 1.2
 
         bare = rows["BARE"]
         # 키는 항상 존재 — graceful fallback 위해
         for key in ("sector_stage", "grade", "signal_quality",
-                    "rs_value", "rs_trend", "pivot_price", "stop_loss"):
+                    "rs_value", "rs_trend", "pivot_price", "stop_loss",
+                    "weekly_volume_ratio", "weekly_volume_ratio_4w",
+                    "weekly_volume_quality_passed"):
             assert key in bare, f"{key} 키가 응답에 없으면 UI graceful fallback 깨짐"
             assert bare[key] is None
 

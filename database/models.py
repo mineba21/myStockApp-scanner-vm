@@ -40,6 +40,10 @@ class ScanResult(Base):
     volume = Column(Float)
     volume_avg = Column(Float)
     volume_ratio = Column(Float)
+    weekly_volume_ratio = Column(Float, nullable=True)       # 현행 10주 hard-floor 비율(신호일)
+    weekly_volume_ratio_4w = Column(Float, nullable=True)    # 분자 주 제외 직전 4주 비율(신호일)
+    weekly_volume_quality_passed = Column(Boolean, nullable=True)  # 4주 soft quality 결과
+    weekly_volume_quality_threshold = Column(Float, nullable=True)  # 판정 당시 soft 기준
     signal_date = Column(String(10))          # YYYY-MM-DD
     notified = Column(Boolean, default=False)
     # ── 확장 메타데이터 (nullable) ──────────────────────────────
