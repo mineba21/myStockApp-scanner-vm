@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+from trading.allocation_rebalance import (
+    Rebalance, RebalanceBlocked, UnavailableBroker, LIVE_BLOCK_REASON,
+)
 from starlette.concurrency import run_in_threadpool
 
 from web.asset_allocation_sizing import build_live_allocation_sizing
@@ -157,6 +161,9 @@ async def get_asset_allocation(profile: str = "easy", as_of: Optional[str] = Non
     is_running = bool(runtime.get("is_running"))
     live_sizing = cached.get("sizing") if cached else None
     live_sizing_error = cached.get("sizing_error") if cached else None
+    if is_running:
+        live_sizing = None
+        live_sizing_error = "계산 갱신 중입니다. 이전 수량은 주문 계획으로 사용하지 않습니다."
     if cached and not is_running:
         try:
             live_sizing = await run_in_threadpool(
@@ -165,6 +172,7 @@ async def get_asset_allocation(profile: str = "easy", as_of: Optional[str] = Non
             live_sizing_error = None
         except Exception as exc:
             logger.warning("탭 진입 키움 가격 갱신 실패: %s", type(exc).__name__)
+            live_sizing = None  # never present the cached quantity as a fresh plan
             live_sizing_error = "키움 현재가와 계좌 상태를 새로 불러오지 못했습니다."
     return {
         "status": "running" if is_running else "ready" if cached else "error" if runtime.get("error") else "empty",
@@ -191,3 +199,88 @@ async def refresh_asset_allocation(
         _allocation_runtime[key] = {"is_running": True, "error": None, "updated_at": None}
     background_tasks.add_task(_refresh_asset_allocation, profile, requested)
     return {"status": "started", "profile": profile, "as_of": requested.isoformat()}
+
+# Rebalance evidence is never accepted from a browser. The broker adapter must
+# implement authenticated full-history reads before these actions can go live.
+def _rebalance_service():
+    path = os.getenv("ALLOCATION_JOURNAL_PATH")
+    if not path:
+        raise RebalanceBlocked(LIVE_BLOCK_REASON + " 영속 주문 저널 경로도 설정해야 합니다.")
+    return Rebalance(path, UnavailableBroker(),
+                     reserve_bps=int(os.getenv("ALLOCATION_RESERVE_BPS", "100")))
+
+
+class RebalanceConfirmation(BaseModel):
+    confirmation: str
+    side: str
+
+
+@router.get("/asset-allocation/rebalance/capabilities")
+def rebalance_capabilities():
+    return {"execution_enabled": False, "reason": LIVE_BLOCK_REASON}
+
+
+@router.post("/asset-allocation/rebalance/preview")
+def preview_rebalance(profile: str = "easy", as_of: Optional[str] = None):
+    profile, requested = _allocation_params(profile, as_of)
+    cached = _read_allocation_cache(profile, requested)
+    if not cached:
+        raise HTTPException(status_code=409, detail="월간 배분 보고서가 먼저 필요합니다.")
+    scope = [t.strip().upper() for t in os.getenv("ALLOCATION_LIQUIDATION_SCOPE", "").split(",") if t.strip()]
+    try:
+        return _rebalance_service().create(_allocation_key(profile, requested),
+                                          cached["report"]["combined_allocations"], scope)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/asset-allocation/rebalance/current")
+def current_rebalance():
+    try:
+        return _rebalance_service().active()
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/asset-allocation/rebalance/{cycle_id}")
+def rebalance_status(cycle_id: str):
+    try:
+        return _rebalance_service().status(cycle_id)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/asset-allocation/rebalance/{cycle_id}/confirm")
+def confirm_rebalance(cycle_id: str, body: RebalanceConfirmation):
+    if body.confirmation != "account2":
+        raise HTTPException(status_code=422, detail="account2 확인 문구가 일치하지 않습니다.")
+    if os.getenv("KIWOOM_TRADING_ENABLED", "false").lower() != "true":
+        raise HTTPException(status_code=503, detail="실계좌 주문 기능이 비활성화되어 있습니다.")
+    try:
+        return _rebalance_service().confirm(cycle_id, body.side)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/asset-allocation/rebalance/{cycle_id}/reconcile")
+def reconcile_rebalance(cycle_id: str):
+    try:
+        return _rebalance_service().reconcile(cycle_id)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/asset-allocation/rebalance/{cycle_id}/buy-preview")
+def preview_rebalance_buys(cycle_id: str):
+    try:
+        return _rebalance_service().preview_buys(cycle_id)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/asset-allocation/rebalance/{cycle_id}/sell-preview")
+def refresh_rebalance_sell_preview(cycle_id: str):
+    try:
+        return _rebalance_service().refresh_sell_preview(cycle_id)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

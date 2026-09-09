@@ -301,6 +301,10 @@ def _account_summary(
             "cash": _number(usd_cash.get("fc_entra")),
             "withdrawable_cash": _number(usd_cash.get("fc_pymn_alowa")),
             "orderable_cash": _number(usd_cash.get("fc_ord_alowa")),
+            "orderable_cash_source": "ust21110.fc_ord_alowa",
+            # Do not infer reservation treatment from the field name. The
+            # rebalance adapter must verify this before using cash for orders.
+            "cash_includes_reservations": None,
             "evaluation_amount": _number(usd_assets.get("evlt_amt"), absolute=True),
             "profit_loss": _number(usd_profit.get("pl_amt")),
             "profit_loss_pct": _number(usd_profit.get("pl_rt")),

@@ -99,3 +99,51 @@ def test_refresh_executes_fixed_command_and_persists_cache(client, monkeypatch):
     assert "--json" in calls[0][0]
     assert calls[0][1]["check"] is False
     assert calls[0][1]["timeout"] == webapp.ASSET_ALLOCATION_TIMEOUT_SECONDS
+
+
+def test_failed_live_refresh_does_not_return_cached_sizing(client, monkeypatch):
+    test_client, api = client
+    api.ASSET_ALLOCATION_CACHE_DIR.mkdir()
+    api._allocation_cache_path('easy', api.date(2026, 8, 31)).write_text(json.dumps({
+        'report': {'combined_allocations': {'SPY': 1}}, 'sizing': {'buy_quantity': 999}}))
+    def fail(*args):
+        raise RuntimeError('offline')
+    monkeypatch.setattr(api, 'build_live_allocation_sizing', fail)
+    payload = test_client.get('/api/asset-allocation?profile=easy&as_of=2026-08-31').json()
+    assert payload['sizing'] is None
+    assert payload['sizing_error']
+
+
+def test_rebalance_http_workflow_uses_server_report_and_confirmation(client, monkeypatch, tmp_path):
+    from tests.test_allocation_rebalance import Broker
+    from trading.allocation_rebalance import Rebalance
+    test_client, api = client
+    broker = Broker()
+    broker.path = tmp_path / 'journal'
+    service = Rebalance(broker.path, broker)
+    monkeypatch.setattr(api, '_rebalance_service', lambda: service)
+    monkeypatch.setenv('ALLOCATION_LIQUIDATION_SCOPE', 'SPY,QQQ')
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
+    api.ASSET_ALLOCATION_CACHE_DIR.mkdir()
+    api._allocation_cache_path('easy', api.date(2026, 8, 31)).write_text(json.dumps({
+        'report': {'combined_allocations': {'SPY': .5, 'QQQ': .5}}}))
+    response = test_client.post('/api/asset-allocation/rebalance/preview?as_of=2026-08-31')
+    assert response.status_code == 200
+    cid = response.json()['id']
+    base = '/api/asset-allocation/rebalance/' + cid
+    assert test_client.post(base + '/confirm', json={'side': 'SELL', 'confirmation': 'wrong'}).status_code == 422
+    result = test_client.post(base + '/confirm', json={'side': 'SELL', 'confirmation': 'account2'}).json()
+    broker.fill(result['orders'])
+    assert test_client.post(base + '/reconcile').json()['state'] == 'SELL_CONFIRMED'
+    broker.cash = 1000
+    assert test_client.post(base + '/buy-preview').json()['state'] == 'BUY_PREVIEW'
+    assert test_client.post(base + '/confirm', json={'side': 'BUY', 'confirmation': 'account2'}).json()['state'] == 'BUY_PENDING'
+    assert test_client.get(base).json()['state'] == 'BUY_PENDING'
+
+
+def test_capability_stays_disabled_even_with_trading_flag(client, monkeypatch):
+    test_client, _ = client
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
+    data = test_client.get('/api/asset-allocation/rebalance/capabilities').json()
+    assert data['execution_enabled'] is False
+    assert '미체결' in data['reason']

@@ -724,6 +724,43 @@
      탭 3: 보유 주식
 ═════════════════════════════════════════════════════════ -->
 <div x-show="activeTab==='holdings'" x-cloak>
+  <section class="card p-4 mb-4" x-data="allocationRebalancePanel()">
+    <h2 class="font-bold">ETF 자산배분 · account2</h2>
+    <p class="text-sm text-slate-600 mt-2">월별 목표 비중과 현재 보유수량을 비교해 초과분만 매도하고 부족분만 매수합니다. 목표에서 빠진 종목은 전량 매도합니다. 매도 체결과 유지수량 확인 후 실제 현금으로 부족 수량을 다시 계산합니다.</p>
+    <button class="btn btn-ghost mt-2" @click="load()" :disabled="busy">계획 및 주문 상태 조회</button>
+    <p class="text-sm text-amber-700 mt-2" role="status" x-text="reason"></p>
+    <template x-if="sizing">
+      <div class="text-sm mt-2">
+        <div>계획용 추정 자산 (USD): <strong x-text="sizing.planning_assets"></strong></div>
+        <div>조회된 주문가능 현금 (USD): <span x-text="sizing.orderable_cash"></span></div>
+        <div>설정된 자산배분 관리 범위: <span x-text="(sizing.liquidation_scope || []).join(', ')"></span></div>
+        <template x-for="message in sizing.validation_errors || []"><p class="text-red-700" x-text="message"></p></template>
+      </div>
+    </template>
+    <button class="btn btn-ghost mt-2" :disabled="busy || !enabled" @click="action('/preview')">조정 매도 미리보기</button>
+    <template x-if="cycle">
+      <div class="mt-3 text-sm">
+        <p>재구성 상태: <strong x-text="stateLabel(cycle.state)"></strong></p>
+        <template x-for="message in cycle.blockers || []"><p class="text-amber-700" x-text="message"></p></template>
+        <template x-if="cycle.payload.budget"><p>실제 현금 기준 매수 예산 (USD): <span x-text="cycle.payload.budget.budget"></span> · 여유금 <span x-text="cycle.payload.budget.reserve_bps"></span> bps</p></template>
+        <table class="w-full my-2"><thead><tr><th>방향</th><th>종목</th><th>수량</th><th>지정가 USD</th></tr></thead>
+          <tbody><template x-for="row in cycle.payload.preview"><tr><td x-text="row.side"></td><td x-text="row.ticker"></td><td x-text="row.quantity"></td><td x-text="row.limit_price"></td></tr></template></tbody>
+        </table>
+        <p>매도 후 유지할 수량:</p>
+        <template x-for="(qty, ticker) in cycle.payload.retained_quantities || {}"><span class="mr-3"><span x-text="ticker"></span> <span x-text="qty"></span>주</span></template>
+        <p x-show="!cycle.payload.preview.length">이 단계에서 필요한 주문이 없습니다.</p>
+        <p class="text-amber-700" x-show="(cycle.payload.remaining_sell_adjustments || []).length">가격·현금 변동으로 추가 매도 조정분이 생겼습니다. 이번 확인에서는 추가 매도하지 않으며 목표 비중과 차이가 남을 수 있습니다.</p>
+        <p>주문 접수는 체결 완료가 아닙니다. 접수 여부가 불명인 주문은 대조 전 재전송하지 않습니다.</p>
+        <template x-for="row in cycle.orders"><p><span x-text="row.ticker"></span> · <span x-text="row.quantity"></span>주 · <span x-text="stateLabel(row.state)"></span></p></template>
+        <label class="block mt-2">확인 문구 <input class="input" x-model="confirmation" placeholder="account2" /></label>
+        <button class="btn btn-ghost" :disabled="busy || !enabled || confirmation !== 'account2' || !cycle.state.endsWith('_PREVIEW')" @click="action('/' + cycle.id + '/confirm', {confirmation, side:cycle.state.split('_')[0]})">표시된 주문 확인 후 실행</button>
+        <button class="btn btn-ghost" :disabled="busy || !enabled || cycle.state !== 'SELL_PREVIEW'" @click="action('/' + cycle.id + '/sell-preview')">매도 미리보기 갱신</button>
+        <button class="btn btn-ghost" :disabled="busy" @click="action('/' + cycle.id + '/reconcile')">체결 및 잔여수량 확인</button>
+        <button class="btn btn-ghost" :disabled="busy || !enabled || !['SELL_CONFIRMED','BUY_PREVIEW'].includes(cycle.state)" @click="action('/' + cycle.id + '/buy-preview')">실제 현금으로 매수 미리보기</button>
+      </div>
+    </template>
+  </section>
+
 
   <!-- 필터 바 -->
   <div class="flex flex-wrap justify-between items-center gap-3 mb-3">
@@ -2387,6 +2424,53 @@ function app() {
       const n = Number(value);
       return (n >= 0 ? '+' : '')+n.toFixed(1)+'%';
     },
+  };
+}
+</script>
+<script>
+function allocationRebalancePanel() {
+  return {
+    busy:false, enabled:false, reason:'주문 상태를 조회하면 실행 가능 여부와 차단 사유를 표시합니다.',
+    sizing:null, cycle:null, confirmation:'',
+    async request(path, body) {
+      const response = await fetch('/api/asset-allocation' + path,
+        body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '요청을 처리하지 못했습니다.');
+      return data;
+    },
+    async load() {
+      this.busy = true;
+      try {
+        const cap = await this.request('/rebalance/capabilities');
+        this.enabled = cap.execution_enabled;
+        this.reason = cap.reason;
+        const data = await this.request('');
+        this.sizing = data.sizing;
+        if (data.sizing_error) this.reason += ' ' + data.sizing_error;
+        const id = localStorage.getItem('account2-rebalance-id');
+        this.cycle = await this.request('/rebalance/current');
+        if (!this.cycle && id) this.cycle = await this.request('/rebalance/' + encodeURIComponent(id));
+      } catch (e) { this.reason = e.message; }
+      finally { this.busy = false; }
+    },
+    async action(path, body = {}) {
+      if (this.busy) return;
+      this.busy = true;
+      try {
+        this.cycle = await this.request('/rebalance' + path, body);
+        localStorage.setItem('account2-rebalance-id', this.cycle.id);
+        this.confirmation = '';
+      } catch (e) { this.reason = e.message; }
+      finally { this.busy = false; }
+    },
+    stateLabel(state) {
+      return ({SELL_PREVIEW:'매도 확인 대기', SELL_PENDING:'매도 체결 확인 대기',
+        SELL_CONFIRMED:'조정 매도 및 유지수량 확인', BUY_PREVIEW:'매수 확인 대기', BUY_PENDING:'매수 체결 확인 대기',
+        COMPLETE:'매수 체결 완료', PREPARED:'미전송 · 검토 필요', SENDING:'전송 중 · 응답 미확정',
+        SUBMITTED:'접수됨 · 체결 미확인', UNKNOWN:'접수 여부 불명 · 재전송 금지',
+        REJECTED:'증권사 거절', FILLED:'체결 확인'})[state] || state;
+    }
   };
 }
 </script>

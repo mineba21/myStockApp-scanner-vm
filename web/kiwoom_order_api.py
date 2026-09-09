@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import logging
 import secrets
 import threading
 import time
@@ -13,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from trading.kiwoom_orders import KiwoomOrderClient
+from trading.allocation_rebalance import LIVE_BLOCK_REASON
 from trading.kiwoom_readonly import KiwoomError, KiwoomReadOnlyClient, load_profile_configs
 from web.kiwoom_holdings import (
     _get_token,
@@ -23,7 +21,6 @@ from web.kiwoom_holdings import (
 
 
 router = APIRouter(prefix="/api/kiwoom/orders", tags=["kiwoom-orders"])
-logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _previews: dict[str, dict[str, Any]] = {}
 PREVIEW_TTL_SECONDS = 300
@@ -57,7 +54,9 @@ class BuyExecuteRequest(BaseModel):
 
 
 def _execution_enabled() -> bool:
-    return os.getenv("KIWOOM_TRADING_ENABLED", "false").lower() == "true"
+    # A flag cannot supply missing reconciliation evidence. Legacy execution
+    # has no durable cycle identity and must not bypass the new workflow.
+    return False
 
 
 def _exchange_code(value: str) -> str:
@@ -183,35 +182,14 @@ async def preview_buy(body: BuyPreviewRequest):
     return {
         **preview, "preview_id": preview_id,
         "expires_in_seconds": PREVIEW_TTL_SECONDS,
+        "execution_block_reason": LIVE_BLOCK_REASON,
         "execution_enabled": _execution_enabled(), "order_type": "LIMIT",
     }
 
 
 @router.post("/buy/execute")
 async def execute_buy(body: BuyExecuteRequest):
-    if not _execution_enabled():
-        raise HTTPException(status_code=503, detail="실계좌 주문 기능이 비활성화되어 있습니다.")
-    with _lock:
-        preview = _previews.pop(body.preview_id, None)
-    if not preview or preview.get("side") != "BUY" or preview["expires_at"] < time.time():
-        raise HTTPException(status_code=410, detail="주문 확인이 만료되었습니다. 다시 확인해 주세요.")
-    if body.confirmation_ticker.strip().upper() != preview["ticker"]:
-        raise HTTPException(status_code=422, detail="확인용 종목코드가 일치하지 않습니다.")
-    if preview["quantity"] * preview["limit_price"] > _account2_orderable_cash() + 1e-9:
-        raise HTTPException(status_code=409, detail="주문가능 현금이 변경되어 주문을 중단했습니다.")
-    try:
-        config = load_profile_configs()["account2"]
-        token = str(KiwoomReadOnlyClient(config).issue_token()["token"])
-        result = KiwoomOrderClient(config).buy_us_limit(
-            token, exchange=preview["exchange"], ticker=preview["ticker"],
-            quantity=preview["quantity"], price=preview["limit_price"],
-        )
-    except KeyError:
-        raise HTTPException(status_code=502, detail="키움 매수 주문 설정을 확인하지 못했습니다.")
-    except KiwoomError as exc:
-        logger.warning("Kiwoom rejected US buy order: %s", exc)
-        raise HTTPException(status_code=422, detail=str(exc))
-    return {"status": "submitted", **result}
+    raise HTTPException(status_code=503, detail=LIVE_BLOCK_REASON)
 
 
 @router.post("/sell/preview")
@@ -240,6 +218,7 @@ async def preview_sell(body: SellPreviewRequest):
         **preview,
         "preview_id": preview_id,
         "expires_in_seconds": PREVIEW_TTL_SECONDS,
+        "execution_block_reason": LIVE_BLOCK_REASON,
         "execution_enabled": _execution_enabled(),
         "order_type": "LIMIT",
     }
@@ -247,33 +226,4 @@ async def preview_sell(body: SellPreviewRequest):
 
 @router.post("/sell/execute")
 async def execute_sell(body: SellExecuteRequest):
-    if not _execution_enabled():
-        raise HTTPException(status_code=503, detail="실계좌 주문 기능이 비활성화되어 있습니다.")
-    with _lock:
-        preview = _previews.pop(body.preview_id, None)
-    if not preview or preview.get("side") != "SELL" or preview["expires_at"] < time.time():
-        raise HTTPException(status_code=410, detail="주문 확인이 만료되었습니다. 다시 확인해 주세요.")
-    if body.confirmation_ticker.strip().upper() != preview["ticker"]:
-        raise HTTPException(status_code=422, detail="확인용 종목코드가 일치하지 않습니다.")
-    holding = _find_holding(preview["ticker"])
-    if preview["quantity"] > int(float(holding.get("quantity") or 0)):
-        raise HTTPException(status_code=409, detail="보유수량이 변경되어 주문을 중단했습니다.")
-    try:
-        config = load_profile_configs()["account2"]
-        token = str(KiwoomReadOnlyClient(config).issue_token()["token"])
-        result = KiwoomOrderClient(config).sell_us_limit(
-            token,
-            exchange=preview["exchange"],
-            ticker=preview["ticker"],
-            quantity=preview["quantity"],
-            price=preview["limit_price"],
-        )
-    except KeyError:
-        raise HTTPException(status_code=502, detail="키움 매도 주문 설정을 확인하지 못했습니다.")
-    except KiwoomError as exc:
-        # KiwoomError contains the broker's rejection message, not credentials.
-        # Returning it lets the user correct price, quantity, session, or account
-        # restrictions instead of seeing an opaque 502 error.
-        logger.warning("Kiwoom rejected US sell order: %s", exc)
-        raise HTTPException(status_code=422, detail=str(exc))
-    return {"status": "submitted", **result}
+    raise HTTPException(status_code=503, detail=LIVE_BLOCK_REASON)
