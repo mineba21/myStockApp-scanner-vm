@@ -1,0 +1,8 @@
+# Merge only this entry with your existing MCP configuration; replace placeholders.
+[mcp_servers.scanner-read]
+command = "/ABS/MCP-VENV/bin/python"
+args = ["/ABS/REPO/integrations/scanner_mcp/server.py"]
+
+[mcp_servers.scanner-read.env]
+SCANNER_API_URL = "https://YOUR-API-HOST"
+SCANNER_READ_TOKEN_FILE = "/ABS/PRIVATE/scanner-read.token"

@@ -1,0 +1,2 @@
+# Isolated MCP client environment; do not install into the scanner service venv.
+mcp==1.26.0

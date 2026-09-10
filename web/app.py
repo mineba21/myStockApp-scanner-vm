@@ -35,10 +35,12 @@ from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holding
 from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
 from web.kiwoom_sizing import apply_live_position_sizing
 from web.kiwoom_order_api import router as kiwoom_order_router
+from web.scanner_read_api import router as scanner_read_router
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 SITES_API_KEY = os.getenv("SITES_API_KEY", "").strip()
+SCANNER_READ_TOKEN = os.getenv("SCANNER_READ_TOKEN", "").strip()
 KIWOOM_WEB_ENABLED = os.getenv("KIWOOM_WEB_ENABLED", "false").lower() == "true"
 
 
@@ -53,6 +55,7 @@ def _utc_iso(value: Optional[datetime]) -> Optional[str]:
 app = FastAPI(title="Weinstein Stock Scanner", version="1.0.0")
 app.include_router(asset_allocation_router)
 app.include_router(kiwoom_order_router)
+app.include_router(scanner_read_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -68,6 +71,23 @@ async def require_api_auth(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/") or path == "/api/health":
         return await call_next(request)
+
+    # Dedicated scanner credential must never become a trading credential.
+    if SCANNER_READ_TOKEN and secrets.compare_digest(SCANNER_READ_TOKEN, SITES_API_KEY):
+        return JSONResponse(status_code=503, content={"detail": "Scanner and application credentials must differ"})
+    if path.startswith('/api/scanner-read'):
+        if len(SCANNER_READ_TOKEN) < 32:
+            return JSONResponse(status_code=503, content={"detail": "Scanner read authentication is not configured"})
+        scheme, _, token = request.headers.get('Authorization', '').partition(' ')
+        if (scheme.lower() != 'bearer' or not token or
+                not secrets.compare_digest(token, SCANNER_READ_TOKEN)):
+            return JSONResponse(status_code=401, content={"detail": "Invalid scanner read credentials"},
+                                headers={"WWW-Authenticate": "Bearer"})
+        if request.method != 'GET' or not re.fullmatch(r'/api/scanner-read/(status|signals|signals/[1-9][0-9]*)', path):
+            return JSONResponse(status_code=403, content={"detail": "Scanner read scope only"})
+        response = await call_next(request)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
 
     if not SITES_API_KEY:
         logger.error("SITES_API_KEY is not configured; rejecting API request")
