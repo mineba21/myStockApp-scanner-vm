@@ -13,11 +13,14 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from trading.allocation_rebalance import (
-    Rebalance, RebalanceBlocked, UnavailableBroker, LIVE_BLOCK_REASON,
+    Rebalance, RebalanceBlocked, LIVE_BLOCK_REASON,
 )
 from starlette.concurrency import run_in_threadpool
 
 from web.asset_allocation_sizing import build_live_allocation_sizing
+from trading.kiwoom_execution_evidence import ExecutionEvidence, EvidenceBroker, order_date
+from trading.kiwoom_readonly import KiwoomConfig, KiwoomReadOnlyClient, KiwoomError
+from web.kiwoom_holdings import _get_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["asset-allocation"])
@@ -202,11 +205,17 @@ async def refresh_asset_allocation(
 
 # Rebalance evidence is never accepted from a browser. The broker adapter must
 # implement authenticated full-history reads before these actions can go live.
+def _execution_evidence():
+    config = KiwoomConfig.from_profile('account2')
+    client = KiwoomReadOnlyClient(config)
+    return ExecutionEvidence(client, _get_token('account2', config, client))
+
+
 def _rebalance_service():
     path = os.getenv("ALLOCATION_JOURNAL_PATH")
     if not path:
         raise RebalanceBlocked(LIVE_BLOCK_REASON + " 영속 주문 저널 경로도 설정해야 합니다.")
-    return Rebalance(path, UnavailableBroker(),
+    return Rebalance(path, EvidenceBroker(_execution_evidence),
                      reserve_bps=int(os.getenv("ALLOCATION_RESERVE_BPS", "100")))
 
 
@@ -217,7 +226,33 @@ class RebalanceConfirmation(BaseModel):
 
 @router.get("/asset-allocation/rebalance/capabilities")
 def rebalance_capabilities():
-    return {"execution_enabled": False, "reason": LIVE_BLOCK_REASON}
+    return {"execution_enabled": False, "reason": LIVE_BLOCK_REASON,
+            "order_history_implemented": True, "cash_validation_implemented": True,
+            "cash_reservation_semantics_verified": False, "buy_capacity_implemented": True}
+
+
+@router.get("/asset-allocation/rebalance/buy-capacity")
+def rebalance_buy_capacity(ticker: str, exchange: str, limit_price: str):
+    try:
+        return _execution_evidence().buy_capacity(ticker, exchange, limit_price,
+            reserve_bps=int(os.getenv('ALLOCATION_RESERVE_BPS', '100')))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="증권사 매수가능수량 검증 실패: 주문을 실행하지 않습니다.") from exc
+
+
+@router.get("/asset-allocation/rebalance/evidence")
+def rebalance_evidence(order_day: str):
+    try:
+        order_date(order_day)  # Validate before credentials or network access.
+    except KiwoomError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        evidence = _execution_evidence()
+        return {"orders": evidence.history(order_day), "cash": evidence.cash_check(order_day),
+                "execution_enabled": False}
+    except Exception as exc:
+        # Do not echo broker exceptions, which can contain account data/tokens.
+        raise HTTPException(status_code=503, detail="증권사 검증 조회 실패: 주문을 실행하지 않습니다.") from exc
 
 
 @router.post("/asset-allocation/rebalance/preview")

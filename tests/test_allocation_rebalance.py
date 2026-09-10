@@ -156,7 +156,7 @@ def test_process_dies_after_transmission_leaves_sending_intent(flow):
 
 
 def test_unavailable_adapter_blocks_before_any_orders(tmp_path):
-    with pytest.raises(RebalanceBlocked, match='API'):
+    with pytest.raises(RebalanceBlocked, match='ETF 주문 차단'):
         Rebalance(tmp_path / 'journal', UnavailableBroker()).create('month', {'SPY': 1}, ['SPY'])
 
 
@@ -280,7 +280,7 @@ def test_budget_change_between_buy_submissions_never_overspends(flow):
 def test_live_reconcile_with_existing_journal_explains_missing_adapter(flow):
     service, broker, cid = flow
     service.confirm(cid, 'SELL')
-    with pytest.raises(RebalanceBlocked, match='API'):
+    with pytest.raises(RebalanceBlocked, match='ETF 주문 차단'):
         Rebalance(service.path, UnavailableBroker()).reconcile(cid)
 
 
