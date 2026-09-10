@@ -6,7 +6,10 @@
 
 검토일: 2026-09-09. 기준: `1b9863ee2079061168fcbfec40f480ba7d578dd6`.
 `git ls-remote origin HEAD`로 GitHub `mineba21/myStockApp-scanner-vm` HEAD와 로컬 기준이 같음을 확인했다.
-실주문, 운영 DB 접근, 배포, main 병합은 하지 않았다. 기존 사용자 변경인
+최초 검토에서는 실주문, 운영 DB 접근, 배포, main 병합을 하지 않았다.
+이후 사용자가 Git/Sites 배포를 승인하여 GitHub main과 Sites v41에 반영했고,
+2026-09-11 계산/API VM도 `9b51582`로 업데이트했다. 실주문은 실행하지 않았다.
+현재 운영 상태와 남은 실연결 제한은 `docs/etf_asset_allocation.md`를 먼저 확인한다. 기존 사용자 변경인
 `.gitignore`, `output/`, 주봉 백테스트 스크립트/테스트는 수정하지 않았다.
 
 ## 먼저 읽은 문서와 근거 구분
