@@ -62,3 +62,18 @@ HTTPS 인증서 검증을 유지한 curl로 확인했다. Mac 기본 Python의 C
 공식 연결 안내:
 - https://developers.openai.com/plugins/deploy/connect-chatgpt
 - https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp
+
+## 실제 웹 연결 확인 (2026-09-11)
+
+- Claude 웹 연결 완료. 커넥터 화면에 `연결 해제`와 읽기 전용 도구 3개
+  (`scanner_signal`, `scanner_signals`, `scanner_status`) 표시 확인.
+  도구별 실행 승인은 Claude 기본값인 `승인 필요` 유지. 계좌·주문 도구 없음.
+- ChatGPT 웹은 생성 양식에서 등록이 완료되지 않았다. 새로 불러온 양식 및
+  OAuth 주소 수동 입력/DCR 지정으로도 완료되지 않음. 구체적인 서버 오류가
+  화면에 표시되지 않아 원인은 미확정. 연결 성공으로 보고하지 않는다.
+- 브라우저에서 확인한 승인 폼 오류 수정: `Referrer-Policy: no-referrer` 대신
+  `same-origin`으로 동일 출처 POST의 Origin을 보존한다. 외부 앱으로 복귀할 때
+  referrer는 전달하지 않는다. CSP form-action에는 검증된 OAuth 반환 주소의
+  origin만 추가해 Chromium의 승인 후 redirect 차단을 방지한다.
+- 수정 커밋 `29902dd`, `767c382` 배포. 격리 OAuth 테스트 6개 통과.
+  실제 스캐너 데이터 조회 및 계좌·주문 호출은 수행하지 않았다.
