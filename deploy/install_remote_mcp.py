@@ -23,8 +23,11 @@ root=Path('/opt/mystockapp-mcp'); root.mkdir(mode=0o755,exist_ok=True)
 for filename in ('server.py','remote.py','requirements.txt'):
     shutil.copy2(repo/'integrations/scanner_mcp'/filename,root/filename)
     (root/filename).chmod(0o644)
-if not (root/'.venv/bin/python').exists():
-    subprocess.run([str(repo/'.venv/bin/python'),'-m','venv',str(root/'.venv')],check=True)
+venv=root/'.venv'
+if (venv/'pyvenv.cfg').exists() and '/home/' in (venv/'pyvenv.cfg').read_text():
+    venv.rename(root/('.venv.before-isolation-'+str(int(time.time()))))
+if not (venv/'bin/python').exists():
+    subprocess.run(['/usr/bin/python3','-m','venv','--copies',str(venv)],check=True)
 subprocess.run([str(root/'.venv/bin/pip'),'install','-q','-r',str(root/'requirements.txt')],check=True)
 state=Path('/var/lib/mystockapp-mcp'); state.mkdir(mode=0o700,exist_ok=True); os.chown(state,account.pw_uid,account.pw_gid)
 conf=Path('/etc/mystockapp-mcp'); conf.mkdir(mode=0o750,exist_ok=True); os.chown(conf,0,account.pw_gid)
@@ -58,5 +61,14 @@ if result.returncode:
     nginx.write_text(original)
     raise RuntimeError('nginx validation failed; original site restored')
 subprocess.run(['systemctl','reload','nginx'],check=True)
+import urllib.request
+for attempt in range(15):
+    try:
+        req=urllib.request.Request('http://127.0.0.1:8001/.well-known/oauth-authorization-server',headers={'Host':'161.33.212.161'})
+        with urllib.request.urlopen(req,timeout=2) as response:
+            if response.status==200: break
+    except Exception:
+        if attempt==14: raise RuntimeError('MCP readiness failed; inspect service log')
+        time.sleep(1)
 subprocess.run(['systemctl','is-active','mystockapp-mcp.service'],check=True)
 print('Remote MCP service installed. Owner approval password is in the private one-time handoff file.')
