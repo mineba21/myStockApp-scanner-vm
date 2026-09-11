@@ -1,0 +1,23 @@
+[Unit]
+Description=myStockApp read-only remote MCP
+After=network.target mystockapp-scanner.service
+
+[Service]
+Type=simple
+User=mystockapp-mcp
+Group=mystockapp-mcp
+WorkingDirectory=/opt/mystockapp-mcp
+Environment=SCANNER_MCP_CONFIG=/etc/mystockapp-mcp/config.json
+ExecStart=/opt/mystockapp-mcp/.venv/bin/python /opt/mystockapp-mcp/remote.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/mystockapp-mcp
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
