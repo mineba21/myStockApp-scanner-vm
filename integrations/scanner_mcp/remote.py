@@ -102,6 +102,10 @@ class OwnerProvider:
             pending=self.get(db,'pending',flow)
             if not pending: return HTMLResponse('연결 요청이 만료되었습니다. 앱에서 다시 연결하세요.',400,headers=headers)
             params=AuthorizationParams(**pending['params'])
+            # Chromium applies form-action to the OAuth redirect after POST too.
+            callback_url=urlsplit(str(params.redirect_uri))
+            callback_origin=callback_url.scheme+'://'+callback_url.netloc
+            headers['Content-Security-Policy']=headers['Content-Security-Policy'].replace("form-action 'self'", "form-action 'self' "+callback_origin)
             if request.method=='GET':
                 csrf=secrets.token_urlsafe(32)
                 pending['csrf']=digest(csrf)

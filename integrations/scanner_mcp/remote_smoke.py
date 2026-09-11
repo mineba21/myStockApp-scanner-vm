@@ -34,6 +34,8 @@ class OAuthTests(unittest.TestCase):
     def approve(self):
         a=self.authorize(); self.assertEqual(a.status_code,302,a.text)
         page=self.client.get(a.headers['location']); self.assertEqual(page.status_code,200,page.text)
+        self.assertEqual(page.headers['referrer-policy'],'same-origin')
+        self.assertIn("form-action 'self' https://client.example",page.headers['content-security-policy'])
         fields={k:re.search('name="'+k+'" value="([^"]+)"',page.text).group(1) for k in ('flow','csrf')}
         r=self.client.post('/consent',data={**fields,'password':'owner-test-password','decision':'approve'},headers={'Origin':self.origin})
         self.assertEqual(r.status_code,303,r.text)
@@ -96,6 +98,8 @@ class OAuthTests(unittest.TestCase):
 
     def test_wrong_password_expiry_and_no_grant(self):
         a=self.authorize(); page=self.client.get(a.headers['location'])
+        self.assertEqual(page.headers['referrer-policy'],'same-origin')
+        self.assertIn("form-action 'self' https://client.example",page.headers['content-security-policy'])
         fields={k:re.search('name="'+k+'" value="([^"]+)"',page.text).group(1) for k in ('flow','csrf')}
         for _ in range(5):
             r=self.client.post('/consent',data={**fields,'password':'wrong','decision':'approve'},headers={'Origin':self.origin})
