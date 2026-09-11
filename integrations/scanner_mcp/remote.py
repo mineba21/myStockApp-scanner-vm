@@ -89,7 +89,7 @@ class OwnerProvider:
         return self.origin+'/consent?flow='+flow
 
     async def consent(self, request):
-        headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer',
+        headers={'Cache-Control':'no-store','Referrer-Policy':'same-origin',
                  'Content-Security-Policy':"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
                  'X-Content-Type-Options':'nosniff'}
         flow=request.query_params.get('flow','') if request.method=='GET' else None
