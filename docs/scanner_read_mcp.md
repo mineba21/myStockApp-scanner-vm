@@ -1,7 +1,27 @@
 # STEP2: 스캐너 조회 전용 MCP
 
 작성: 2026-09-11. 현재는 **로컬 stdio MCP + 인증된 스캐너 조회 API** 구현이다.
-운영 배포, 앱 등록, 자동 알림 설정은 아직 수행하지 않았다.
+2026-09-11 사용자 승인으로 `0df412f`를 GitHub main과 운영 VM에 배포했다.
+조회 전용 키를 설정하고 API 서비스를 재시작했다. 공개 health=200,
+인증된 잘못된 입력=422, 무인증/조회 범위 밖 요청=401 확인(운영 DB 조회 없음).
+앱 등록과 자동 알림 설정은 아직 수행하지 않았다.
+
+## 이 Mac에서 간단히 연결
+
+별도 MCP 가상환경 `integrations/scanner_mcp/.venv` 설치 완료.
+API origin은 `https://161.33.212.161`, 키는 `~/.config/mystockapp/scanner-read.token`에
+권한 600으로 보관한다. 키 자체는 Git과 설정 예시에 포함하지 않았다.
+
+- **Codex**: `integrations/scanner_mcp/codex.mac.example.toml` 내용을 기존
+  `~/.codex/config.toml`에 합친다. 기존 내용을 덮어쓰지 않는다. 앱을 다시 열어 도구를 확인한다.
+- **Claude Desktop**: `integrations/scanner_mcp/claude.mac.example.json`의 `scanner-read` 항목을
+  `~/Library/Application Support/Claude/claude_desktop_config.json`의 `mcpServers`에 합친다.
+  기존 MCP 설정은 유지하고 앱을 완전히 종료한 뒤 다시 연다.
+- 연결 후 “스캐너의 최근 미국 종목을 조회하고 경고도 함께 알려줘”로 사용한다.
+- **ChatGPT 웹/모바일 직접 연결**: 로컬 설정만으로 연결되지 않는다. 원격 MCP 전송과
+  해당 클라이언트 인증 연동을 추가해야 한다. 위 API origin은 등록할 MCP URL이 아니다.
+
+예시 파일은 이 Mac 전용 실제 경로다. 다른 컴퓨터에서는 경로와 조회키 전달을 별도로 설정한다.
 
 ## 설계와 범위
 

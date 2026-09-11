@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "scanner-read": {
+      "command": "/Users/soohan/Desktop/claude/test1/myStockApp-scanner-vm/integrations/scanner_mcp/.venv/bin/python",
+      "args": [
+        "/Users/soohan/Desktop/claude/test1/myStockApp-scanner-vm/integrations/scanner_mcp/server.py"
+      ],
+      "env": {
+        "SCANNER_API_URL": "https://161.33.212.161",
+        "SCANNER_READ_TOKEN_FILE": "/Users/soohan/.config/mystockapp/scanner-read.token"
+      }
+    }
+  }
+}
