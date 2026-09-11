@@ -1,13 +1,13 @@
 # 원격 스캐너 MCP
 
 2026-09-11. 로컬 MCP의 조회 도구 3개를 OAuth로 보호한 Streamable HTTP 서버.
-배포 대상 URL: `https://161.33.212.161/mcp`.
+운영 배포 URL: `https://161.33.212.161/mcp`.
 
 ## 인증과 권한
 
 - OAuth 등록/발견, authorization code + S256 PKCE, 정확한 redirect/resource/scope 대조.
 - 연결할 때마다 소유자 승인 화면을 표시한다. 별도 256비트 난수 승인 암호가 필요하다.
-- 원문 암호는 서버에 저장하지 않고 SHA256 검증값만 보관한다. 사용자 선택의 짧은 암호로 대체하지 않는다.
+- 초기 전달용 원문 파일은 본인 Mac으로 전달한 뒤 서버에서 삭제한다. 서버는 SHA256 검증값만 보관한다. 사용자 선택의 짧은 암호로 대체하지 않는다.
 - 승인 폼은 CSRF 세션, Secure/HttpOnly/SameSite 쿠키, Origin 확인, iframe 금지.
 - 코드 2분, 승인 요청 10분, access token 1시간, refresh token 30일.
 - 코드/refresh 사용은 SQLite 트랜잭션으로 단일 소비. refresh 재사용 감지 시 같은 연결의 토큰 폐기.
@@ -40,3 +40,25 @@ SDK 동작은 표준 클라이언트 인증기를 유지한 자체 revoke 라우
 공식 근거:
 - https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
 - https://developers.openai.com/plugins/build/auth
+
+## 2026-09-11 운영 배포 확인
+
+구현 커밋 `d230605`, 실행환경 격리 보완 `7cdf692`를 GitHub main과 운영 VM에 배포했다.
+서비스 active, 인증 메타데이터 200, 무인증 MCP POST 401, 기존 API health 200 확인.
+HTTPS 인증서 검증을 유지한 curl로 확인했다. Mac 기본 Python의 CA 저장소 오류가 있어 curl을 사용했다.
+전체 격리 테스트 551개와 별도 원격 OAuth/MCP 테스트 6개 통과.
+운영 스캐너 DB·계좌를 테스트로 조회하지 않았다. 실제 ChatGPT/Claude 계정 연결은 사용자가 진행해야 한다.
+
+승인 암호: 이 Mac의 `~/.config/mystockapp/remote-mcp-approval.txt` (권한 600).
+서버 초기 전달 파일은 삭제 완료. Git에 암호를 넣지 않는다.
+
+- ChatGPT: 설정 → Security and login → Developer mode를 활성화하고, Plugins의 +에서
+  원격 MCP URL을 추가한다. 계정/조직에 따라 메뉴 제공 여부가 다를 수 있다.
+- Claude: Customize → Connectors → + → Add custom connector에서 URL을 추가한다.
+- 인증 방식 선택이 있으면 OAuth. 별도 client ID/secret은 자동 등록을 사용한다.
+- 열리는 서버 승인 화면에만 위 파일의 암호를 입력한다. 대화창에 붙이지 않는다.
+- 연결 후 새 대화에서 도구를 선택하고 “최근 스캐너 결과와 경고를 알려줘”라고 요청한다.
+
+공식 연결 안내:
+- https://developers.openai.com/plugins/deploy/connect-chatgpt
+- https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp

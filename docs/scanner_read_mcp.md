@@ -1,6 +1,7 @@
 # STEP2: 스캐너 조회 전용 MCP
 
-작성: 2026-09-11. 현재는 **로컬 stdio MCP + 인증된 스캐너 조회 API** 구현이다.
+작성: 2026-09-11. **로컬 stdio MCP + 인증된 스캐너 조회 API**에 이어 원격 HTTPS MCP도 배포했다.
+웹 연결은 [원격 MCP 안내](scanner_remote_mcp.md)를 따른다.
 2026-09-11 사용자 승인으로 `0df412f`를 GitHub main과 운영 VM에 배포했다.
 조회 전용 키를 설정하고 API 서비스를 재시작했다. 공개 health=200,
 인증된 잘못된 입력=422, 무인증/조회 범위 밖 요청=401 확인(운영 DB 조회 없음).
@@ -18,8 +19,8 @@ API origin은 `https://161.33.212.161`, 키는 `~/.config/mystockapp/scanner-rea
   `~/Library/Application Support/Claude/claude_desktop_config.json`의 `mcpServers`에 합친다.
   기존 MCP 설정은 유지하고 앱을 완전히 종료한 뒤 다시 연다.
 - 연결 후 “스캐너의 최근 미국 종목을 조회하고 경고도 함께 알려줘”로 사용한다.
-- **ChatGPT 웹/모바일 직접 연결**: 로컬 설정만으로 연결되지 않는다. 원격 MCP 전송과
-  해당 클라이언트 인증 연동을 추가해야 한다. 위 API origin은 등록할 MCP URL이 아니다.
+- **ChatGPT/Claude 웹 연결**: `https://161.33.212.161/mcp`를 등록하고 소유자 승인한다.
+  [원격 MCP 안내](scanner_remote_mcp.md) 참고.
 
 예시 파일은 이 Mac 전용 실제 경로다. 다른 컴퓨터에서는 경로와 조회키 전달을 별도로 설정한다.
 
@@ -88,9 +89,7 @@ Codex의 로컬 MCP 설정은 [공식 MCP 문서](https://learn.chatgpt.com/docs
 `SCANNER_API_URL`은 Sites 화면 URL이 아니라 API origin이다. Sites bridge에는 조회키를 넣지 않는다.
 사이트 인증을 우회하거나 SITES_API_KEY를 MCP에 넣어서 해결하지 않는다.
 
-현재 구현은 stdio이므로 클라이언트가 로컬 프로세스를 실행해야 한다.
-ChatGPT 웹의 원격 연결로 바로 등록할 HTTP MCP URL은 아직 없다.
-웹·클라우드 사용은 별도 원격 MCP 전송 계층 및 해당 클라이언트 인증 방식 통합이 필요하다.
+위 설정은 로컬 stdio용이다. 웹에서는 별도 배포된 OAuth 원격 MCP를 사용한다.
 클라이언트 설정 파일을 자동 변경하거나 기존 연결을 덮어쓰지 않았다.
 
 ## 페이지·중복 처리와 한계
