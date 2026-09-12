@@ -56,6 +56,8 @@ class OAuthTests(unittest.TestCase):
         authorization=self.client.get('/.well-known/oauth-authorization-server').json()
         self.assertEqual(protected['resource'],self.origin+'/mcp')
         self.assertIn('S256',authorization['code_challenge_methods_supported'])
+        self.assertIn('none',authorization['token_endpoint_auth_methods_supported'])
+        self.assertEqual(authorization['registration_endpoint'],self.origin+'/register')
         for path in ('/.well-known/oauth-protected-resource',
                      '/.well-known/oauth-protected-resource/',
                      '/.well-known/oauth-protected-resource/mcp/'):

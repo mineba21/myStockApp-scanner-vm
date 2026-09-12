@@ -211,15 +211,42 @@ def build_app(reader, provider):
             allowed_hosts=[host],allowed_origins=[provider.origin]))
     mcp.custom_route('/consent',methods=['GET','POST'])(provider.consent)
     app=mcp.streamable_http_app()
+    metadata_headers={
+        'Cache-Control':'public, max-age=3600',
+        'Access-Control-Allow-Origin':'*',
+        'Access-Control-Allow-Methods':'GET, OPTIONS',
+        'Access-Control-Allow-Headers':'MCP-Protocol-Version',
+    }
+    async def authorization_metadata_compat(request):
+        if request.method=='OPTIONS':
+            return Response(status_code=204,headers=metadata_headers)
+        origin=provider.origin.rstrip('/')
+        return JSONResponse({
+            'issuer':origin+'/',
+            'authorization_endpoint':origin+'/authorize',
+            'token_endpoint':origin+'/token',
+            'registration_endpoint':origin+'/register',
+            'scopes_supported':[SCOPE],
+            'response_types_supported':['code'],
+            'grant_types_supported':['authorization_code','refresh_token'],
+            # The SDK's registration handler already accepts public clients,
+            # but its generated metadata omits "none". ChatGPT rejects DCR
+            # when that public-client method is not advertised.
+            'token_endpoint_auth_methods_supported':['none','client_secret_post','client_secret_basic'],
+            'revocation_endpoint':origin+'/revoke',
+            'revocation_endpoint_auth_methods_supported':['none','client_secret_post','client_secret_basic'],
+            'code_challenge_methods_supported':['S256'],
+        },headers=metadata_headers)
     # Some OAuth clients resolve an issuer ending in "/" to the RFC 8414
     # metadata URL with a trailing slash.  Starlette's exact route did not
     # serve that variant, so ChatGPT could reach the MCP endpoint but could
     # not discover the authorization, token, or registration endpoints.
     routes_by_path={getattr(route,'path',None): route for route in app.routes}
-    authorization_metadata=routes_by_path['/.well-known/oauth-authorization-server']
     protected_metadata=routes_by_path['/.well-known/oauth-protected-resource/mcp']
+    app.routes.insert(0,Route('/.well-known/oauth-authorization-server',authorization_metadata_compat,
+                              methods=['GET','OPTIONS']))
     app.routes.extend([
-        Route('/.well-known/oauth-authorization-server/',authorization_metadata.endpoint,methods=['GET']),
+        Route('/.well-known/oauth-authorization-server/',authorization_metadata_compat,methods=['GET','OPTIONS']),
         Route('/.well-known/oauth-protected-resource',protected_metadata.endpoint,methods=['GET']),
         Route('/.well-known/oauth-protected-resource/',protected_metadata.endpoint,methods=['GET']),
         Route('/.well-known/oauth-protected-resource/mcp/',protected_metadata.endpoint,methods=['GET']),
