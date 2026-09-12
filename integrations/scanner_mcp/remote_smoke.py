@@ -52,8 +52,19 @@ class OAuthTests(unittest.TestCase):
     def test_discovery_and_no_auth(self):
         self.assertEqual(self.client.post('/mcp',json={}).status_code,401)
         self.assertIn('resource_metadata',self.client.post('/mcp',json={}).headers['www-authenticate'])
-        self.assertEqual(self.client.get('/.well-known/oauth-protected-resource/mcp').json()['resource'],self.origin+'/mcp')
-        self.assertIn('S256',self.client.get('/.well-known/oauth-authorization-server').json()['code_challenge_methods_supported'])
+        protected=self.client.get('/.well-known/oauth-protected-resource/mcp').json()
+        authorization=self.client.get('/.well-known/oauth-authorization-server').json()
+        self.assertEqual(protected['resource'],self.origin+'/mcp')
+        self.assertIn('S256',authorization['code_challenge_methods_supported'])
+        for path in ('/.well-known/oauth-protected-resource',
+                     '/.well-known/oauth-protected-resource/',
+                     '/.well-known/oauth-protected-resource/mcp/'):
+            response=self.client.get(path)
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json(),protected)
+        response=self.client.get('/.well-known/oauth-authorization-server/')
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json(),authorization)
         self.assertEqual(self.client.get('/authorize',headers={'Host':'evil.example'}).status_code,400)
     def test_pkce_replay_and_three_read_tools(self):
         code=self.approve()

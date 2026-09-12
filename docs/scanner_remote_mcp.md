@@ -77,3 +77,14 @@ HTTPS 인증서 검증을 유지한 curl로 확인했다. Mac 기본 Python의 C
   origin만 추가해 Chromium의 승인 후 redirect 차단을 방지한다.
 - 수정 커밋 `29902dd`, `767c382` 배포. 격리 OAuth 테스트 6개 통과.
   실제 스캐너 데이터 조회 및 계좌·주문 호출은 수행하지 않았다.
+
+## ChatGPT OAuth 탐지 호환성 (2026-09-12)
+
+- ChatGPT의 새 플러그인 화면은 MCP URL에는 연결했지만 OAuth 고급 설정의 인증 URL,
+  토큰 URL, 등록 URL을 비워 두고 DCR을 사용할 수 없음으로 표시했다.
+- 공개 메타데이터의 issuer는 루트 경로(`/`)로 끝난다. ChatGPT는 이에 맞춰
+  `/.well-known/oauth-authorization-server/`도 조회하지만 기존 Nginx와 앱은 끝의
+  슬래시가 없는 경로만 제공했다. 이 경로 불일치가 등록 실패의 원인이었다.
+- authorization server 메타데이터의 끝 슬래시 경로와 protected resource metadata의
+  표준 탐색 변형을 같은 JSON으로 제공한다. 권한은 계속 `scanner:read` 하나이며
+  계좌·주문 API는 추가하지 않는다.
