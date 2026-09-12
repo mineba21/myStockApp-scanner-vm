@@ -1,7 +1,10 @@
 # 원격 스캐너 MCP
 
 2026-09-11. 로컬 MCP의 조회 도구 3개를 OAuth로 보호한 Streamable HTTP 서버.
-운영 배포 URL: `https://161.33.212.161/mcp`.
+운영 배포 URL:
+
+- ChatGPT 권장: `https://161-33-212-161.sslip.io/mcp`
+- 기존 Claude 연결 호환: `https://161.33.212.161/mcp`
 
 ## 인증과 권한
 
@@ -91,3 +94,6 @@ HTTPS 인증서 검증을 유지한 curl로 확인했다. Mac 기본 Python의 C
   authorization server 메타데이터의 끝 슬래시 경로와 protected resource metadata의
   표준 탐색 변형을 제공한다. 권한은 계속 `scanner:read` 하나이며 계좌·주문 API는
   추가하지 않는다.
+- ChatGPT의 서버 측 OAuth 탐지는 숫자 IP 기반 URL의 메타데이터를 사용하지 않았다.
+  유효한 공개 TLS 인증서가 있는 `sslip.io` 호스트에 별도 OAuth 인스턴스를 두었다.
+  기존 IP 인스턴스와 DB·포트를 분리해 이미 연결된 Claude 토큰은 계속 유효하다.

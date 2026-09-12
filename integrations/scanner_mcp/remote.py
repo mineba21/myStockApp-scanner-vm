@@ -292,6 +292,6 @@ def main():
     # Only the dedicated read credential is available in this process.
     reader=ScannerReader('http://127.0.0.1:8000',config['scanner_read_token'])
     import uvicorn
-    uvicorn.run(build_app(reader,provider),host='127.0.0.1',port=8001,access_log=False)
+    uvicorn.run(build_app(reader,provider),host='127.0.0.1',port=int(config.get('port',8001)),access_log=False)
 
 if __name__=='__main__': main()
