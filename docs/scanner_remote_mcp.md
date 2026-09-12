@@ -97,3 +97,18 @@ HTTPS 인증서 검증을 유지한 curl로 확인했다. Mac 기본 Python의 C
 - ChatGPT의 서버 측 OAuth 탐지는 숫자 IP 기반 URL의 메타데이터를 사용하지 않았다.
   유효한 공개 TLS 인증서가 있는 `sslip.io` 호스트에 별도 OAuth 인스턴스를 두었다.
   기존 IP 인스턴스와 DB·포트를 분리해 이미 연결된 Claude 토큰은 계속 유효하다.
+
+## ChatGPT 웹 연결 완료 (2026-09-12)
+
+- ChatGPT 개발자 플러그인 `myStockApp 스캐너`를
+  `https://161-33-212-161.sslip.io/mcp`에 OAuth/DCR 방식으로 등록하고 소유자 승인을 완료했다.
+- 새 대화에 플러그인을 선택한 뒤, 실제 스캐너 데이터를 읽지 않고 도구 이름만 확인했다.
+  ChatGPT에는 `mystockapp_scanner_signal`, `mystockapp_scanner_signals`,
+  `mystockapp_scanner_status`로 표시됐다. MCP 원래 이름은 각각 접두사 없는
+  `scanner_signal`, `scanner_signals`, `scanner_status`다.
+- 설정 화면의 `아직 사용할 수 있는 앱 액션이 없습니다`는 쓰기 액션 목록이다.
+  읽기 전용 MCP 도구의 등록 실패를 뜻하지 않으며, 위 대화에서 3개 도구 인식을 확인했다.
+- Claude용 `https://161.33.212.161/mcp` 서비스와 ChatGPT용 서비스, Nginx가 모두 active다.
+  Claude OAuth 저장소에는 유효한 refresh grant가 남아 있고 공개 resource metadata도
+  `scanner:read` 하나로 정상 응답했다. 기존 Claude 연결을 재등록할 필요는 없다.
+- 웹 연결 확인 중 실제 스캐너 결과, 운영 DB, 계좌 및 주문 API는 호출하지 않았다.
