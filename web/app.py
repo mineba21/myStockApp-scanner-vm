@@ -36,11 +36,13 @@ from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
 from web.kiwoom_sizing import apply_live_position_sizing
 from web.kiwoom_order_api import router as kiwoom_order_router
 from web.scanner_read_api import router as scanner_read_router
+from web.portfolio_read_api import router as portfolio_read_router
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 SITES_API_KEY = os.getenv("SITES_API_KEY", "").strip()
 SCANNER_READ_TOKEN = os.getenv("SCANNER_READ_TOKEN", "").strip()
+PORTFOLIO_READ_TOKEN = os.getenv("PORTFOLIO_READ_TOKEN", "").strip()
 KIWOOM_WEB_ENABLED = os.getenv("KIWOOM_WEB_ENABLED", "false").lower() == "true"
 
 
@@ -56,6 +58,7 @@ app = FastAPI(title="Weinstein Stock Scanner", version="1.0.0")
 app.include_router(asset_allocation_router)
 app.include_router(kiwoom_order_router)
 app.include_router(scanner_read_router)
+app.include_router(portfolio_read_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -73,8 +76,11 @@ async def require_api_auth(request: Request, call_next):
         return await call_next(request)
 
     # Dedicated scanner credential must never become a trading credential.
-    if SCANNER_READ_TOKEN and secrets.compare_digest(SCANNER_READ_TOKEN, SITES_API_KEY):
-        return JSONResponse(status_code=503, content={"detail": "Scanner and application credentials must differ"})
+    dedicated_tokens = [token for token in (SCANNER_READ_TOKEN, PORTFOLIO_READ_TOKEN) if token]
+    if (any(secrets.compare_digest(token, SITES_API_KEY) for token in dedicated_tokens)
+            or (len(dedicated_tokens) == 2
+                and secrets.compare_digest(dedicated_tokens[0], dedicated_tokens[1]))):
+        return JSONResponse(status_code=503, content={"detail": "Dedicated read credentials must be unique"})
     if path.startswith('/api/scanner-read'):
         if len(SCANNER_READ_TOKEN) < 32:
             return JSONResponse(status_code=503, content={"detail": "Scanner read authentication is not configured"})
@@ -85,6 +91,22 @@ async def require_api_auth(request: Request, call_next):
                                 headers={"WWW-Authenticate": "Bearer"})
         if request.method != 'GET' or not re.fullmatch(r'/api/scanner-read/(status|signals|signals/[1-9][0-9]*)', path):
             return JSONResponse(status_code=403, content={"detail": "Scanner read scope only"})
+        response = await call_next(request)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    # Portfolio reads use a credential that is distinct from the scanner and
+    # application credentials. It cannot reach generic APIs or order routes.
+    if path.startswith('/api/portfolio-read'):
+        if len(PORTFOLIO_READ_TOKEN) < 32:
+            return JSONResponse(status_code=503, content={"detail": "Portfolio read authentication is not configured"})
+        scheme, _, token = request.headers.get('Authorization', '').partition(' ')
+        if (scheme.lower() != 'bearer' or not token or
+                not secrets.compare_digest(token, PORTFOLIO_READ_TOKEN)):
+            return JSONResponse(status_code=401, content={"detail": "Invalid portfolio read credentials"},
+                                headers={"WWW-Authenticate": "Bearer"})
+        if request.method != 'GET' or not re.fullmatch(r'/api/portfolio-read/(overview|holdings)', path):
+            return JSONResponse(status_code=403, content={"detail": "Portfolio read scope only"})
         response = await call_next(request)
         response.headers['Cache-Control'] = 'no-store'
         return response

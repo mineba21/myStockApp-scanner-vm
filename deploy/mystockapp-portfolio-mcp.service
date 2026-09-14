@@ -1,0 +1,23 @@
+[Unit]
+Description=myStockApp portfolio read-only remote MCP
+After=network.target mystockapp-scanner.service
+
+[Service]
+Type=simple
+User=mystockapp-portfolio-mcp
+Group=mystockapp-portfolio-mcp
+WorkingDirectory=/opt/mystockapp-portfolio-mcp
+Environment=REMOTE_MCP_CONFIG=/etc/mystockapp-portfolio-mcp/config.json
+ExecStart=/opt/mystockapp-portfolio-mcp/.venv/bin/python /opt/mystockapp-portfolio-mcp/remote.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/mystockapp-portfolio-mcp
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

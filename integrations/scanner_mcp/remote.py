@@ -30,13 +30,20 @@ def digest(value):
 
 
 class OwnerProvider:
-    def __init__(self, db_path, origin, owner_hash):
+    def __init__(self, db_path, origin, owner_hash, *, scope=SCOPE,
+                 consent_title='스캐너 조회 연결',
+                 consent_description='후보 종목·판정 지표·경고 조회만 허용합니다. 계좌·주문 권한은 없습니다.'):
         parsed=urlsplit(origin)
         if parsed.scheme != 'https' or parsed.path or parsed.query or parsed.fragment or parsed.username:
             raise ValueError('An HTTPS origin is required')
         if len(owner_hash)!=64 or any(c not in '0123456789abcdef' for c in owner_hash):
             raise ValueError('Owner credential SHA256 required')
+        if scope not in ('scanner:read', 'portfolio:read'):
+            raise ValueError('Unsupported read-only scope')
         self.origin, self.resource, self.owner_hash = origin, origin+'/mcp', owner_hash
+        self.scope = scope
+        self.consent_title = consent_title
+        self.consent_description = consent_description
         self.path=Path(db_path)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with self.db() as db:
@@ -81,8 +88,8 @@ class OwnerProvider:
             self.put(db,'client',client_info.client_id,client_info.model_dump(mode='json'),time.time()+86400*90)
 
     async def authorize(self, client, params):
-        if params.resource != self.resource or set(params.scopes or [])!={SCOPE}:
-            raise AuthorizeError('invalid_request','Exact scanner resource and scope required')
+        if params.resource != self.resource or set(params.scopes or [])!={self.scope}:
+            raise AuthorizeError('invalid_request','Exact resource and scope required')
         flow=secrets.token_urlsafe(32)
         with self.db() as db:
             self.put(db,'pending',flow,{'client_id':client.client_id,'params':params.model_dump(mode='json')},time.time()+600)
@@ -111,8 +118,8 @@ class OwnerProvider:
                 pending['csrf']=digest(csrf)
                 self.put(db,'pending',flow,pending,time.time()+600)
                 callback=html.escape(str(params.redirect_uri))
-                body=f'''<!doctype html><html lang="ko"><meta charset="utf-8"><title>스캐너 연결 승인</title>
-                <h1>스캐너 조회 연결</h1><p>후보 종목·판정 지표·경고 조회만 허용합니다. 계좌·주문 권한은 없습니다.</p>
+                body=f'''<!doctype html><html lang="ko"><meta charset="utf-8"><title>조회 연결 승인</title>
+                <h1>{html.escape(self.consent_title)}</h1><p>{html.escape(self.consent_description)}</p>
                 <p>연결할 앱의 반환 주소: <strong>{callback}</strong></p>
                 <p>본인이 시작한 연결인지 확인하세요.</p><form method="post" action="/consent">
                 <input type="hidden" name="flow" value="{html.escape(flow)}">
@@ -138,7 +145,7 @@ class OwnerProvider:
                 self.delete(db,'pending',flow)
                 code=secrets.token_urlsafe(32)
                 data=AuthorizationCode(code=code,client_id=pending['client_id'],expires_at=time.time()+120,
-                    scopes=[SCOPE],code_challenge=params.code_challenge,redirect_uri=params.redirect_uri,
+                    scopes=[self.scope],code_challenge=params.code_challenge,redirect_uri=params.redirect_uri,
                     redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,resource=self.resource).model_dump(mode='json')
                 data.pop('code')
                 self.put(db,'code',code,data,data['expires_at'])
@@ -155,11 +162,11 @@ class OwnerProvider:
         family=family or secrets.token_hex(16)
         access,refresh=secrets.token_urlsafe(32),secrets.token_urlsafe(32)
         expires=int(time.time())
-        a={'client_id':client_id,'scopes':[SCOPE],'expires_at':expires+3600,'resource':self.resource}
-        r={'client_id':client_id,'scopes':[SCOPE],'expires_at':expires+86400*30}
+        a={'client_id':client_id,'scopes':[self.scope],'expires_at':expires+3600,'resource':self.resource}
+        r={'client_id':client_id,'scopes':[self.scope],'expires_at':expires+86400*30}
         self.put(db,'access',access,a,a['expires_at'],family)
         self.put(db,'refresh',refresh,r,r['expires_at'],family)
-        return OAuthToken(access_token=access,token_type='Bearer',expires_in=3600,refresh_token=refresh,scope=SCOPE)
+        return OAuthToken(access_token=access,token_type='Bearer',expires_in=3600,refresh_token=refresh,scope=self.scope)
 
     async def exchange_authorization_code(self, client, authorization_code):
         with self.db() as db:
@@ -178,7 +185,7 @@ class OwnerProvider:
         return RefreshToken(token=refresh_token,**data) if data and data['client_id']==client.client_id else None
 
     async def exchange_refresh_token(self, client, refresh_token, scopes):
-        if set(scopes)!={SCOPE}: raise TokenError('invalid_scope','Scanner read only')
+        if set(scopes)!={self.scope}: raise TokenError('invalid_scope','Read-only scope required')
         with self.db() as db:
             data=self.get(db,'refresh',refresh_token.token)
             if not data or data['client_id']!=client.client_id: raise TokenError('invalid_grant','Refresh token already used')
@@ -189,7 +196,7 @@ class OwnerProvider:
 
     async def load_access_token(self, token):
         with self.db() as db: data=self.get(db,'access',token)
-        if not data or data.get('resource')!=self.resource or data.get('scopes')!=[SCOPE]: return None
+        if not data or data.get('resource')!=self.resource or data.get('scopes')!=[self.scope]: return None
         return AccessToken(token=token,**data)
 
     async def revoke_token(self, token):
@@ -203,8 +210,8 @@ def build_app(reader, provider):
 
     host=urlsplit(provider.origin).netloc
     mcp=create_server(reader,auth_server_provider=provider,
-        auth=AuthSettings(issuer_url=provider.origin,resource_server_url=provider.resource,required_scopes=[SCOPE],
-            client_registration_options=ClientRegistrationOptions(enabled=True,valid_scopes=[SCOPE],default_scopes=[SCOPE]),
+        auth=AuthSettings(issuer_url=provider.origin,resource_server_url=provider.resource,required_scopes=[provider.scope],
+            client_registration_options=ClientRegistrationOptions(enabled=True,valid_scopes=[provider.scope],default_scopes=[provider.scope]),
             revocation_options=RevocationOptions(enabled=True)),
         stateless_http=True,json_response=True,
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True,
@@ -226,7 +233,7 @@ def build_app(reader, provider):
             'authorization_endpoint':origin+'/authorize',
             'token_endpoint':origin+'/token',
             'registration_endpoint':origin+'/register',
-            'scopes_supported':[SCOPE],
+            'scopes_supported':[provider.scope],
             'response_types_supported':['code'],
             'grant_types_supported':['authorization_code','refresh_token'],
             # The SDK's registration handler already accepts public clients,
@@ -287,10 +294,13 @@ def build_app(reader, provider):
 
 def main():
     os.umask(0o077)
-    config=json.loads(Path(os.environ['SCANNER_MCP_CONFIG']).read_text())
-    provider=OwnerProvider(config['oauth_db'],config['origin'],config['owner_hash'])
+    config_path=os.environ.get('REMOTE_MCP_CONFIG') or os.environ['SCANNER_MCP_CONFIG']
+    config=json.loads(Path(config_path).read_text())
+    provider=OwnerProvider(config['oauth_db'],config['origin'],config['owner_hash'],
+        scope=config.get('scope',SCOPE), consent_title=config.get('consent_title','스캐너 조회 연결'),
+        consent_description=config.get('consent_description','후보 종목·판정 지표·경고 조회만 허용합니다. 계좌·주문 권한은 없습니다.'))
     # Only the dedicated read credential is available in this process.
-    reader=ScannerReader('http://127.0.0.1:8000',config['scanner_read_token'])
+    reader=ScannerReader('http://127.0.0.1:8000',config.get('read_token',config.get('scanner_read_token')))
     import uvicorn
     uvicorn.run(build_app(reader,provider),host='127.0.0.1',port=int(config.get('port',8001)),access_log=False)
 

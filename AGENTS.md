@@ -6,6 +6,7 @@
 - ETF/account2 작업: `docs/etf_asset_allocation.md`, `docs/etf_rebalance_review.md`를 먼저 읽는다.
 - 스캐너 작업: `docs/step1_review_checklist.md`, `docs/step2_review_checklist.md`를 먼저 읽는다.
 - 스캐너 MCP/조회 연결: `docs/scanner_read_mcp.md`를 먼저 읽는다. 조회키의 계좌·주문 권한을 확대하지 않는다.
+- 계좌 현황 MCP: `docs/portfolio_read_mcp.md`를 먼저 읽는다. `portfolio:read`는 스캐너·사이트·주문 자격 증명과 분리한다.
 - ETF는 최신 사용자 결정에 따라 차액 재분배한다. 전량매도 방식으로 되돌리지 않는다.
 - 모의 응답과 격리 테스트를 사용한다. 테스트를 위해 실주문이나 운영 DB를 사용하지 않는다.
 - 배포 성공과 실제 주문 기능 완성을 구분해 보고한다. 미검증 체결·현금을 성공으로 간주하지 않는다.
