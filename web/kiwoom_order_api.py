@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from trading.allocation_rebalance import LIVE_BLOCK_REASON
+from trading.asset_allocation_universe import ETF_EXCHANGES
 from trading.kiwoom_readonly import KiwoomError, KiwoomReadOnlyClient, load_profile_configs
 from web.kiwoom_holdings import (
     _get_token,
@@ -24,11 +25,7 @@ router = APIRouter(prefix="/api/kiwoom/orders", tags=["kiwoom-orders"])
 _lock = threading.Lock()
 _previews: dict[str, dict[str, Any]] = {}
 PREVIEW_TTL_SECONDS = 300
-US_EXCHANGE_BY_TICKER = {
-    "AGG": "NY", "BIL": "NY", "EFA": "NY", "GLD": "NY",
-    "IEF": "ND", "IEMG": "NY", "LQD": "ND", "QQQ": "ND",
-    "SHY": "ND", "SPY": "NY", "VTV": "NY",
-}
+US_EXCHANGE_BY_TICKER = ETF_EXCHANGES
 
 
 class SellPreviewRequest(BaseModel):

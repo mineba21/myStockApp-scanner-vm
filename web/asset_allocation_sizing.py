@@ -130,6 +130,7 @@ def calculate_allocation_sizing(
 
 
 def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
+    from trading.asset_allocation_universe import ETF_EXCHANGES, allocation_scope
     from trading.kiwoom_readonly import KiwoomReadOnlyClient, load_profile_configs
     from web.kiwoom_holdings import (
         _get_token,
@@ -148,22 +149,17 @@ def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("퀀트투자 계좌 요약을 확인하지 못했습니다.")
 
     holdings = get_kiwoom_holdings()
-    missing = sorted(set(str(t).upper() for t in report.get("combined_allocations", {})) |
-                     set(str(t).strip().upper() for t in os.getenv("ALLOCATION_LIQUIDATION_SCOPE", "").split(",") if t.strip()))
+    scope = allocation_scope()
+    missing = sorted(set(str(t).upper() for t in report.get("combined_allocations", {})) | set(scope))
 
     fetched: dict[str, float | None] = {}
     if missing:
         config = load_profile_configs()["account2"]
         client = KiwoomReadOnlyClient(config)
         token = _get_token("account2", config, client)
-        exchanges = {
-            "AGG": "NY", "BIL": "NY", "EFA": "NY", "GLD": "NY",
-            "IEF": "ND", "IEMG": "NY", "LQD": "ND", "QQQ": "ND",
-            "SPY": "NY", "VTV": "NY", "SHY": "ND",
-        }
         for ticker in missing:
             quote = client.get_overseas_quote(
-                token, exchange=exchanges.get(ticker, "NY"), ticker=ticker
+                token, exchange=ETF_EXCHANGES[ticker], ticker=ticker
             )["quote"]
             try:
                 fetched[ticker] = abs(float(str(quote.get("cur_prc") or "0").replace(",", ""))) or None
@@ -171,8 +167,7 @@ def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
                 fetched[ticker] = None
 
     result = calculate_allocation_sizing(
-        {**report, "liquidation_scope": [t.strip().upper() for t in
-         os.getenv("ALLOCATION_LIQUIDATION_SCOPE", "").split(",") if t.strip()]},
+        {**report, "liquidation_scope": scope},
         holdings, summary, lambda ticker: fetched.get(ticker)
     )
 

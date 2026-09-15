@@ -1,8 +1,7 @@
-"""Durable target-minus-holdings rebalance workflow; broker evidence is supplied by an adapter.
+"""Durable target-minus-holdings rebalance workflow with broker evidence.
 
-The production adapter intentionally remains unavailable until order-history,
-complete holdings and net orderable-cash semantics are verified. No HTTP body
-may supply broker evidence. See docs/etf_rebalance_review.md for that contract.
+No HTTP body may supply holdings, cash, quotes, or execution evidence. See
+docs/etf_rebalance_review.md for the account2 adapter contract.
 """
 from __future__ import annotations
 
@@ -307,6 +306,62 @@ class Rebalance:
             self._order_state(order["id"], "SUBMITTED", order_no)
         return self.status(cycle_id)
 
+    def execute_authorized_cycle(self, cycle_id):
+        """Persist one user authorization, then start the sell phase once."""
+        current = self.status(cycle_id)
+        self._check_mode(current)
+        if current["state"] != "SELL_PREVIEW":
+            if current["payload"].get("execution_authorized") is True:
+                return self.advance_authorized_cycle(cycle_id)
+            raise RebalanceBlocked("최종 매도·매수 계획을 다시 확인해야 합니다.")
+        previous_payload = json.dumps(current["payload"])
+        payload = dict(current["payload"])
+        payload["execution_authorized"] = True
+        payload["authorized_at"] = time.time()
+        payload["authorization_scope"] = "FULL_CYCLE_V1"
+        with self.db() as db:
+            changed = db.execute(
+                "UPDATE allocation_cycles SET payload=? WHERE id=? AND state='SELL_PREVIEW' AND payload=?",
+                (json.dumps(payload), cycle_id, previous_payload),
+            ).rowcount
+        if not changed:
+            return self.status(cycle_id)
+        self.confirm(cycle_id, "SELL")
+        return self.advance_authorized_cycle(cycle_id)
+
+    def advance_authorized_cycle(self, cycle_id):
+        """Advance only a persisted user-authorized cycle; stop on blockers."""
+        for _ in range(4):
+            current = self.status(cycle_id)
+            self._check_mode(current)
+            if current["payload"].get("execution_authorized") is not True:
+                raise RebalanceBlocked("사용자가 승인한 리밸런싱 사이클이 아닙니다.")
+            if current["state"] in {"SELL_PENDING", "BUY_PENDING"}:
+                result = self.reconcile(cycle_id)
+                if result.get("blockers") or result["state"] == current["state"]:
+                    return result
+                continue
+            if current["state"] == "SELL_CONFIRMED":
+                result = self.preview_buys(cycle_id)
+                if result["payload"].get("remaining_sell_adjustments"):
+                    return {**result, "blockers": [
+                        "가격·현금 변동으로 추가 매도가 필요해 매수 전에 멈췄습니다."
+                    ]}
+                continue
+            if current["state"] == "BUY_PREVIEW":
+                result = self.confirm(cycle_id, "BUY")
+                stopped = []
+                for order in result["orders"]:
+                    if order["side"] != "BUY":
+                        continue
+                    if order["state"] == "REJECTED":
+                        stopped.append(f"{order['ticker']}: 증권사 주문 거절 — 이후 주문 중단")
+                    elif order["state"] in {"UNKNOWN", "PREPARED", "SENDING"}:
+                        stopped.append(f"{order['ticker']}: {order['state']} — 자동 진행 중단")
+                return {**result, "blockers": stopped} if stopped else result
+            return current
+        return self.status(cycle_id)
+
     def _order_state(self, intent_id, state, order_number=None):
         with self.db() as db:
             db.execute("UPDATE allocation_intents SET state=?, order_number=COALESCE(?, order_number) WHERE id=? AND state != 'FILLED'",
@@ -324,6 +379,9 @@ class Rebalance:
                 continue
             if order["state"] == "PREPARED":
                 problems.append(f"{order['ticker']}: 미전송 의도 검토 필요")
+                continue
+            if order["state"] == "REJECTED":
+                problems.append(f"{order['ticker']}: 증권사 주문 거절 — 이후 주문 중단")
                 continue
             evidence = self.broker.lookup(order)
             # Adapter must match order identity (including date/account/side/

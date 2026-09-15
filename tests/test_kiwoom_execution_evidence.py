@@ -38,6 +38,22 @@ def test_filled_match_and_kst_date():
     payload = s.client.session.calls[0][1]['json']
     assert payload['ord_dt'] == '20260911' and payload['query_tp'] == '1'
 
+
+def test_post_midnight_kst_order_falls_back_to_us_trading_date():
+    created = datetime(2026, 9, 15, 4, 24, 14, tzinfo=KST).timestamp()
+    i = dict(id='intent', order_number='123', ticker='SPY', side='BUY', quantity=10,
+             price='100', created_at=created)
+    previous_day_row = row()
+    previous_day_row.update(ord_time='04:24:14', ord_stat_nm='접수',
+                            cntr_qty='0', ord_remnq='10')
+    s = service(response([]), response([previous_day_row]))
+
+    result = s.lookup(i)
+
+    assert result['state'] == 'OPEN'
+    assert datetime.fromtimestamp(result['ordered_at'], KST).strftime('%Y%m%d %H:%M:%S') == '20260915 04:24:14'
+    assert [call[1]['json']['ord_dt'] for call in s.client.session.calls] == ['20260915', '20260914']
+
 @pytest.mark.parametrize('updates,state', [
     ({'ord_stat_nm':'접수','cntr_qty':'3','ord_remnq':'7'},'PARTIAL'),
     ({'ord_stat_nm':'접수','cntr_qty':'0','ord_remnq':'10'},'OPEN'),
@@ -46,6 +62,7 @@ def test_filled_match_and_kst_date():
     ({'mdfy_qty':'1'},'MODIFIED'),
     ({'ord_stat_nm':'접수'},'UNKNOWN'),
     ({'ord_stat_nm':'체결완료','cntr_qty':'3'},'UNKNOWN'),
+    ({'ord_stat_nm':'무효주문','cntr_qty':'0','cncl_qty':'10','ord_remnq':'0'},'CANCELLED'),
 ])
 def test_incomplete_states(updates,state):
     r=row(); r.update(updates)
@@ -76,7 +93,30 @@ def test_incomplete_pagination(headers):
     with pytest.raises(KiwoomError): service(response([],**headers), max_pages=1).history('20260911')
 
 def test_timeout_not_empty_success():
-    with pytest.raises(requests.Timeout): service(requests.Timeout()).history('20260911')
+        with pytest.raises(requests.Timeout): service(requests.Timeout()).history('20260911')
+
+
+def test_real_server_no_unfilled_code_is_an_empty_result():
+    result = service(Response({
+        'return_code': 20,
+        'return_msg': '[2000](571758:해당 계좌의미체결내역이 없습니다.)',
+    })).rows('ust21050', {'ord_dt': '20260915'})
+    assert result == []
+
+
+def test_real_server_no_fills_code_is_an_empty_result():
+    result = service(Response({
+        'return_code': 20,
+        'return_msg': '[2000](571758:해당 계좌의 체결내역이 없습니다.)',
+    })).rows('ust21150', {'ord_dt': '20260915'})
+    assert result == []
+
+
+def test_unrelated_code_20_still_fails_closed():
+    with pytest.raises(KiwoomError):
+        service(Response({'return_code': 20, 'return_msg': '권한이 없습니다'})).rows(
+            'ust21050', {'ord_dt': '20260915'}
+        )
 
 def test_cash_is_broker_value_no_estimated_proceeds_or_double_deduction():
     s=service(response([{'ord_no':'123'}]), response([{'crnc_code':'USD','fc_ord_alowa':'1,200.25'}]))
@@ -85,6 +125,19 @@ def test_cash_is_broker_value_no_estimated_proceeds_or_double_deduction():
     assert result['open_order_count']==1
     assert result['cash_includes_reservations'] is None
     assert not result['validated_for_execution']
+
+
+def test_mock_diagnostic_cash_check_includes_previous_us_trading_day():
+    s = service(
+        response([]),
+        response([{'ord_no':'6749','stk_cd':'SPY','ord_time':'04:24:14'}]),
+        response([{'crnc_code':'USD','fc_ord_alowa':'100000'}]),
+    )
+
+    result = s.cash_check('20260915', include_previous_day=True)
+
+    assert result['open_order_count'] == 1
+    assert [call[1]['json'].get('ord_dt') for call in s.client.session.calls[:2]] == ['20260915', '20260914']
 
 @pytest.mark.parametrize('rows',[[],[{'crnc_code':'USD'}],
     [{'crnc_code':'USD','fc_ord_alowa':'NaN'}],

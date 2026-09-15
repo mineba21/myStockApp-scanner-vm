@@ -13,6 +13,7 @@ from trading.kiwoom_readonly import (
     OVERSEAS_DEPOSIT_API_ID,
     OVERSEAS_VALUATION_API_ID,
     OVERSEAS_QUOTE_API_ID,
+    OVERSEAS_ORDERBOOK_API_ID,
     REAL_BASE_URL,
     load_profile_configs,
 )
@@ -97,6 +98,22 @@ def test_overseas_quote_uses_fixed_read_only_api():
     url, request = session.calls[0]
     assert url == MOCK_BASE_URL + "/api/us/mrkcond"
     assert request["headers"]["api-id"] == OVERSEAS_QUOTE_API_ID
+    assert request["json"] == {"stex_tp": "ND", "stk_cd": "QQQ"}
+
+
+def test_overseas_orderbook_uses_timestamped_read_only_api():
+    session = _Session([_Response({
+        "return_code": 0, "stex_tp": "ND", "stk_cd": "QQQ",
+        "cur_prc": "+600.1200", "dt": "20260915", "bid_tm": "10:29",
+    })])
+    client = KiwoomReadOnlyClient(KiwoomConfig("key", "secret"), session)
+
+    result = client.get_overseas_orderbook("token", exchange="ND", ticker="QQQ")
+
+    assert result["quote"]["bid_tm"] == "10:29"
+    url, request = session.calls[0]
+    assert url == MOCK_BASE_URL + "/api/us/mrkcond"
+    assert request["headers"]["api-id"] == OVERSEAS_ORDERBOOK_API_ID
     assert request["json"] == {"stex_tp": "ND", "stk_cd": "QQQ"}
 
 

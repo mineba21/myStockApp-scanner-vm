@@ -102,6 +102,50 @@ def test_excess_sale_fill_cash_refresh_buys_only_deficits_preserves_other_strate
     assert len(broker.sent) == 3
 
 
+def test_one_user_authorization_advances_sell_then_buy_without_second_confirmation(flow):
+    service, broker, cid = flow
+
+    selling = service.execute_authorized_cycle(cid)
+    assert selling['state'] == 'SELL_PENDING'
+    assert selling['payload']['authorization_scope'] == 'FULL_CYCLE_V1'
+    assert selling['blockers']
+    restarted = Rebalance(service.path, broker, reserve_bps=100)
+    assert restarted.execute_authorized_cycle(cid)['state'] == 'SELL_PENDING'
+    assert len(broker.sent) == 1
+
+    broker.fill([o for o in selling['orders'] if o['side'] == 'SELL'])
+    broker.cash = Decimal('1000')
+    buying = service.advance_authorized_cycle(cid)
+    assert buying['state'] == 'BUY_PENDING'
+    assert {o['side'] for o in buying['orders']} == {'SELL', 'BUY'}
+
+    broker.fill([o for o in buying['orders'] if o['side'] == 'BUY'])
+    assert service.advance_authorized_cycle(cid)['state'] == 'COMPLETE'
+    sent = len(broker.sent)
+    assert service.execute_authorized_cycle(cid)['state'] == 'COMPLETE'
+    assert len(broker.sent) == sent
+
+
+def test_allocation_mock_adapter_rejects_real_account_before_network():
+    from trading.kiwoom_allocation_mock_broker import KiwoomAllocationMockBroker
+    from trading.kiwoom_readonly import KiwoomError
+
+    with pytest.raises(KiwoomError, match='모의투자 설정만'):
+        KiwoomAllocationMockBroker(KiwoomConfig('key', 'secret', 'real'))
+
+
+def test_one_button_stops_after_broker_rejection(flow):
+    service, broker, cid = flow
+    broker.failure = OrderRejected("market closed")
+
+    result = service.execute_authorized_cycle(cid)
+
+    assert result['state'] == 'SELL_PENDING'
+    assert result['orders'][0]['state'] == 'REJECTED'
+    assert any('주문 거절' in blocker for blocker in result['blockers'])
+    assert len(broker.sent) == 1
+
+
 @pytest.mark.parametrize('state,filled', [('OPEN', 0), ('PARTIAL', 1), ('CANCELED', 1), ('REJECTED', 0)])
 def test_incomplete_sales_never_advance(flow, state, filled):
     service, broker, cid = flow

@@ -3,7 +3,7 @@
 Official contracts: docs/kiwoom_execution_evidence.md.
 Cash reservation semantics remain unverified; this module cannot enable trading.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 import time
@@ -51,10 +51,25 @@ def order_date(value):
 
 
 class ExecutionEvidence:
-    def __init__(self, client, token, *, account='account2', max_pages=100):
+    def __init__(self, client, token, *, account='account2', max_pages=100,
+                 rate_limit_delays=(2, 4, 8, 16), sleeper=time.sleep):
         if account != 'account2' or not 1 <= max_pages <= 100:
             raise KiwoomError('account2 및 유효한 페이지 제한이 필요합니다.')
         self.client, self.token, self.max_pages = client, token, max_pages
+        self.rate_limit_delays = tuple(rate_limit_delays)
+        self.sleeper = sleeper
+
+    def _post_read_only(self, url, headers, payload):
+        response = None
+        for attempt in range(len(self.rate_limit_delays) + 1):
+            response = self.client.session.post(
+                url, headers=dict(headers), json=payload,
+                timeout=self.client.config.timeout_seconds)
+            if getattr(response, 'status_code', None) != 429:
+                return response
+            if attempt < len(self.rate_limit_delays):
+                self.sleeper(self.rate_limit_delays[attempt])
+        return response
 
     def rows(self, api_id, payload):
         if api_id not in {'ust21150', 'ust21050', 'ust21110', 'ust31490'}:
@@ -63,9 +78,27 @@ class ExecutionEvidence:
         headers = {'Content-Type': 'application/json;charset=UTF-8',
                    'authorization': 'Bearer ' + self.token, 'api-id': api_id}
         for page in range(self.max_pages):
-            response = self.client.session.post(
-                self.client.config.base_url + ('/api/us/ordr' if api_id == 'ust31490' else '/api/us/acnt'), headers=dict(headers),
-                json=payload, timeout=self.client.config.timeout_seconds)
+            response = self._post_read_only(
+                self.client.config.base_url + ('/api/us/ordr' if api_id == 'ust31490' else '/api/us/acnt'),
+                headers, payload)
+            try:
+                raw = response.json()
+            except (TypeError, ValueError):
+                raw = None
+            # The real server reports an empty account result as code 20,
+            # rather than return_code=0 with result_list=[]. Accept only the
+            # exact API-specific no-data message; every other code 20 remains
+            # an error.
+            empty_phrase = {
+                'ust21050': '미체결내역이 없습니다',
+                'ust21150': '체결내역이 없습니다',
+            }.get(api_id)
+            if (empty_phrase and isinstance(raw, dict)
+                    and raw.get('return_code') in (20, '20')
+                    and empty_phrase in str(raw.get('return_msg') or '')):
+                if response.headers.get('cont-yn') not in (None, '', 'N'):
+                    raise KiwoomError('무자료 응답에 잘못된 연속조회 표시가 있습니다.')
+                return []
             data = self.client._parse_response(response, '주문 검증 조회')
             code = data.get('return_code')
             if type(code) not in (int, str) or code not in (0, '0'):
@@ -146,6 +179,11 @@ class ExecutionEvidence:
         raw_state = row.get('ord_stat_nm')
         if modified or raw_state == '정정완료':
             state = 'MODIFIED'
+        elif cancelled == qty and remaining == 0:
+            # The live overseas mock marks the original row as 무효주문 after
+            # cancellation while also setting cncl_qty to the full quantity.
+            # The explicit quantity fields are the stronger cancellation proof.
+            state = 'CANCELLED'
         elif raw_state == '무효주문':
             state = 'REJECTED'
         elif cancelled or raw_state == '취소완료':
@@ -167,22 +205,48 @@ class ExecutionEvidence:
         # distinguished from this request. Never auto-adopt a ticker/time match.
         if not intent.get('order_number'):
             return None
-        day = datetime.fromtimestamp(intent['created_at'], KST).strftime('%Y%m%d')
         number = order_number(intent['order_number'])
-        candidates = [r for r in self.history(day) if r['order_number'] == number]
-        if len(candidates) != 1:
-            return None
-        row = candidates[0]
-        if (row['ticker'] != intent['ticker'] or row['side'] != intent['side'] or
-            row['quantity'] != intent['quantity'] or amount(row['price']) != amount(intent['price']) or
-            not intent['created_at'] - 1 <= row['ordered_at'] <= intent['created_at'] + 120):
-            return None
-        return {**row, 'matched_intent_id': intent['id']}
+        created = datetime.fromtimestamp(intent['created_at'], KST)
+        # The live mock response uses the US trading date in ord_dt while ord_time
+        # is KST.  During the post-midnight KST session the row is therefore on
+        # the previous calendar date.  Only fall back when the current date has
+        # no matching order number, and still require the full identity and time.
+        for offset in (0, 1):
+            day = (created - timedelta(days=offset)).strftime('%Y%m%d')
+            candidates = [r for r in self.history(day) if r['order_number'] == number]
+            if not candidates:
+                continue
+            if len(candidates) != 1:
+                return None
+            row = candidates[0]
+            observed_at = row['ordered_at'] + offset * 86400
+            if (row['ticker'] != intent['ticker'] or row['side'] != intent['side'] or
+                row['quantity'] != intent['quantity'] or
+                amount(row['price']) != amount(intent['price']) or
+                not intent['created_at'] - 1 <= observed_at <= intent['created_at'] + 120):
+                return None
+            return {**row, 'ordered_at': observed_at,
+                    'matched_intent_id': intent['id']}
+        return None
 
-    def cash_check(self, day):
+    def cash_check(self, day, *, include_previous_day=False):
         started = time.time()
         day = order_date(day)
         pending = self.rows('ust21050', {'ord_dt': day, 'slby_tp': '0', 'stex_tp': '', 'stk_cd': ''})
+        if include_previous_day:
+            previous = (datetime.strptime(day, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
+            older = self.rows('ust21050', {
+                'ord_dt': previous, 'slby_tp': '0', 'stex_tp': '', 'stk_cd': ''
+            })
+            combined, seen = [], set()
+            for row in pending + older:
+                key = (str(row.get('ord_no') or '').strip(),
+                       str(row.get('stk_cd') or '').strip(),
+                       str(row.get('ord_time') or '').strip())
+                if key not in seen:
+                    seen.add(key)
+                    combined.append(row)
+            pending = combined
         usd = [r for r in self.rows('ust21110', {}) if r.get('crnc_code') == 'USD']
         if len(usd) != 1:
             raise KiwoomError('USD 주문가능 금액이 없거나 중복됩니다.')

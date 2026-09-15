@@ -141,9 +141,60 @@ def test_rebalance_http_workflow_uses_server_report_and_confirmation(client, mon
     assert test_client.get(base).json()['state'] == 'BUY_PENDING'
 
 
+def test_one_button_execute_persists_authorization_and_stops_for_unfilled_sell(client, monkeypatch, tmp_path):
+    from tests.test_allocation_rebalance import Broker
+    from trading.allocation_rebalance import Rebalance
+    test_client, api = client
+    broker = Broker()
+    broker.path = tmp_path / 'journal'
+    service = Rebalance(broker.path, broker)
+    monkeypatch.setattr(api, '_rebalance_service', lambda: service)
+    monkeypatch.setenv('ALLOCATION_LIQUIDATION_SCOPE', 'SPY,QQQ')
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
+    api.ASSET_ALLOCATION_CACHE_DIR.mkdir()
+    api._allocation_cache_path('easy', api.date(2026, 8, 31)).write_text(json.dumps({
+        'report': {'combined_allocations': {'SPY': .5, 'QQQ': .5}}}))
+    cycle = test_client.post('/api/asset-allocation/rebalance/preview?as_of=2026-08-31').json()
+    base = '/api/asset-allocation/rebalance/' + cycle['id']
+
+    assert test_client.post(base + '/execute', json={'confirmation':'wrong'}).status_code == 422
+    result = test_client.post(base + '/execute', json={'confirmation':'account2'}).json()
+
+    assert result['state'] == 'SELL_PENDING'
+    assert result['blockers']
+    assert len(broker.sent) == 1
+    assert test_client.post(base + '/advance').json()['state'] == 'SELL_PENDING'
+    assert len(broker.sent) == 1
+
+
 def test_capability_stays_disabled_even_with_trading_flag(client, monkeypatch):
     test_client, _ = client
     monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
     data = test_client.get('/api/asset-allocation/rebalance/capabilities').json()
     assert data['execution_enabled'] is False
     assert '미체결' in data['reason']
+
+
+def test_capability_enables_only_explicit_mock_user_trigger(client, monkeypatch):
+    test_client, _ = client
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
+    monkeypatch.setenv('ALLOCATION_EXECUTION_MODE', 'mock')
+
+    data = test_client.get('/api/asset-allocation/rebalance/capabilities').json()
+
+    assert data['execution_enabled'] is True
+    assert data['execution_mode'] == 'mock'
+    assert data['user_trigger_required'] is True
+
+
+def test_capability_enables_explicit_real_user_trigger(client, monkeypatch):
+    test_client, _ = client
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
+    monkeypatch.setenv('ALLOCATION_EXECUTION_MODE', 'real')
+
+    data = test_client.get('/api/asset-allocation/rebalance/capabilities').json()
+
+    assert data['execution_enabled'] is True
+    assert data['execution_mode'] == 'real'
+    assert data['per_order_buy_capacity_required'] is True
+    assert data['user_trigger_required'] is True

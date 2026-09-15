@@ -29,6 +29,7 @@ OVERSEAS_CURRENCY_API_ID = "ust21120"
 OVERSEAS_VALUATION_API_ID = "ust21121"
 OVERSEAS_QUOTE_PATH = "/api/us/mrkcond"
 OVERSEAS_QUOTE_API_ID = "usa20100"
+OVERSEAS_ORDERBOOK_API_ID = "usa20101"
 REAL_BASE_URL = "https://api.kiwoom.com"
 MOCK_BASE_URL = "https://mockapi.kiwoom.com"
 DEFAULT_PROFILES_FILE = Path.home() / ".config" / "mystockapp" / "kiwoom_profiles.json"
@@ -354,6 +355,25 @@ class KiwoomReadOnlyClient:
             api_id=OVERSEAS_QUOTE_API_ID,
             payload={"stex_tp": exchange, "stk_cd": ticker},
             operation="미국주식 현재가 조회",
+        )
+        return {**report, "quote": report["summary"]}
+
+    def get_overseas_orderbook(
+        self, token: str, *, exchange: str, ticker: str
+    ) -> dict[str, Any]:
+        """``usa20101`` 미국주식 10호가와 증권사 제공 시각을 조회한다."""
+        exchange = exchange.strip().upper()
+        ticker = ticker.strip().upper()
+        if exchange not in {"NA", "ND", "NY"}:
+            raise KiwoomError("exchange는 NA, ND 또는 NY여야 합니다.")
+        if not ticker or len(ticker) > 12:
+            raise KiwoomError("유효한 미국주식 종목코드가 필요합니다.")
+        report = self._post_read_only_report(
+            token,
+            path=OVERSEAS_QUOTE_PATH,
+            api_id=OVERSEAS_ORDERBOOK_API_ID,
+            payload={"stex_tp": exchange, "stk_cd": ticker},
+            operation="미국주식 호가 조회",
         )
         return {**report, "quote": report["summary"]}
 

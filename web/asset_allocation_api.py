@@ -18,7 +18,10 @@ from trading.allocation_rebalance import (
 from starlette.concurrency import run_in_threadpool
 
 from web.asset_allocation_sizing import build_live_allocation_sizing
+from trading.asset_allocation_universe import allocation_scope
 from trading.kiwoom_execution_evidence import ExecutionEvidence, EvidenceBroker, order_date
+from trading.kiwoom_allocation_mock_broker import KiwoomAllocationMockBroker
+from trading.kiwoom_allocation_live_broker import KiwoomAllocationLiveBroker
 from trading.kiwoom_readonly import KiwoomConfig, KiwoomReadOnlyClient, KiwoomError
 from web.kiwoom_holdings import _get_token
 
@@ -215,8 +218,23 @@ def _rebalance_service():
     path = os.getenv("ALLOCATION_JOURNAL_PATH")
     if not path:
         raise RebalanceBlocked(LIVE_BLOCK_REASON + " 영속 주문 저널 경로도 설정해야 합니다.")
-    return Rebalance(path, EvidenceBroker(_execution_evidence),
-                     reserve_bps=int(os.getenv("ALLOCATION_RESERVE_BPS", "100")))
+    mode = os.getenv("ALLOCATION_EXECUTION_MODE", "disabled").lower()
+    if mode == "mock":
+        profiles_file = os.getenv("KIWOOM_OVERSEAS_MOCK_PROFILES_FILE") or str(
+            Path.home() / ".config/mystockapp/kiwoom_overseas_mock_profiles.json"
+        )
+        config = KiwoomConfig.from_profile("account2", profiles_file)
+        broker = KiwoomAllocationMockBroker(config)
+    elif mode == "real":
+        config = KiwoomConfig.from_profile("account2")
+        broker = KiwoomAllocationLiveBroker(
+            config, reserve_bps=int(os.getenv("ALLOCATION_RESERVE_BPS", "100"))
+        )
+    elif mode == "disabled":
+        broker = EvidenceBroker(_execution_evidence)
+    else:
+        raise RebalanceBlocked("ALLOCATION_EXECUTION_MODE는 disabled, mock 또는 real이어야 합니다.")
+    return Rebalance(path, broker, reserve_bps=int(os.getenv("ALLOCATION_RESERVE_BPS", "100")))
 
 
 class RebalanceConfirmation(BaseModel):
@@ -224,11 +242,26 @@ class RebalanceConfirmation(BaseModel):
     side: str
 
 
+class RebalanceExecution(BaseModel):
+    confirmation: str
+
+
 @router.get("/asset-allocation/rebalance/capabilities")
 def rebalance_capabilities():
-    return {"execution_enabled": False, "reason": LIVE_BLOCK_REASON,
+    mode = os.getenv("ALLOCATION_EXECUTION_MODE", "disabled").lower()
+    enabled = (mode in {"mock", "real"}
+               and os.getenv("KIWOOM_TRADING_ENABLED", "false").lower() == "true")
+    reason = ({"mock": "키움 모의계좌 · 사용자 버튼 실행만 허용",
+               "real": "키움 account2 실계좌 · 사용자 버튼 실행만 허용"}.get(mode)
+              if enabled else LIVE_BLOCK_REASON)
+    return {"execution_enabled": enabled,
+            "reason": reason,
+            "execution_mode": mode if mode in {"mock", "real"} else "disabled",
+            "user_trigger_required": True,
             "order_history_implemented": True, "cash_validation_implemented": True,
-            "cash_reservation_semantics_verified": False, "buy_capacity_implemented": True}
+            "cash_reservation_semantics_verified": mode == "mock",
+            "per_order_buy_capacity_required": mode == "real",
+            "buy_capacity_implemented": True}
 
 
 @router.get("/asset-allocation/rebalance/buy-capacity")
@@ -261,7 +294,7 @@ def preview_rebalance(profile: str = "easy", as_of: Optional[str] = None):
     cached = _read_allocation_cache(profile, requested)
     if not cached:
         raise HTTPException(status_code=409, detail="월간 배분 보고서가 먼저 필요합니다.")
-    scope = [t.strip().upper() for t in os.getenv("ALLOCATION_LIQUIDATION_SCOPE", "").split(",") if t.strip()]
+    scope = allocation_scope()
     try:
         return _rebalance_service().create(_allocation_key(profile, requested),
                                           cached["report"]["combined_allocations"], scope)
@@ -293,6 +326,28 @@ def confirm_rebalance(cycle_id: str, body: RebalanceConfirmation):
         raise HTTPException(status_code=503, detail="실계좌 주문 기능이 비활성화되어 있습니다.")
     try:
         return _rebalance_service().confirm(cycle_id, body.side)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/asset-allocation/rebalance/{cycle_id}/execute")
+def execute_rebalance(cycle_id: str, body: RebalanceExecution):
+    if body.confirmation != "account2":
+        raise HTTPException(status_code=422, detail="account2 최종 확인이 필요합니다.")
+    if os.getenv("KIWOOM_TRADING_ENABLED", "false").lower() != "true":
+        raise HTTPException(status_code=503, detail="주문 기능이 비활성화되어 있습니다.")
+    try:
+        return _rebalance_service().execute_authorized_cycle(cycle_id)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/asset-allocation/rebalance/{cycle_id}/advance")
+def advance_rebalance(cycle_id: str):
+    if os.getenv("KIWOOM_TRADING_ENABLED", "false").lower() != "true":
+        raise HTTPException(status_code=503, detail="주문 기능이 비활성화되어 있습니다.")
+    try:
+        return _rebalance_service().advance_authorized_cycle(cycle_id)
     except RebalanceBlocked as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
