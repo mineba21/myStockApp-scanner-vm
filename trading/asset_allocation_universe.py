@@ -14,7 +14,7 @@ ETF_EXCHANGES = {
     "GLD": "NY",
     "IEF": "ND",
     "IEMG": "NY",
-    "LQD": "ND",
+    "LQD": "NY",
     "QQQ": "ND",
     "SHY": "ND",
     "SPY": "NY",

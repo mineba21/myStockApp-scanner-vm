@@ -12,7 +12,11 @@ def test_scope_covers_deployed_easy_original_vaa_laa_and_dual(monkeypatch):
         "IEMG", "LQD", "QQQ", "SHY", "SPY", "VTV",
     )
     assert allocation_scope() == list(ETF_ALLOCATION_SCOPE)
-    assert ETF_EXCHANGES["EEM"] == "NY"
+    assert ETF_EXCHANGES == {
+        "AGG": "NY", "BIL": "NY", "EEM": "NY", "EFA": "NY",
+        "GLD": "NY", "IEF": "ND", "IEMG": "NY", "LQD": "NY",
+        "QQQ": "ND", "SHY": "ND", "SPY": "NY", "VTV": "NY",
+    }
 
 
 def test_explicit_scope_remains_supported(monkeypatch):
