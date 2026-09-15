@@ -60,21 +60,18 @@
 
 ## 배포 상태와 화면 안내
 
-- GitHub main: `9b51582`에 ETF 구현 반영.
-- Sites: v41, 소스 `e298ba454e0f560e45a3107da4fb87bde92acca0`.
-- 계산/API VM: 2026-09-11 `1b9863e` → `9b51582` fast-forward 적용.
-  `mystockapp-scanner.service` 재시작 후 active, `/api/health`에서 status=ok 확인.
+- GitHub main과 계산/API VM: 2026-09-15 `2d7b4c8` 적용.
+- 운영 설정: `ALLOCATION_EXECUTION_MODE=real`, `KIWOOM_TRADING_ENABLED=true`,
+  account2 관리 ETF 12종과 영속 주문 저널 경로 설정.
+- `mystockapp-scanner.service` active, `/api/health` 정상, capabilities에서
+  `execution_enabled=true`, `execution_mode=real`, 사용자 버튼 실행 필수를 확인했다.
 - VM 작업 디렉터리: `/home/ubuntu/apps/myStockApp/stock-scanner`.
 - 사이트: https://mystockapp-scanner.hyegang21.chatgpt.site/ (기존 소유자 접근 제한 유지).
 
-“계산 서버 업데이트가 필요합니다”는 사이트가 구형 sizing 응답을 받았다는 뜻이다.
-VM 업데이트를 적용했으므로 새 조회는 차액 방식의 응답을 사용할 수 있다.
-인증된 사이트 화면에서 새 조회까지의 확인은 별도이며, 기존 화면은 새로고침이 필요할 수 있다.
-
-“주문 결과를 증권사와 확인하는 연결 기능…”은 위 실연결 미완료로 인한 실제 제한이다.
-STEP1 로컬 변경에서 주문내역 조회는 구현했지만 현금 의미 등 미확인 항목은 남아 있다.
-서버 배포와 별개이며 아직 해결되지 않았다. 주문 가능으로 표시하지 않는다.
-live sizing도 시세 원시각 파서 미구현으로 계획용 추정치다.
+“계산 서버 업데이트가 필요합니다”와 “실계좌 주문 연결이 차단되어 있습니다”는 이전
+구현 상태의 안내다. 현재 API 서버에서는 시각이 확인된 실계좌 시세로 차액 수량을 계산하고,
+사용자 승인 후 실계좌 주문 흐름을 제공한다. 사이트 화면도 차액 표·단일 실행 버튼·체결
+진행 상태 API를 사용한다. 실제 주문은 월간 종목·비중을 확인하고 버튼을 누를 때만 시작한다.
 
 ## 2026-09-15 한 버튼 최종 모의 검증
 
