@@ -131,6 +131,7 @@ def calculate_allocation_sizing(
 
 def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
     from trading.asset_allocation_universe import ETF_EXCHANGES, allocation_scope
+    from trading.kiwoom_allocation_live_broker import KiwoomAllocationLiveBroker
     from trading.kiwoom_readonly import KiwoomReadOnlyClient, load_profile_configs
     from web.kiwoom_holdings import (
         _get_token,
@@ -153,27 +154,35 @@ def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
     missing = sorted(set(str(t).upper() for t in report.get("combined_allocations", {})) | set(scope))
 
     fetched: dict[str, float | None] = {}
+    quote_time_verified = False
     if missing:
         config = load_profile_configs()["account2"]
         client = KiwoomReadOnlyClient(config)
         token = _get_token("account2", config, client)
-        for ticker in missing:
-            quote = client.get_overseas_quote(
-                token, exchange=ETF_EXCHANGES[ticker], ticker=ticker
-            )["quote"]
-            try:
-                fetched[ticker] = abs(float(str(quote.get("cur_prc") or "0").replace(",", ""))) or None
-            except (TypeError, ValueError):
-                fetched[ticker] = None
+        if config.mode == "real":
+            # Use the same timestamped quote contract as the actual preview.
+            live = KiwoomAllocationLiveBroker(config, client=client, token=token)
+            quotes = live.quotes(missing)
+            fetched = {ticker: float(row["limit_price"])
+                       for ticker, row in quotes.items()}
+            quote_time_verified = True
+        else:
+            for ticker in missing:
+                quote = client.get_overseas_quote(
+                    token, exchange=ETF_EXCHANGES[ticker], ticker=ticker
+                )["quote"]
+                try:
+                    fetched[ticker] = abs(float(str(quote.get("cur_prc") or "0").replace(",", ""))) or None
+                except (TypeError, ValueError):
+                    fetched[ticker] = None
 
     result = calculate_allocation_sizing(
         {**report, "liquidation_scope": scope},
         holdings, summary, lambda ticker: fetched.get(ticker)
     )
 
-    # A successful HTTP quote refresh does not establish exchange quote time.
-    # No source timestamp parser is implemented yet; never mark this executable.
-    result["quote_time_verified"] = False
-    result["plan_valid"] = False
-    result["validation_errors"].append("증권사 시세 기준시각 미검증 — 계획용 참고값입니다.")
+    result["quote_time_verified"] = quote_time_verified
+    if not quote_time_verified:
+        result["plan_valid"] = False
+        result["validation_errors"].append("증권사 시세 기준시각 미검증 — 계획용 참고값입니다.")
     return result
