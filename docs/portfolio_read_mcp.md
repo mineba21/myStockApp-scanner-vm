@@ -48,7 +48,28 @@
 - OAuth: authorization code + S256 PKCE, DCR, 소유자 승인
 - scope: `portfolio:read`
 - 서비스: `mystockapp-portfolio-mcp`, loopback 8003
-- 상태: 구현·격리 테스트 후 운영 배포 및 ChatGPT/Claude 연결 결과를 아래에 기록한다.
+- 상태: 2026-09-15 운영 배포와 ChatGPT·Claude 웹 연결을 완료했다.
+
+### 웹 연결 확인 결과
+
+- ChatGPT: `myStockApp 계좌현황` 플러그인으로 OAuth 연결했다.
+  - 앱 ID: `asdk_app_6aa889a2b1c08191a8c335fb7c9ed2db`
+  - 버전 ID: `asdk_app_v_6aa889a2b1c88191b0d7274d7296b112`
+  - 개발자 화면에서 `portfolio_holdings`, `portfolio_overview` 두 읽기 작업과
+    `portfolio:read` 범위를 확인했다.
+- Claude: `MyStockApp Portfolio` 사용자 지정 커넥터로 OAuth 연결했다.
+  - 연결 화면에서 읽기 전용 도구가 2개인 것을 확인했다.
+  - 표시 이름은 `Portfolio holdings`, `Portfolio overview`이다.
+- 기존 `myStockApp 스캐너`/`MyStockApp Scanner` 연결은 변경하지 않았다.
+- 연결 검증 중에는 도구 목록과 권한만 확인했다. 키움 실계좌 데이터와 주문 API는 호출하지 않았다.
+
+### 사용 예시
+
+- 전체 계좌: `myStockApp 계좌현황으로 전체 계좌를 요약해줘.`
+- 특정 계좌 보유종목: `MyStockApp Portfolio로 account2 보유 종목을 보여줘.`
+
+실제 대화에서 위처럼 요청하면 해당 서비스가 키움 실계좌 조회 API를 호출한다. ChatGPT와
+Claude의 기본 도구 권한 설정에 따라 각 조회 전에 사용자 승인을 요구할 수 있다.
 
 ## 보고 형식
 
