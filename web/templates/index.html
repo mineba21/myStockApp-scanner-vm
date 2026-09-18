@@ -216,6 +216,11 @@
       <option value="30">30일</option>
     </select>
     <button @click="loadResults()" class="btn btn-ghost">↺ 새로고침</button>
+    <label class="inline-flex items-center gap-1.5 text-xs text-slate-600"
+           title="같은 신호 날짜 안에서 Duquesne 신규·증액 후보를 먼저 표시합니다. 기술 필터와 등급은 동일합니다.">
+      <input type="checkbox" x-model="prioritize13f" @change="loadResults()" class="accent-indigo-500">
+      <span>13F 우선</span>
+    </label>
     <!-- Strict 거부 행 opt-in (세션 한정 — 새로고침 시 OFF 리셋) -->
     <label class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md border border-slate-200 bg-white text-slate-600 cursor-pointer hover:bg-slate-50"
            title="Strict Weinstein 거부 신호 (QA·백테스팅용) 도 결과에 포함. 매수/감시 버튼은 자동 비활성.">
@@ -367,6 +372,27 @@
         </div>
         <p class="font-bold text-slate-900" x-text="r.name"></p>
         <p class="text-xs text-slate-400 mb-3" x-text="r.ticker"></p>
+        <template x-if="r.market === 'US'">
+          <div class="text-xs rounded-lg border border-indigo-100 bg-white/70 p-2 mb-3">
+            <template x-if="r['13F_CHANGE_TYPE']">
+              <div>
+                <span class="font-semibold text-indigo-700"
+                      x-text="'13F · Duquesne '+({NEW:'신규',INCREASED:'수량 증가',HELD:'유지',DECREASED:'수량 감소'}[r['13F_CHANGE_TYPE']]||'')"></span>
+                <span x-text="' · 비중 '+r['13F_WEIGHT'].toFixed(2)+'%'"
+                      title="비옵션 롱 보유액 기준 · 분기말 보고 비중"></span>
+                <div class="text-slate-500 mt-1">
+                  <span x-text="'기준 '+r['13F_REPORT_DATE']+' · 공개 '+r['13F_FILED_AT']?.slice(0,10)"></span>
+                  <a :href="r['13F_SOURCE_URL']" target="_blank" rel="noopener noreferrer"
+                     class="text-indigo-600 underline ml-1">SEC 원본</a>
+                </div>
+                <p x-show="r['13F_STATUS']==='STALE'" class="text-amber-700 mt-1">갱신 필요 · 우선순위 미반영</p>
+                <p x-show="r['13F_INCREASED'] || r['13F_CHANGE_TYPE']==='DECREASED'" class="text-slate-500 mt-1">보고 수량 변화 · 분할/합병 미보정</p>
+              </div>
+            </template>
+            <span x-show="!r['13F_CHANGE_TYPE']" class="text-slate-400"
+                  x-text="r['13F_STATUS']==='NO_MATCH' ? '13F · 연결된 보유 정보 없음' : r['13F_STATUS']==='STALE' ? '13F · 갱신 필요' : '13F · 해당 시점 자료 없음'"></span>
+          </div>
+        </template>
         <div class="grid grid-cols-3 gap-1.5 text-xs mb-3">
           <div class="bg-white/70 rounded-lg p-2 text-center">
             <div class="text-slate-400 mb-0.5">현재가</div>
@@ -1620,7 +1646,7 @@ function app() {
     krUniverse: 'kospi+kosdaq',
     usUniverse: 'sp500+nasdaq100',
     scanProg: {progress:0,total:0,current_stock:''},
-    results: [], scanLogs: [], nextSchedules: [],
+    results: [], scanLogs: [], nextSchedules: [], prioritize13f: true,
     // include_rejected: 세션 한정 (새로고침 시 OFF 리셋 — localStorage 미사용)
     filter: {market:'ALL', signal_type:'ALL', days:7, include_rejected:false},
     stats: {buy:0,breakout:0,rebreakout:0,rebound:0,kr:0,us:0},
@@ -1735,7 +1761,7 @@ function app() {
       try {
         const {market,signal_type,days,include_rejected} = this.filter;
         const inc = include_rejected ? '&include_rejected=true' : '';
-        const data = await (await fetch(`/api/results?market=${market}&signal_type=${signal_type}&days=${days}&limit=200${inc}`)).json();
+        const data = await (await fetch(`/api/results?market=${market}&signal_type=${signal_type}&days=${days}&limit=200${inc}&prioritize_13f=${this.prioritize13f}`)).json();
         // 거부 사유 펼침 상태(_reasonsOpen)는 카드별 로컬 토글 — 응답에 포함되지 않음.
         this.results = data.map(r => ({...r, _reasonsOpen: false}));
 

@@ -1,0 +1,608 @@
+{
+  "schema_version": 1,
+  "snapshots": [
+    {
+      "manager": "Duquesne Family Office",
+      "manager_cik": "0001536411",
+      "report_date": "2026-06-30",
+      "filed_at": "2026-08-14T19:55:57.000Z",
+      "first_tradable": "2026-08-17",
+      "accession": "0001536411-26-000006",
+      "source_url": "https://www.sec.gov/Archives/edgar/data/1536411/000153641126000006/xslForm13F_X02/form13f_20260630.xml",
+      "weight_basis": "non_option_long",
+      "mapping_source": "research CUSIP mapping; unmapped securities omitted",
+      "corporate_actions_adjusted": false,
+      "unmapped_count": 2,
+      "holdings": {
+        "TXG": {
+          "cusip": "88025U109",
+          "change_type": "NEW",
+          "weight_pct": 0.3549430207936209,
+          "shares": 403100.0,
+          "previous_shares": 0
+        },
+        "ADMA": {
+          "cusip": "000899104",
+          "change_type": "INCREASED",
+          "weight_pct": 0.535181961407554,
+          "shares": 2784110.0,
+          "previous_shares": 1545610.0
+        },
+        "AMD": {
+          "cusip": "007903107",
+          "change_type": "NEW",
+          "weight_pct": 0.97257373306815,
+          "shares": 72900.0,
+          "previous_shares": 0
+        },
+        "AEVA": {
+          "cusip": "00835Q202",
+          "change_type": "NEW",
+          "weight_pct": 0.47501044963277006,
+          "shares": 720175.0,
+          "previous_shares": 0
+        },
+        "AA": {
+          "cusip": "013872106",
+          "change_type": "DECREASED",
+          "weight_pct": 0.22229010017867723,
+          "shares": 185640.0,
+          "previous_shares": 1493390.0
+        },
+        "GOOGL": {
+          "cusip": "02079K305",
+          "change_type": "NEW",
+          "weight_pct": 2.760172889748336,
+          "shares": 336300.0,
+          "previous_shares": 0
+        },
+        "AMZN": {
+          "cusip": "023135106",
+          "change_type": "INCREASED",
+          "weight_pct": 2.964595266201524,
+          "shares": 541600.0,
+          "previous_shares": 45800.0
+        },
+        "ARM": {
+          "cusip": "042068205",
+          "change_type": "DECREASED",
+          "weight_pct": 0.22874360964765217,
+          "shares": 28090.0,
+          "previous_shares": 106700.0
+        },
+        "AUR": {
+          "cusip": "051774107",
+          "change_type": "NEW",
+          "weight_pct": 0.09926002820252537,
+          "shares": 633700.0,
+          "previous_shares": 0
+        },
+        "BIDU": {
+          "cusip": "056752108",
+          "change_type": "NEW",
+          "weight_pct": 0.23149955675184075,
+          "shares": 88200.0,
+          "previous_shares": 0
+        },
+        "TBBB": {
+          "cusip": "G0896C103",
+          "change_type": "DECREASED",
+          "weight_pct": 2.7769612008580182,
+          "shares": 2901733.0,
+          "previous_shares": 3109202.0
+        },
+        "BEAM": {
+          "cusip": "07373V105",
+          "change_type": "NEW",
+          "weight_pct": 0.12107794277735162,
+          "shares": 153600.0,
+          "previous_shares": 0
+        },
+        "BLTE": {
+          "cusip": "07782B104",
+          "change_type": "HELD",
+          "weight_pct": 0.3752221982352752,
+          "shares": 106100.0,
+          "previous_shares": 106100.0
+        },
+        "BTDR": {
+          "cusip": "G11448100",
+          "change_type": "NEW",
+          "weight_pct": 1.4852258268989624,
+          "shares": 4074993.0,
+          "previous_shares": 0
+        },
+        "CAI": {
+          "cusip": "142152107",
+          "change_type": "HELD",
+          "weight_pct": 0.7753168190858524,
+          "shares": 1894450.0,
+          "previous_shares": 1894450.0
+        },
+        "CVNA": {
+          "cusip": "146869102",
+          "change_type": "NEW",
+          "weight_pct": 0.22826131890441917,
+          "shares": 151000.0,
+          "previous_shares": 0
+        },
+        "CVCO": {
+          "cusip": "149568107",
+          "change_type": "NEW",
+          "weight_pct": 0.5573443693704039,
+          "shares": 39500.0,
+          "previous_shares": 0
+        },
+        "CCC": {
+          "cusip": "12510Q100",
+          "change_type": "NEW",
+          "weight_pct": 0.138761936695895,
+          "shares": 1170900.0,
+          "previous_shares": 0
+        },
+        "CDW": {
+          "cusip": "12514G108",
+          "change_type": "NEW",
+          "weight_pct": 2.4029332463678914,
+          "shares": 743950.0,
+          "previous_shares": 0
+        },
+        "SKY": {
+          "cusip": "830830105",
+          "change_type": "NEW",
+          "weight_pct": 0.5148568515141633,
+          "shares": 254400.0,
+          "previous_shares": 0
+        },
+        "CLF": {
+          "cusip": "185899101",
+          "change_type": "INCREASED",
+          "weight_pct": 0.9092328821235491,
+          "shares": 4216184.0,
+          "previous_shares": 2313455.0
+        },
+        "CPNG": {
+          "cusip": "22266T109",
+          "change_type": "HELD",
+          "weight_pct": 1.0641171093789472,
+          "shares": 2667485.0,
+          "previous_shares": 2667485.0
+        },
+        "CRH": {
+          "cusip": "G25508105",
+          "change_type": "INCREASED",
+          "weight_pct": 1.3602895581757468,
+          "shares": 553555.0,
+          "previous_shares": 377555.0
+        },
+        "DHI": {
+          "cusip": "23331A109",
+          "change_type": "NEW",
+          "weight_pct": 1.118478166009067,
+          "shares": 299000.0,
+          "previous_shares": 0
+        },
+        "DAKT": {
+          "cusip": "234264109",
+          "change_type": "INCREASED",
+          "weight_pct": 0.5045220498734561,
+          "shares": 1123109.0,
+          "previous_shares": 562637.0
+        },
+        "DHR": {
+          "cusip": "235851102",
+          "change_type": "NEW",
+          "weight_pct": 0.2200394100435899,
+          "shares": 50300.0,
+          "previous_shares": 0
+        },
+        "DBVT": {
+          "cusip": "23306J309",
+          "change_type": "HELD",
+          "weight_pct": 0.14438866203361336,
+          "shares": 383363.0,
+          "previous_shares": 383363.0
+        },
+        "DFTX": {
+          "cusip": "24477V105",
+          "change_type": "NEW",
+          "weight_pct": 0.385235472713827,
+          "shares": 356600.0,
+          "previous_shares": 0
+        },
+        "DAL": {
+          "cusip": "247361702",
+          "change_type": "NEW",
+          "weight_pct": 1.2970635383604872,
+          "shares": 603000.0,
+          "previous_shares": 0
+        },
+        "LLY": {
+          "cusip": "532457108",
+          "change_type": "NEW",
+          "weight_pct": 0.34102548791746856,
+          "shares": 12380.0,
+          "previous_shares": 0
+        },
+        "ENTG": {
+          "cusip": "29362U104",
+          "change_type": "NEW",
+          "weight_pct": 0.4886523877985035,
+          "shares": 118300.0,
+          "previous_shares": 0
+        },
+        "EQIX": {
+          "cusip": "29444U700",
+          "change_type": "NEW",
+          "weight_pct": 0.44168645589795646,
+          "shares": 18450.0,
+          "previous_shares": 0
+        },
+        "FFIV": {
+          "cusip": "315616102",
+          "change_type": "NEW",
+          "weight_pct": 0.2101639329202475,
+          "shares": 22000.0,
+          "previous_shares": 0
+        },
+        "FLR": {
+          "cusip": "343412102",
+          "change_type": "NEW",
+          "weight_pct": 1.1817730845019314,
+          "shares": 982200.0,
+          "previous_shares": 0
+        },
+        "FOXA": {
+          "cusip": "35137L105",
+          "change_type": "NEW",
+          "weight_pct": 2.6409322450404433,
+          "shares": 2204600.0,
+          "previous_shares": 0
+        },
+        "FOX": {
+          "cusip": "35137L204",
+          "change_type": "NEW",
+          "weight_pct": 0.6805122387017651,
+          "shares": 632600.0,
+          "previous_shares": 0
+        },
+        "FTAI": {
+          "cusip": "G3730V105",
+          "change_type": "NEW",
+          "weight_pct": 0.1255104243699216,
+          "shares": 20200.0,
+          "previous_shares": 0
+        },
+        "ARGT": {
+          "cusip": "37950E259",
+          "change_type": "DECREASED",
+          "weight_pct": 0.6894231343386416,
+          "shares": 328800.0,
+          "previous_shares": 387400.0
+        },
+        "GGAL": {
+          "cusip": "399909100",
+          "change_type": "NEW",
+          "weight_pct": 0.06837045440974503,
+          "shares": 59500.0,
+          "previous_shares": 0
+        },
+        "HUT": {
+          "cusip": "44812J104",
+          "change_type": "NEW",
+          "weight_pct": 0.8329161135633937,
+          "shares": 314150.0,
+          "previous_shares": 0
+        },
+        "PURR": {
+          "cusip": "44916Y106",
+          "change_type": "NEW",
+          "weight_pct": 0.5316681288497136,
+          "shares": 2941500.0,
+          "previous_shares": 0
+        },
+        "INSM": {
+          "cusip": "457669307",
+          "change_type": "INCREASED",
+          "weight_pct": 3.488569709385378,
+          "shares": 1424690.0,
+          "previous_shares": 1154090.0
+        },
+        "RSP": {
+          "cusip": "46137V357",
+          "change_type": "NEW",
+          "weight_pct": 0.3635553554942102,
+          "shares": 74400.0,
+          "previous_shares": 0
+        },
+        "IREN": {
+          "cusip": "Q4982L109",
+          "change_type": "NEW",
+          "weight_pct": 0.09147447763319262,
+          "shares": 87100.0,
+          "previous_shares": 0
+        },
+        "EWZ": {
+          "cusip": "464286400",
+          "change_type": "HELD",
+          "weight_pct": 2.7226001442278984,
+          "shares": 3436170.0,
+          "previous_shares": 3436170.0
+        },
+        "LRCX": {
+          "cusip": "512807306",
+          "change_type": "NEW",
+          "weight_pct": 0.43390090532862374,
+          "shares": 43600.0,
+          "previous_shares": 0
+        },
+        "GLUE": {
+          "cusip": "61225M102",
+          "change_type": "NEW",
+          "weight_pct": 0.1654027587030513,
+          "shares": 297600.0,
+          "previous_shares": 0
+        },
+        "NTRA": {
+          "cusip": "632307104",
+          "change_type": "INCREASED",
+          "weight_pct": 19.86401697663416,
+          "shares": 3186306.0,
+          "previous_shares": 3063606.0
+        },
+        "NVTS": {
+          "cusip": "63942X106",
+          "change_type": "NEW",
+          "weight_pct": 0.12803670921542779,
+          "shares": 311100.0,
+          "previous_shares": 0
+        },
+        "NAMS": {
+          "cusip": "N62509109",
+          "change_type": "HELD",
+          "weight_pct": 2.3895669029125766,
+          "shares": 3070146.0,
+          "previous_shares": 3070146.0
+        },
+        "NUVB": {
+          "cusip": "67080N101",
+          "change_type": "HELD",
+          "weight_pct": 0.5922071002383894,
+          "shares": 4539800.0,
+          "previous_shares": 4539800.0
+        },
+        "OLMA": {
+          "cusip": "68062P106",
+          "change_type": "HELD",
+          "weight_pct": 0.2835180583434002,
+          "shares": 986827.0,
+          "previous_shares": 986827.0
+        },
+        "PANW": {
+          "cusip": "697435105",
+          "change_type": "NEW",
+          "weight_pct": 0.9135964650385143,
+          "shares": 116650.0,
+          "previous_shares": 0
+        },
+        "PTGX": {
+          "cusip": "74366E102",
+          "change_type": "INCREASED",
+          "weight_pct": 0.5880961458079748,
+          "shares": 208900.0,
+          "previous_shares": 159700.0
+        },
+        "PCT": {
+          "cusip": "74623V103",
+          "change_type": "INCREASED",
+          "weight_pct": 0.49942354773070724,
+          "shares": 2681415.0,
+          "previous_shares": 963189.0
+        },
+        "Q": {
+          "cusip": "74743L100",
+          "change_type": "HELD",
+          "weight_pct": 0.4712899210421155,
+          "shares": 125655.0,
+          "previous_shares": 125655.0
+        },
+        "RMBS": {
+          "cusip": "750917106",
+          "change_type": "NEW",
+          "weight_pct": 0.5273964108382213,
+          "shares": 173000.0,
+          "previous_shares": 0
+        },
+        "RDDT": {
+          "cusip": "75734B100",
+          "change_type": "NEW",
+          "weight_pct": 0.22543647312262588,
+          "shares": 56550.0,
+          "previous_shares": 0
+        },
+        "RLAY": {
+          "cusip": "75943R102",
+          "change_type": "NEW",
+          "weight_pct": 0.14996945491959524,
+          "shares": 349000.0,
+          "previous_shares": 0
+        },
+        "RGEN": {
+          "cusip": "759916109",
+          "change_type": "NEW",
+          "weight_pct": 0.24252334516859506,
+          "shares": 77400.0,
+          "previous_shares": 0
+        },
+        "RVMD": {
+          "cusip": "76155X100",
+          "change_type": "INCREASED",
+          "weight_pct": 1.7186775128496035,
+          "shares": 399587.0,
+          "previous_shares": 315860.0
+        },
+        "RYTM": {
+          "cusip": "76243J105",
+          "change_type": "NEW",
+          "weight_pct": 0.5192204344291286,
+          "shares": 203618.0,
+          "previous_shares": 0
+        },
+        "RIOT": {
+          "cusip": "767292105",
+          "change_type": "NEW",
+          "weight_pct": 0.47462002379301,
+          "shares": 754800.0,
+          "previous_shares": 0
+        },
+        "RKT": {
+          "cusip": "77311W101",
+          "change_type": "NEW",
+          "weight_pct": 0.23590907211854248,
+          "shares": 652220.0,
+          "previous_shares": 0
+        },
+        "ROKU": {
+          "cusip": "77543R102",
+          "change_type": "DECREASED",
+          "weight_pct": 0.5839162926999555,
+          "shares": 184055.0,
+          "previous_shares": 750190.0
+        },
+        "SNDK": {
+          "cusip": "80004C200",
+          "change_type": "DECREASED",
+          "weight_pct": 1.8224389213223033,
+          "shares": 34900.0,
+          "previous_shares": 38155.0
+        },
+        "SE": {
+          "cusip": "81141R100",
+          "change_type": "HELD",
+          "weight_pct": 2.420732071415776,
+          "shares": 1099905.0,
+          "previous_shares": 1099905.0
+        },
+        "STX": {
+          "cusip": "G7997R103",
+          "change_type": "INCREASED",
+          "weight_pct": 2.7038137714676798,
+          "shares": 122000.0,
+          "previous_shares": 50700.0
+        },
+        "SKE": {
+          "cusip": "83056P715",
+          "change_type": "NEW",
+          "weight_pct": 0.18379870562351006,
+          "shares": 300200.0,
+          "previous_shares": 0
+        },
+        "SOLS": {
+          "cusip": "83443Q103",
+          "change_type": "HELD",
+          "weight_pct": 0.12723289131003945,
+          "shares": 62525.0,
+          "previous_shares": 62525.0
+        },
+        "SCCO": {
+          "cusip": "84265V105",
+          "change_type": "INCREASED",
+          "weight_pct": 0.4924877475184993,
+          "shares": 123060.0,
+          "previous_shares": 121843.0
+        },
+        "STM": {
+          "cusip": "861012102",
+          "change_type": "INCREASED",
+          "weight_pct": 5.336776736131845,
+          "shares": 3102880.0,
+          "previous_shares": 2612880.0
+        },
+        "TSM": {
+          "cusip": "874039100",
+          "change_type": "INCREASED",
+          "weight_pct": 6.467587765432156,
+          "shares": 589680.0,
+          "previous_shares": 495280.0
+        },
+        "TEVA": {
+          "cusip": "881624209",
+          "change_type": "DECREASED",
+          "weight_pct": 0.4863098327599432,
+          "shares": 624999.0,
+          "previous_shares": 2377285.0
+        },
+        "TMO": {
+          "cusip": "883556102",
+          "change_type": "NEW",
+          "weight_pct": 0.2210728902076606,
+          "shares": 19200.0,
+          "previous_shares": 0
+        },
+        "UAL": {
+          "cusip": "910047109",
+          "change_type": "INCREASED",
+          "weight_pct": 2.482281556742654,
+          "shares": 794795.0,
+          "previous_shares": 262495.0
+        },
+        "U": {
+          "cusip": "91332U101",
+          "change_type": "HELD",
+          "weight_pct": 0.4849088929819807,
+          "shares": 738785.0,
+          "previous_shares": 738785.0
+        },
+        "UWMC": {
+          "cusip": "91823B109",
+          "change_type": "NEW",
+          "weight_pct": 0.13584522601062876,
+          "shares": 2583000.0,
+          "previous_shares": 0
+        },
+        "VIST": {
+          "cusip": "92837L109",
+          "change_type": "HELD",
+          "weight_pct": 0.19737174511163882,
+          "shares": 134700.0,
+          "previous_shares": 134700.0
+        },
+        "WAB": {
+          "cusip": "929740108",
+          "change_type": "DECREASED",
+          "weight_pct": 0.350418674297578,
+          "shares": 56595.0,
+          "previous_shares": 94895.0
+        },
+        "WVE": {
+          "cusip": "Y95308105",
+          "change_type": "HELD",
+          "weight_pct": 0.02308105699757936,
+          "shares": 173000.0,
+          "previous_shares": 173000.0
+        },
+        "WWD": {
+          "cusip": "980745103",
+          "change_type": "DECREASED",
+          "weight_pct": 0.6565354988953246,
+          "shares": 67194.0,
+          "previous_shares": 211355.0
+        },
+        "XENE": {
+          "cusip": "98420N105",
+          "change_type": "HELD",
+          "weight_pct": 0.3307595849543661,
+          "shares": 238600.0,
+          "previous_shares": 238600.0
+        },
+        "YPF": {
+          "cusip": "984245100",
+          "change_type": "DECREASED",
+          "weight_pct": 3.277877553270161,
+          "shares": 3138897.0,
+          "previous_shares": 3235962.0
+        }
+      }
+    }
+  ]
+}

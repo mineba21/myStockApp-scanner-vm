@@ -27,6 +27,7 @@ from database.models import (init_db, get_db, ScanResult, ScanLog,
 from scanner.scan_engine import run_scan, scan_status
 from scheduler import start_scheduler, stop_scheduler, get_next_run_times
 from notifications.telegram import test_telegram
+from web.form13f import enrich_results
 from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
                     MAX_PIVOT_EXT_PCT, ALERT_MAX_CUR_STOP_PCT,
                     BREAKOUT_WEEKLY_VOL_QUALITY_RATIO)
@@ -201,6 +202,7 @@ def _parse_filter_reasons(raw: Optional[str]) -> List[str]:
 async def get_results(market: str = "ALL", signal_type: str = "ALL",
                       days: int = 7, limit: int = 200,
                       include_rejected: bool = False,
+                      prioritize_13f: bool = True,
                       db: Session = Depends(get_db)):
     """스캔 결과 조회.
 
@@ -265,7 +267,7 @@ async def get_results(market: str = "ALL", signal_type: str = "ALL",
             )
         except Exception as exc:
             logger.warning("키움 실계좌 사이징 계산 실패: %s", type(exc).__name__)
-    return payload
+    return enrich_results(payload, prioritize=prioritize_13f)
 
 
 @app.delete("/api/results/{result_id}")

@@ -3,6 +3,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# 13F result presentation only; never used by technical gates or scan grading.
+FORM13F_DATA_PATH = os.getenv("FORM13F_DATA_PATH", os.path.join(
+    os.path.dirname(__file__), "data", "duquesne_13f.json"))
+FORM13F_MAX_AGE_DAYS = int(os.getenv("FORM13F_MAX_AGE_DAYS", "120"))
+FORM13F_NEW_PRIORITY = int(os.getenv("FORM13F_NEW_PRIORITY", "3"))
+FORM13F_INCREASED_PRIORITY = int(os.getenv("FORM13F_INCREASED_PRIORITY", "2"))
+FORM13F_DECREASED_PRIORITY = int(os.getenv("FORM13F_DECREASED_PRIORITY", "-1"))
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 SLACK_WEBHOOK_URL  = os.getenv("SLACK_WEBHOOK_URL", "")

@@ -291,6 +291,40 @@ class TestResultsRejectedFilter:
 # DELETE /api/results 대칭
 # ══════════════════════════════════════════════════════════════════
 
+class Test13FPresentation:
+    def test_priority_preserves_candidates_limit_and_technical_fields(self, client_with_db, monkeypatch):
+        from web import form13f
+        from datetime import timezone
+        client, session = client_with_db
+        day = datetime.now(timezone.utc).date()
+        snapshot = {
+            "manager": "Duquesne Family Office", "report_date": str(day - timedelta(days=60)),
+            "filed_at": (datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+            "first_tradable": str(day - timedelta(days=2)), "accession": "test",
+            "source_url": "https://www.sec.gov/", "weight_basis": "non_option_long",
+            "holdings": {"NEW": {"change_type": "NEW", "weight_pct": 2.5, "shares": 10,
+                                 "previous_shares": 0, "cusip": "02079K305"}}}
+        monkeypatch.setattr(form13f, "load_snapshots", lambda: [snapshot])
+        _insert_result(session, ticker="NEW", strict_filter_passed=True, grade="B")
+        _insert_result(session, ticker="OTHER", strict_filter_passed=True, grade="S")
+        _insert_result(session, ticker="REJECT", strict_filter_passed=False, filter_reasons=["rs_below_zero"])
+        original = client.get("/api/results?prioritize_13f=false").json()
+        priority = client.get("/api/results?prioritize_13f=true").json()
+        assert [r["ticker"] for r in original] == ["OTHER", "NEW"]
+        assert [r["ticker"] for r in priority] == ["NEW", "OTHER"]
+        assert {r["id"]: r for r in original} == {r["id"]: r for r in priority}
+        assert priority[0]["grade"] == "B"
+        assert priority[0]["13F_NEW"] is True
+        for prioritize in ("true", "false"):
+            limited = client.get(f"/api/results?limit=1&prioritize_13f={prioritize}").json()
+            assert [r["ticker"] for r in limited] == ["OTHER"]
+        monkeypatch.setattr(form13f, "load_snapshots", lambda: [])
+        missing = client.get("/api/results").json()
+        assert {r["id"] for r in missing} == {r["id"] for r in original}
+        assert all(r["13F_STATUS"] == "UNAVAILABLE" for r in missing)
+        assert all(r["strict_filter_passed"] is True for r in missing)
+
+
 class TestResultsBulkDelete:
 
     def test_default_delete_preserves_rejected(self, client_with_db):
