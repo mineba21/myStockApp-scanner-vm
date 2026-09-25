@@ -1131,8 +1131,10 @@ def _save(db, signal: dict):
             existing.strict_filter_passed = signal.get("strict_filter_passed")
             existing.filter_reasons       = reasons_json
         else:
+            detected_at = datetime.utcnow()
             db.add(ScanResult(
-                scan_time        = datetime.utcnow(),
+                scan_time        = detected_at,
+                first_detected_at = detected_at,
                 market           = signal["market"],
                 ticker           = signal["ticker"],
                 name             = signal["name"],

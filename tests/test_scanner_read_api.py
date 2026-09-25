@@ -29,6 +29,7 @@ def setup(monkeypatch):
         now=datetime.utcnow()-timedelta(minutes=1)
         session.add_all([
             ScanResult(id=1,market='US',ticker='SPY',signal_type='BREAKOUT',signal_date='2026-09-11',scan_time=now,
+                       first_detected_at=now-timedelta(days=1),
                        strict_filter_passed=True,entry_warnings='["early warning"]',equity_snapshot=9876543,suggested_qty=77),
             ScanResult(id=2,market='KR',ticker='005930',signal_type='REBOUND',scan_time=now,strict_filter_passed=None),
             ScanResult(id=3,market='US',ticker='FAIL',signal_type='BREAKOUT',scan_time=now,strict_filter_passed=False),
@@ -47,9 +48,12 @@ def test_read_projection_no_account_data_or_live_calls(setup):
     rows=response.json()['items']
     assert [r['id'] for r in rows]==[1,2]
     assert rows[0]['entry_warnings']==['early warning']
+    assert rows[0]['suggested_qty']==77
+    assert rows[0]['first_detected_at'] is not None
+    assert rows[1]['suggested_qty'] is None and rows[1]['first_detected_at'] is None
     assert rows[1]['strict_assessment']=='legacy_unassessed'
     for row in rows:
-        assert not {'equity_snapshot','suggested_qty','notified','cash_balance'} & row.keys()
+        assert not {'equity_snapshot','notified','cash_balance'} & row.keys()
     assert '9876543' not in response.text
     assert client.get('/api/scanner-read/signals/3').status_code==404
 
@@ -87,6 +91,7 @@ def test_pagination_equal_timestamps_and_rescan_updates(setup):
     update=client.get('/api/scanner-read/signals',params=b['next_cursor']).json()['items'][0]
     assert update['id']==1 and update['event_key']!=a['items'][0]['event_key']
     assert update['signal_key']==a['items'][0]['signal_key']
+    assert update['first_detected_at']==a['items'][0]['first_detected_at']
 
 
 def test_limits_status_and_empty_results(setup):

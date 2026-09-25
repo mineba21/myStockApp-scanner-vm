@@ -30,6 +30,7 @@ class ScanResult(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     scan_time = Column(DateTime, default=datetime.utcnow, index=True)
+    first_detected_at = Column(DateTime, nullable=True)  # 최초 저장 시각; 기존 행은 알 수 없음
     market = Column(String(10), index=True)   # KR / US
     ticker = Column(String(20), index=True)
     name = Column(String(100))

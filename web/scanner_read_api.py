@@ -25,16 +25,18 @@ def reasons(raw):
 
 
 def serialize(row):
-    # Never expose equity_snapshot, sizing, holdings, credentials or notified.
+    # Expose the saved recommendation only; never query accounts or brokerage here.
     fields = ('id', 'market', 'ticker', 'name', 'signal_type', 'signal_date', 'stage',
               'price', 'ma150', 'pivot_price', 'stop_loss', 'grade', 'signal_quality',
               'volume_ratio', 'weekly_volume_ratio', 'weekly_volume_ratio_4w',
               'weekly_volume_quality_passed', 'weekly_volume_quality_threshold',
               'strict_filter_passed', 'sector_name', 'sector_stage', 'rs_value', 'rs_trend',
-              'upthrust_failed', 'pivot_ext_pct', 'cur_ext_pct', 'cur_stop_pct')
+              'upthrust_failed', 'pivot_ext_pct', 'cur_ext_pct', 'cur_stop_pct',
+              'suggested_qty')
     result = {field: getattr(row, field) for field in fields}
     result = {k: None if isinstance(v, float) and not math.isfinite(v) else v for k, v in result.items()}
-    result.update(scan_time=utc(row.scan_time), filter_reasons=reasons(row.filter_reasons),
+    result.update(scan_time=utc(row.scan_time), first_detected_at=utc(row.first_detected_at),
+                  filter_reasons=reasons(row.filter_reasons),
                   entry_warnings=reasons(row.entry_warnings), price_basis='stored_scan_snapshot',
                   strict_assessment='legacy_unassessed' if row.strict_filter_passed is None else 'passed',
                   event_key=f'{row.id}:{utc(row.scan_time)}',

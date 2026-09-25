@@ -353,6 +353,7 @@ class TestSavePersistsMansfieldRS:
                 ScanResult.signal_date == "2024-06-03",
             ).one()
             assert row.rs_value == 6.0
+            assert row.first_detected_at is not None
         finally:
             db.close()
 
@@ -363,6 +364,10 @@ class TestSavePersistsMansfieldRS:
         db = self._fresh_db()
         try:
             _save(db, self._signal())
+            first_detected_at = db.query(ScanResult).filter(
+                ScanResult.ticker == "TEST",
+                ScanResult.signal_date == "2024-06-03",
+            ).one().first_detected_at
             # 같은 (ticker, signal_date, signal_type) 로 두 번째 저장 → update 분기
             _save(db, self._signal(rs=9.9, rs_value=12.5, price=108.0))
             rows = db.query(ScanResult).filter(
@@ -372,6 +377,7 @@ class TestSavePersistsMansfieldRS:
             assert len(rows) == 1
             assert rows[0].rs_value == 12.5
             assert rows[0].price    == 108.0
+            assert rows[0].first_detected_at == first_detected_at
         finally:
             db.close()
 

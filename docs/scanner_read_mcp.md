@@ -42,7 +42,11 @@ D+3 확정 및 경고 전용 전략은 변경하지 않는다. 저장된 경고�
 | scanner_signals | /api/scanner-read/signals | 후보·업데이트 목록, 필터, 페이지 커서 |
 | scanner_signal | /api/scanner-read/signals/{id} | 한 종목의 저장된 판정 지표·경고 |
 
-계좌자산·추천수량·알림 전송 여부·오류 traceback은 응답에서 제외한다.
+저장된 추천수량 `suggested_qty`와 최초 검출 시각 `first_detected_at`을 목록과 상세에 제공한다.
+추천수량은 스캔 당시 저장된 값으로, 현재 계좌·현금 기준 주문 가능 수량이 아니다.
+기존 행은 최초 검출 시각을 복원할 수 없어 `first_detected_at=null`이다.
+`scan_time`은 마지막 스캔 갱신 시각이며 `signal_date`는 신호 발생 날짜다.
+계좌자산·알림 전송 여부·오류 traceback은 응답에서 제외한다.
 MCP 도구의 readOnlyHint뿐 아니라 서버 인증과 GET 경로 허용 목록으로 제한한다.
 MCP 도구에는 임의 URL·SQL·POST·주문 기능이 없다. 조회 결과의 문자열은 지시가 아닌 비신뢰 데이터다.
 
