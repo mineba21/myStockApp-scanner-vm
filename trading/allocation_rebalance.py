@@ -208,8 +208,12 @@ class Rebalance:
         # cycle while account2 is active, even across workers/process restarts.
         with self.db() as db:
             row = db.execute("SELECT id FROM allocation_cycles WHERE cycle_key=?", (cycle_key,)).fetchone()
-            if row:
-                return self.status(row["id"])
+        if row:
+            current = self.status(row["id"])
+            if (current["state"] == "SELL_PREVIEW" and not current["orders"]
+                    and not current["payload"].get("execution_authorized")):
+                return self.refresh_sell_preview(row["id"])
+            return current
         allocations = {t: str(w) for t, w in weights(allocations).items()}
         scope = sorted({str(t).strip().upper() for t in scope})
         if not scope or not set(allocations) <= set(scope):
@@ -437,7 +441,8 @@ class Rebalance:
     def refresh_sell_preview(self, cycle_id):
         current = self.status(cycle_id)
         self._check_mode(current)
-        if current["state"] != "SELL_PREVIEW" or current["orders"]:
+        if (current["state"] != "SELL_PREVIEW" or current["orders"]
+                or current["payload"].get("execution_authorized")):
             raise RebalanceBlocked("이미 전송한 주문은 새 미리보기로 재전송할 수 없습니다.")
         payload = current["payload"]
         previous_payload = json.dumps(payload)
@@ -446,8 +451,10 @@ class Rebalance:
             raise RebalanceBlocked("미체결 주문 확인이 필요합니다.")
         payload = self._sell_payload(snapshot, payload["allocations"], payload["scope"], payload["reserve_bps"])
         with self.db() as db:
-            db.execute("UPDATE allocation_cycles SET payload=? WHERE id=? AND state='SELL_PREVIEW' AND payload=?",
+            updated = db.execute("UPDATE allocation_cycles SET payload=? WHERE id=? AND state='SELL_PREVIEW' AND payload=?",
                        (json.dumps(payload), cycle_id, previous_payload))
+            if updated.rowcount != 1:
+                raise RebalanceBlocked("계획이 다른 요청에서 변경되었습니다. 최신 상태를 다시 확인하세요.")
         return self.status(cycle_id)
 
     def active(self):

@@ -294,6 +294,62 @@ def test_refresh_same_sell_preview_cannot_restart_a_sent_cycle(flow):
     assert len(broker.sent) == 1
 
 
+def test_repeated_preview_uses_fresh_holdings_cash_and_quotes(flow, monkeypatch):
+    service, broker, cid = flow
+    before = service.status(cid)['payload']
+    broker.holdings = {'SPY': 2, 'QQQ': 2, 'OTHER': 10}
+    broker.cash = Decimal('400')
+    monkeypatch.setattr(broker, 'quotes', lambda tickers: {
+        t: {'limit_price': '200.00', 'as_of': time.time()} for t in tickers})
+    refreshed = service.create('easy-2026-08-31', {'SPY': .5, 'QQQ': .5}, ['SPY', 'QQQ'])
+    assert refreshed['id'] == cid
+    assert refreshed['payload']['original_quantities'] == {'SPY': '2', 'QQQ': '2'}
+    assert refreshed['payload']['preview'] == []
+    assert refreshed['payload']['planning'] != before['planning']
+    assert refreshed['orders'] == broker.sent == []
+
+
+def test_refresh_failure_does_not_return_stale_preview(flow):
+    service, broker, cid = flow
+    before = service.status(cid)
+    broker.pending = [{'ticker': 'SPY'}]
+    with pytest.raises(RebalanceBlocked):
+        service.create('easy-2026-08-31', {'SPY': .5, 'QQQ': .5}, ['SPY', 'QQQ'])
+    assert service.status(cid) == before
+    assert broker.sent == []
+
+
+def test_authorized_preview_cannot_be_replaced(flow):
+    service, broker, cid = flow
+    payload = service.status(cid)['payload']
+    payload['execution_authorized'] = True
+    with service.db() as db:
+        db.execute('UPDATE allocation_cycles SET payload=? WHERE id=?', (json.dumps(payload), cid))
+    before = service.status(cid)
+    with pytest.raises(RebalanceBlocked):
+        service.refresh_sell_preview(cid)
+    assert service.create('easy-2026-08-31', {'SPY': 1}, ['SPY']) == before
+    assert broker.sent == []
+
+
+def test_concurrent_authorization_blocks_refresh(flow, monkeypatch):
+    service, broker, cid = flow
+    snapshot = broker.snapshot
+
+    def authorize_during_snapshot():
+        payload = service.status(cid)['payload']
+        payload['execution_authorized'] = True
+        with service.db() as db:
+            db.execute('UPDATE allocation_cycles SET payload=? WHERE id=?', (json.dumps(payload), cid))
+        return snapshot()
+
+    monkeypatch.setattr(broker, 'snapshot', authorize_during_snapshot)
+    with pytest.raises(RebalanceBlocked, match='다른 요청'):
+        service.refresh_sell_preview(cid)
+    assert service.status(cid)['payload']['execution_authorized'] is True
+    assert broker.sent == []
+
+
 def test_scope_required_and_cash_reservations_prevent_start(tmp_path):
     broker = Broker()
     service = Rebalance(tmp_path / 'j', broker)
