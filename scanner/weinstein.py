@@ -1932,8 +1932,9 @@ def analyze_stock(df: pd.DataFrame, ticker: str, name: str, market: str,
         weekly_ind=weekly_at_signal,
     )
 
-    # signal_quality 는 Mansfield RS (rs_value/rs_trend) 기준
-    qual = _signal_quality(sig["vol_ratio"], slope, rs_value, rs_trend, sig["signal_type"])
+    # 품질은 신호일 스냅샷으로 평가한다. 공개 ma_slope 는 현재 상태 표시용.
+    qual = _signal_quality(sig["vol_ratio"], daily_at_signal["slope150"],
+                           rs_value, rs_trend, sig["signal_type"])
 
     # warning_flags 축적
     warning_flags: List[str] = list(sig.get("warning_flags") or [])

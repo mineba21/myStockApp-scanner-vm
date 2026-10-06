@@ -1458,6 +1458,34 @@ class TestRSZeroCross:
 
 class TestNoLookAhead:
 
+    def test_signal_quality_uses_signal_date_slope(self, monkeypatch):
+        """Historical signal quality must not read the later display slope."""
+        from scanner import weinstein as W
+
+        prices, volumes = _make_stage2_base(n_total=230, base_price=100.0)
+        breakout_idx = len(prices) - 5
+        prices[breakout_idx], volumes[breakout_idx] = 104.0, 6_000_000
+        for i in range(breakout_idx + 1, len(prices)):
+            prices[i], volumes[i] = 110.0, 1_000_000
+        df = _make_df(prices, volumes)
+
+        captured = []
+        original_quality = W._signal_quality
+
+        def capture_quality(vol_ratio, slope, rs_value, rs_trend, signal_type):
+            captured.append(slope)
+            return original_quality(vol_ratio, slope, rs_value, rs_trend, signal_type)
+
+        monkeypatch.setattr(W, "_signal_quality", capture_quality)
+        result = W.analyze_stock(df, "TEST", "테스트", "US")
+        assert result is not None and result["signal_type"] == "BREAKOUT"
+        assert pd.Timestamp(result["signal_date"]) < df.index[-1]
+        signal_slope = W._build_indicators(df.loc[:result["signal_date"]])["slope150"]
+        current_slope = W._build_indicators(df)["slope150"]
+        assert abs(signal_slope - current_slope) > 0.001
+        assert captured == pytest.approx([signal_slope])
+        assert result["ma_slope"] == pytest.approx(current_slope, abs=1e-4)
+
     def test_stop_loss_uses_signal_date_indicators(self):
         """signal 이 5일 전 발생 + 그 이후 *큰* 가격 변동으로 cur_m50 이 last
         bar 와 signal 시점에 명확히 다른 합성 데이터.
