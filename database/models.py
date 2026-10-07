@@ -1,5 +1,6 @@
 from sqlalchemy import (create_engine, Column, Integer, String, Float,
-                         DateTime, Boolean, Text, Enum, ForeignKey)
+                         DateTime, Boolean, Text, Enum, ForeignKey,
+                         UniqueConstraint, CheckConstraint, Index)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -262,6 +263,92 @@ class WatchList(Base):
     memo = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+
+
+class AgentObservation(Base):
+    """Immutable input; portfolio references deliberately survive portfolio edits."""
+    __tablename__ = "agent_observations"
+    id = Column(String(128), primary_key=True)
+    episode_id = Column(String(128), nullable=False)
+    account_id = Column(Integer, nullable=False)
+    holding_id = Column(Integer, nullable=False)
+    market = Column(String(10), nullable=False)
+    ticker = Column(String(20), nullable=False)
+    scan_sequence = Column(Integer, nullable=False)
+    revision = Column(Integer, nullable=False)
+    observed_at = Column(DateTime, nullable=False)
+    data_as_of = Column(DateTime, nullable=True)
+    strategy_version = Column(String(128), nullable=False)
+    input_version = Column(String(128), nullable=False)
+    status = Column(String(20), nullable=True)
+    data_quality = Column(String(20), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    fingerprint = Column(String(64), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("episode_id", "scan_sequence", "revision", name="uq_agent_observation_cursor"),
+        CheckConstraint("scan_sequence > 0 AND revision >= 0", name="ck_agent_observation_cursor"),
+    )
+
+
+class AgentRuntimeState(Base):
+    __tablename__ = "agent_runtime_states"
+    episode_id = Column(String(128), primary_key=True)
+    version = Column(Integer, nullable=False)
+    event_sequence = Column(Integer, nullable=False)
+    observation_id = Column(String(128), ForeignKey("agent_observations.id"), nullable=False)
+    scan_sequence = Column(Integer, nullable=False)
+    observation_revision = Column(Integer, nullable=False)
+    data_as_of = Column(DateTime, nullable=True)
+    current_status = Column(String(20), nullable=True)
+    last_valid_status = Column(String(20), nullable=True)
+    data_quality = Column(String(20), nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+    __table_args__ = (
+        CheckConstraint("version > 0 AND event_sequence >= 0", name="ck_agent_state_version"),
+    )
+
+
+class AgentEvent(Base):
+    """Immutable fact. Delivery, not the event, owns processing status."""
+    __tablename__ = "agent_events"
+    id = Column(String(36), primary_key=True)
+    observation_id = Column(String(128), ForeignKey("agent_observations.id"), nullable=False)
+    episode_id = Column(String(128), nullable=False)
+    sequence = Column(Integer, nullable=False)
+    event_key = Column(String(128), nullable=False)
+    event_type = Column(String(40), nullable=False)
+    severity = Column(String(10), nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    payload_json = Column(Text, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("episode_id", "sequence", name="uq_agent_event_sequence"),
+        UniqueConstraint("observation_id", "event_key", name="uq_agent_event_input"),
+        CheckConstraint("sequence > 0", name="ck_agent_event_sequence"),
+    )
+
+
+class AgentDelivery(Base):
+    __tablename__ = "agent_deliveries"
+    id = Column(String(36), primary_key=True)
+    event_id = Column(String(36), ForeignKey("agent_events.id"), nullable=False)
+    channel = Column(String(20), nullable=False)
+    destination_key = Column(String(128), nullable=False)
+    status = Column(String(10), nullable=False)
+    attempts = Column(Integer, nullable=False)
+    next_attempt_at = Column(DateTime, nullable=False)
+    lease_token = Column(String(36), nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    error_code = Column(String(40), nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("event_id", "channel", "destination_key", name="uq_agent_delivery_route"),
+        CheckConstraint("status IN ('PENDING', 'SENDING', 'SENT', 'FAILED')", name="ck_agent_delivery_status"),
+        CheckConstraint("attempts >= 0", name="ck_agent_delivery_attempts"),
+        CheckConstraint("status != 'SENDING' OR (lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)", name="ck_agent_delivery_lease"),
+        Index("ix_agent_delivery_due", "status", "next_attempt_at"),
+        Index("ix_agent_delivery_expiry", "status", "lease_expires_at"),
+    )
 
 
 def init_db():

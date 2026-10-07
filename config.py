@@ -216,6 +216,14 @@ STRICT_PERSIST_REJECTED                     = os.getenv("STRICT_PERSIST_REJECTED
 STRICT_NOTIFY_INCLUDE_REASONS               = os.getenv("STRICT_NOTIFY_INCLUDE_REASONS", "false").lower() == "true"
 
 # ── Schedule / Infra ────────────────────────────────────────────
+# Storage-only foundation. No scanner/scheduler/sender integration in Step A.
+AGENT_RUNTIME_ENABLED = os.getenv("AGENT_RUNTIME_ENABLED", "false").lower() == "true"
+AGENT_DELIVERY_ENABLED = os.getenv("AGENT_DELIVERY_ENABLED", "false").lower() == "true"
+AGENT_DELIVERY_MAX_ATTEMPTS = int(os.getenv("AGENT_DELIVERY_MAX_ATTEMPTS", "5"))
+AGENT_DELIVERY_LEASE_SECONDS = int(os.getenv("AGENT_DELIVERY_LEASE_SECONDS", "60"))
+AGENT_DELIVERY_RETRY_SECONDS = int(os.getenv("AGENT_DELIVERY_RETRY_SECONDS", "30"))
+AGENT_DELIVERY_RETRY_MAX_SECONDS = int(os.getenv("AGENT_DELIVERY_RETRY_MAX_SECONDS", "3600"))
+
 # 각 시장의 정규장 종가가 확정된 뒤 실행한다. 미국 시간대는 DST를 자동 반영한다.
 KR_SCHEDULE_TIMES = os.getenv("KR_SCHEDULE_TIMES", "16:10").split(",")
 US_SCHEDULE_TIMES = os.getenv("US_SCHEDULE_TIMES", "16:30").split(",")
