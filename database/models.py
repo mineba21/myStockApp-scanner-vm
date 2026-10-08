@@ -265,6 +265,22 @@ class WatchList(Base):
     is_active = Column(Boolean, default=True)
 
 
+class AgentScanCapture(Base):
+    """Expected observation inventory; gap acknowledgments never erase evidence."""
+    __tablename__ = "agent_scan_captures"
+    scan_id = Column(Integer, primary_key=True)
+    expected_json = Column(Text, nullable=False)
+    audit_json = Column(Text, nullable=False, default="{}")
+    status = Column(String(12), nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+    reset_at = Column(DateTime, nullable=True)
+    reset_reason = Column(String(200), nullable=True)
+    __table_args__ = (
+        CheckConstraint("status IN ('CAPTURING', 'COMPLETE', 'GAP')", name="ck_agent_capture_status"),
+    )
+
+
 class AgentObservation(Base):
     """Immutable input; portfolio references deliberately survive portfolio edits."""
     __tablename__ = "agent_observations"

@@ -34,6 +34,8 @@ _SQLITE_URL = "sqlite:///" + os.path.join(_TMPDIR, "test.db")
 # 운영 값이 새어 들어오지 못하도록 강제한다. 값을 비우는 쪽(알림)은 각
 # 전송 함수가 "미설정" 으로 보고 no-op 하도록 만드는 것이 목적이다.
 _FORCED = {
+    "AGENT_RUNTIME_ENABLED":    "false",
+    "AGENT_DELIVERY_ENABLED":   "false",
     "SCANNER_READ_TOKEN":       "",
     "PORTFOLIO_READ_TOKEN":     "",
     "DATABASE_URL":            _SQLITE_URL,

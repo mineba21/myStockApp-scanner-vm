@@ -452,6 +452,7 @@ def run_scan(market: str = "ALL", universe: str = None,
     buy_signals, total_scanned = [], 0
     funnels: dict = {}
     funnel_counts: dict = {}
+    capture = None
 
     try:
         # 시장 지수 상태 로드 (Forest to Trees)
@@ -484,12 +485,20 @@ def run_scan(market: str = "ALL", universe: str = None,
             funnel_counts["US"] = cnt
             buy_signals.extend(sigs); total_scanned += cnt
 
+        from config import AGENT_RUNTIME_ENABLED
+        if AGENT_RUNTIME_ENABLED:
+            try:
+                from agent_runtime.holding_capture import create_capture
+                capture = create_capture(log.id, SessionLocal)
+            except Exception as exc:
+                logger.warning('Runtime DEGRADED initialization error=%s', type(exc).__name__)
         holding_signals = _check_holdings(
             db,
             kr_bench=kr_bench,
             us_bench=us_bench,
             kr_condition=kr_condition,
             us_condition=us_condition,
+            **({'capture': capture} if capture is not None else {}),
         )
         sell_signals = _check_watchlist(db, kr_bench=kr_bench, us_bench=us_bench)
 
@@ -528,6 +537,8 @@ def run_scan(market: str = "ALL", universe: str = None,
         log.signals_found = len(buy_signals)
         log.status        = "DONE"
         db.commit()
+        if capture is not None:
+            capture.safe('finish')
 
         return {"status": "done", "total_scanned": total_scanned,
                 "signals_found": len(buy_signals),
@@ -911,7 +922,7 @@ def _holding_alert_due(holding, severity: str, reason: str,
 
 
 def _check_holdings(db, kr_bench=None, us_bench=None,
-                    kr_condition=None, us_condition=None):
+                    kr_condition=None, us_condition=None, capture=None):
     """보유 종목 매도 상태를 저장하고, 이번에 발송할 신호 목록을 반환한다."""
     from collections import defaultdict
     from database.models import Holding
@@ -924,6 +935,8 @@ def _check_holdings(db, kr_bench=None, us_bench=None,
         Holding.is_active == True,
         Holding.quantity > 0,
     ).all()
+    if capture is not None:
+        capture.safe('prepare', db, holdings)
     grouped = defaultdict(list)
     for holding in holdings:
         grouped[(holding.market, holding.ticker)].append(holding)
@@ -938,6 +951,7 @@ def _check_holdings(db, kr_bench=None, us_bench=None,
 
     for (market, ticker), rows in grouped.items():
         checked_at = datetime.utcnow()
+        df = weekly_df = benchmark = None
         try:
             df = get_kr_ohlcv(ticker) if market == "KR" else get_us_ohlcv(ticker)
             if df is None or len(df) < MA_PERIOD + 20:
@@ -1016,6 +1030,9 @@ def _check_holdings(db, kr_bench=None, us_bench=None,
                 holding.sell_reason = "가격 데이터를 확인하지 못했습니다."
                 holding.sell_checked_at = checked_at
 
+        if capture is not None:
+            capture.safe('group', rows, df, weekly_df, benchmark, checked_at)
+
     # 손절가 미등록은 종목별 알림이 아닌 하나의 정보 섹션으로 묶는다.
     # 매도 신호가 없는 행은 같은 24시간 반복 규칙을 재사용한다.
     missing_due = []
@@ -1041,6 +1058,9 @@ def _check_holdings(db, kr_bench=None, us_bench=None,
         })
 
     db.flush()
+    if capture is not None:
+        capture.safe('evaluated', holdings, signals, missing_due, missing_stop_rows,
+                     checked_at if holdings else datetime.utcnow())
     return signals
 
 
