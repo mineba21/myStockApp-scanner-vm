@@ -366,11 +366,17 @@ class Rebalance:
                     break  # PREPARED: not sent, manual review required
             with self.db() as db:
                 sent_at = time.time()
+                # One in-flight order per cycle side, across workers: the claim
+                # fails while any intent is sending, ambiguous, rejected or being
+                # closed out, so a second dispatcher can never send past a
+                # reply that is still pending (and may yet be a rejection).
                 claimed = db.execute(
-                    "UPDATE allocation_intents SET state='SENDING', sent_at=? WHERE id=? AND state='PREPARED'",
-                    (sent_at, order["id"])).rowcount
+                    "UPDATE allocation_intents SET state='SENDING', sent_at=? WHERE id=? AND state='PREPARED'"
+                    " AND NOT EXISTS (SELECT 1 FROM allocation_intents WHERE cycle_id=? AND side=?"
+                    f" AND state IN ({', '.join(repr(x) for x in sorted(self.STOPS_DISPATCH))}))",
+                    (sent_at, order["id"], cycle_id, side)).rowcount
             if not claimed:
-                continue  # another dispatcher owns this intent
+                break  # another dispatcher is sending or the side is stopped
             order = {**order, "state": "SENDING", "sent_at": sent_at}
             try:
                 result = self.broker.submit(order)
@@ -487,6 +493,9 @@ class Rebalance:
         return self.status(cycle_id)
 
     TERMINAL = {"FILLED", "CANCELLED", "REJECTED", "ABANDONED"}
+    CANCEL_UNRESOLVED = {"CANCEL_SENDING", "CANCEL_UNKNOWN"}
+    STOPS_DISPATCH = {"SENDING", "UNKNOWN", "REJECTED", "ABANDONED",
+                      "CANCEL_REQUESTED"} | CANCEL_UNRESOLVED
 
     def close_out(self, cycle_id):
         """User-requested: cancel open orders, drop unsent intents, then re-plan.
@@ -516,8 +525,12 @@ class Rebalance:
                 continue
             if order["state"] == "PREPARED":
                 with self.db() as db:
-                    db.execute("UPDATE allocation_intents SET state='ABANDONED' WHERE id=? AND state='PREPARED'",
-                               (order["id"],))
+                    abandoned = db.execute(
+                        "UPDATE allocation_intents SET state='ABANDONED' WHERE id=? AND state='PREPARED'",
+                        (order["id"],)).rowcount
+                if not abandoned:
+                    # Another dispatcher claimed it first: it may be on the wire.
+                    problems.append(f"{order['ticker']}: 다른 요청이 전송 중 — 접수 대조 후 다시 정리하세요.")
                 continue
             evidence = self.broker.lookup(order)
             if not evidence or evidence.get("matched_intent_id") != order["id"]:
@@ -535,17 +548,40 @@ class Rebalance:
                 if order["state"] == "CANCEL_REQUESTED":
                     problems.append(f"{order['ticker']}: 취소 확인 대기")
                     continue
+                if order["state"] in self.CANCEL_UNRESOLVED:
+                    problems.append(f"{order['ticker']}: 취소 요청 응답 불명 — 자동 재전송하지 않습니다. "
+                                    "증권사에서 취소 여부를 확인하세요.")
+                    continue
+                # Persist the cancel attempt BEFORE the network call, claiming the
+                # exact state we observed so only one request can send it.
+                with self.db() as db:
+                    claimed = db.execute(
+                        "UPDATE allocation_intents SET state='CANCEL_SENDING' WHERE id=? AND state=?",
+                        (order["id"], order["state"])).rowcount
+                if not claimed:
+                    problems.append(f"{order['ticker']}: 다른 요청이 처리 중 — 다시 확인하세요.")
+                    continue
                 try:
                     result = self.broker.cancel(order)
                     if result.get("status") != "submitted":
                         raise OrderUnknown("취소 접수 응답을 확인할 수 없습니다.")
                 except OrderRejected:
+                    # Explicit refusal: nothing is pending, so restore the order state.
+                    with self.db() as db:
+                        db.execute("UPDATE allocation_intents SET state=? WHERE id=? AND state='CANCEL_SENDING'",
+                                   (order["state"], order["id"]))
                     problems.append(f"{order['ticker']}: 증권사 취소 거절 — 체결 여부를 다시 확인합니다.")
                     continue
                 except Exception:
-                    problems.append(f"{order['ticker']}: 취소 요청 응답 불명 — 다시 확인합니다.")
+                    with self.db() as db:
+                        db.execute("UPDATE allocation_intents SET state='CANCEL_UNKNOWN' WHERE id=? AND state='CANCEL_SENDING'",
+                                   (order["id"],))
+                    problems.append(f"{order['ticker']}: 취소 요청 응답 불명 — 자동 재전송하지 않습니다. "
+                                    "증권사에서 취소 여부를 확인하세요.")
                     continue
-                self._order_state(order["id"], "CANCEL_REQUESTED")
+                with self.db() as db:
+                    db.execute("UPDATE allocation_intents SET state='CANCEL_REQUESTED' WHERE id=? AND state='CANCEL_SENDING'",
+                               (order["id"],))
                 problems.append(f"{order['ticker']}: 취소 요청 접수 — 취소 확인 대기")
             else:
                 problems.append(f"{order['ticker']}: {state} — 수동 확인 필요")
@@ -557,9 +593,19 @@ class Rebalance:
         payload = current["payload"]
         successor = self._sell_payload(snapshot, payload["allocations"], payload["scope"], payload["reserve_bps"])
         successor["replaces"] = cycle_id
-        return self._supersede(cycle_id, current["state"], successor)
+        result = self._supersede(cycle_id, current["state"], side, successor)
+        if result is None:
+            return {**self.status(cycle_id), "blockers": [
+                "정리 중 주문 상태가 바뀌었습니다. 전송·취소가 끝난 뒤 다시 정리하세요."]}
+        return result
 
-    def _supersede(self, cycle_id, state, successor_payload):
+    def _supersede(self, cycle_id, state, side, successor_payload):
+        """Atomically close the cycle and open its successor.
+
+        The terminal check runs inside the same write transaction, so an intent
+        claimed for sending after close-out's own checks always blocks the re-plan.
+        Returns None when any intent on that side is not terminal.
+        """
         new_id = uuid.uuid4().hex
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -567,6 +613,12 @@ class Rebalance:
                              (cycle_id, state)).fetchone()
             if row is None:
                 raise RebalanceBlocked("계획이 다른 요청에서 변경되었습니다. 최신 상태를 다시 확인하세요.")
+            open_intents = db.execute(
+                "SELECT COUNT(*) FROM allocation_intents WHERE cycle_id=? AND side=?"
+                f" AND state NOT IN ({', '.join(repr(x) for x in sorted(self.TERMINAL))})",
+                (cycle_id, side)).fetchone()[0]
+            if open_intents:
+                return None
             base = row["cycle_key"].split("#r")[0]
             count = db.execute("SELECT COUNT(*) FROM allocation_cycles WHERE cycle_key=? OR substr(cycle_key, 1, ?)=?",
                                (base, len(base) + 2, base + "#r")).fetchone()[0]

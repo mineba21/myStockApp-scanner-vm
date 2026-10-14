@@ -2528,7 +2528,7 @@ function allocationRebalancePanel() {
       // A close-out only cancels once and never sends, so it may keep polling
       // for the cancel confirmation unless an order's receipt is still unknown.
       const closing = this.cycle?.payload?.closing_out
-        && !orders.some(row => ['UNKNOWN','SENDING'].includes(row.state));
+        && !orders.some(row => ['UNKNOWN','SENDING','CANCEL_SENDING','CANCEL_UNKNOWN'].includes(row.state));
       if (pending && this.cycle?.payload?.execution_authorized && (!unsafe || closing)) {
         this.pollTimer = setTimeout(() => this.advanceCycle(), 5000);
       }
@@ -2539,7 +2539,8 @@ function allocationRebalancePanel() {
         COMPLETE:'매수 체결 완료', PREPARED:'미전송 · 검토 필요', SENDING:'전송 중 · 응답 미확정',
         SUBMITTED:'접수됨 · 체결 미확인', UNKNOWN:'접수 여부 불명 · 재전송 금지',
         REJECTED:'증권사 거절', FILLED:'체결 확인', CANCEL_REQUESTED:'취소 요청 · 확인 대기',
-        CANCELLED:'취소 확인', ABANDONED:'미전송 · 정리됨', SUPERSEDED:'재계산된 계획으로 대체'})[state] || state;
+        CANCELLED:'취소 확인', ABANDONED:'미전송 · 정리됨', SUPERSEDED:'재계산된 계획으로 대체',
+        CANCEL_SENDING:'취소 전송 중 · 응답 미확정', CANCEL_UNKNOWN:'취소 응답 불명 · 재전송 금지'})[state] || state;
     }
   };
 }

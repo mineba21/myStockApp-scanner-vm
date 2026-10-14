@@ -129,9 +129,17 @@ VAA/LAA/듀얼 모멘텀 계산기는 `ASSET_ALLOCATION_DIR/asset_allocation.py`
 - **미체결 정리(`POST /rebalance/{id}/close-out`):** SELL_PENDING/BUY_PENDING에서 사용자가
   버튼을 누를 때만 실행한다. 새 매수·매도는 절대 보내지 않는다.
   - PREPARED(미전송)는 조건부 UPDATE로 ABANDONED 처리한다.
-  - 주문내역 대조가 된 OPEN/PARTIAL만 원주문번호로 1회 취소 요청 → CANCEL_REQUESTED.
-    취소 요청은 자동 재전송하지 않는다. 응답이 불명이면 다음 확인에서 대조 결과로 다시 판단한다.
-  - 대조 안 되는 UNKNOWN/SENDING이 있으면 정리하지 않는다.
+  - 주문내역 대조가 된 OPEN/PARTIAL만 원주문번호로 1회 취소 요청한다. 전송 **전에** 관찰한
+    상태에서 CANCEL_SENDING으로 조건부 UPDATE해 한 요청만 취소를 보낸다. 접수 → CANCEL_REQUESTED,
+    명시적 거절 → 원래 상태 복원, 응답 불명 → CANCEL_UNKNOWN. CANCEL_SENDING/CANCEL_UNKNOWN은
+    자동 재전송하지 않으며, 주문내역 대조가 CANCELLED/FILLED/REJECTED를 보여줄 때만 진행한다.
+  - 대조 안 되는 UNKNOWN/SENDING이 있으면 정리하지 않는다. PREPARED → ABANDONED 변경이 실패하면
+    (다른 요청이 먼저 전송 선점) 정리를 멈춘다.
+  - 후속 사이클 생성 직전, 같은 쓰기 트랜잭션 안에서 해당 방향의 모든 의도가 종료 상태인지 다시
+    확인한다. 하나라도 아니면 후속 사이클을 만들지 않는다.
+- **전송 직렬화:** 의도 선점(`PREPARED → SENDING`)은 같은 사이클·방향에 SENDING/UNKNOWN/REJECTED/
+  ABANDONED/CANCEL_* 의도가 하나도 없을 때만 성공한다. 동시 advance가 겹쳐도 응답 대기 중인 주문
+  뒤의 주문을 다른 요청이 먼저 보내지 못한다. 선점에 실패한 요청은 다음 주문으로 넘어가지 않고 멈춘다.
   - 해당 방향의 의도가 모두 FILLED/CANCELLED/REJECTED/ABANDONED이고 증권사 미체결이 0건이면,
     기존 사이클을 SUPERSEDED로 닫고(활성 해제) 실제 잔고·현금·시세로 다시 계산한 새
     `SELL_PREVIEW` 사이클(`<월간키>#r<n>`)을 같은 트랜잭션에서 만든다. 새 사이클은 미승인이라

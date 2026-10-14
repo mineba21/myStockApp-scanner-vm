@@ -727,3 +727,96 @@ def test_repeated_replans_number_successors_and_keep_one_active(flow):
     with service.db() as db:
         active = db.execute("SELECT COUNT(*) FROM allocation_cycles WHERE active_account='account2'").fetchone()[0]
     assert active == 1
+
+
+# ── 리뷰 2026-10-14: 동시성·취소 재전송 회귀 ─────────────────────────
+
+
+def _two_prepared_buys(flow):
+    service, broker, cid = _authorized_buy_preview(flow, cash='1000')
+    broker.quotes = lambda tickers: {t: {'limit_price': '101.00', 'as_of': time.time()} for t in tickers}
+    stopped = service.advance_authorized_cycle(cid)
+    prepared = [o for o in stopped['orders'] if o['side'] == 'BUY' and o['state'] == 'PREPARED']
+    assert len(prepared) == 2
+    broker.quotes = lambda tickers: {t: {'limit_price': '100.00', 'as_of': time.time()} for t in tickers}
+    return service, broker, cid
+
+
+def test_close_out_never_replans_when_an_unsent_intent_was_claimed_concurrently(flow, monkeypatch):
+    """[P1] A resume claims PREPARED -> SENDING between close-out's read and its abandon."""
+    service, broker, cid = _two_prepared_buys(flow)
+    real_status = service.status
+    calls = {'n': 0}
+
+    def racing_status(cycle_id):
+        view = real_status(cycle_id)
+        calls['n'] += 1
+        if calls['n'] == 2:  # close-out's loop read: another dispatcher claims first
+            with service.db() as db:
+                db.execute("UPDATE allocation_intents SET state='SENDING' WHERE cycle_id=? AND side='BUY'"
+                           " AND state='PREPARED'", (cycle_id,))
+        return view
+
+    monkeypatch.setattr(service, 'status', racing_status)
+    result = service.close_out(cid)
+    monkeypatch.setattr(service, 'status', real_status)
+
+    assert not result.get('replanned')
+    assert result['blockers']
+    current = service.status(cid)
+    assert current['state'] == 'BUY_PENDING'
+    assert service.active()['id'] == cid
+
+
+def test_concurrent_dispatchers_never_send_past_an_in_flight_order(flow):
+    """[P1] B must not send order 2 while A's order 1 awaits its (later rejected) reply."""
+    import threading
+    service, broker, cid = _two_prepared_buys(flow)
+    started, release = threading.Event(), threading.Event()
+    original = broker.submit
+
+    def slow_rejecting_submit(order):
+        if not started.is_set():
+            original(order)
+            started.set()
+            release.wait(5)
+            raise OrderRejected('rejected after a slow reply')
+        return original(order)
+
+    broker.submit = slow_rejecting_submit
+    payload = service.status(cid)['payload']
+    a = threading.Thread(target=lambda: Rebalance(service.path, broker)._dispatch(cid, 'BUY', payload))
+    a.start()
+    assert started.wait(5)
+    # B already passed its resumable pre-check before A claimed order 1.
+    Rebalance(service.path, broker)._dispatch(cid, 'BUY', payload)
+    release.set()
+    a.join(5)
+
+    buys = [o for o in broker.sent if o['side'] == 'BUY']
+    assert len(buys) == 1
+    states = sorted(o['state'] for o in service.status(cid)['orders'] if o['side'] == 'BUY')
+    assert states == ['PREPARED', 'REJECTED']
+
+
+def test_cancel_with_lost_reply_is_never_resent_automatically(flow):
+    """[P2] A cancel whose reply is lost stays unknown until reconciled; no second cancel."""
+    service, broker, cid, order = _open_sell(flow)
+
+    def lost(order):
+        broker.cancelled.append(order)
+        raise requests.Timeout('cancel reply lost')
+
+    broker.cancel = lost
+    first = service.close_out(cid)
+    assert len(broker.cancelled) == 1
+    assert any('불명' in b for b in first['blockers'])
+    second = service.close_out(cid)
+    third = service.advance_authorized_cycle(cid)
+    assert len(broker.cancelled) == 1
+    assert any('불명' in b for b in second['blockers'] + third['blockers'])
+    # Once broker history shows the cancel, the close-out completes.
+    broker.evidence[order['id']] = {'matched_intent_id': order['id'], 'state': 'CANCELLED', 'filled_quantity': 0}
+    broker.pending = []
+    assert service.close_out(cid)['replanned'] is True
+    assert len(broker.cancelled) == 1
