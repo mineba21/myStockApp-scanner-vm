@@ -1495,6 +1495,8 @@ def _notify(buys, sells, holding_signals_or_send=None, send_fn=None,
                     msg += "\n"
                 else:
                     msg += f"  • 시그널일: {s['signal_date']}\n"
+                    for warning in s.get("entry_warnings") or []:
+                        msg += f"  ⚠️ {warning}\n"
                     for sizing_line in _sizing_notification_lines(s):
                         msg += sizing_line + "\n"
                     msg += "\n"

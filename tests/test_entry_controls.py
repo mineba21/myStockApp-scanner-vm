@@ -422,3 +422,93 @@ class TestShadowAndRegression:
             "any_would_cut": 2,
             "would_remain": 4,
         }
+
+
+class TestReBreakoutWarningsOnly:
+    """RE_BREAKOUT gets the same observations as warnings; pass/fail does not change."""
+
+    def test_rebreakout_gets_pivot_upthrust_and_weekly_volume_warnings(self, monkeypatch):
+        import config
+        from scanner.entry_control import annotate_signal_entry
+
+        monkeypatch.setattr(config, "MAX_PIVOT_EXT_PCT", 5.0)
+        monkeypatch.setattr(config, "UPTHRUST_CHECK_DAYS", 3)
+        monkeypatch.setattr(config, "BREAKOUT_WEEKLY_VOL_RATIO", 0.5)
+        signal = _signal(signal_type="RE_BREAKOUT", strict_price=106.0,
+                         strict_weekly_volume_ratio=0.41, entry_warnings=[], warning_flags=[])
+        annotate_signal_entry(signal, _daily([106, 104, 99, 101]))
+
+        assert signal["pivot_ext_pct"] == 6.0
+        assert signal["upthrust_failed"] is True
+        assert any("추격 구간" in w for w in signal["entry_warnings"])
+        assert any("돌파 실패" in w for w in signal["entry_warnings"])
+        assert any("주봉 거래량 미달 — 0.41x" in w for w in signal["entry_warnings"])
+
+    def test_breakout_never_gets_rebreakout_weekly_volume_warning(self, monkeypatch):
+        import config
+        from scanner.entry_control import annotate_signal_entry
+
+        monkeypatch.setattr(config, "BREAKOUT_WEEKLY_VOL_RATIO", 0.5)
+        signal = _signal(strict_weekly_volume_ratio=0.41, entry_warnings=[], warning_flags=[])
+        annotate_signal_entry(signal, _daily([106, 104, 103, 104]))
+        assert not any("주봉 거래량" in w for w in signal["entry_warnings"])
+
+    def test_rebreakout_strict_result_unchanged_even_with_entry_gates_on(self, monkeypatch):
+        from scanner import strict_filter as sf
+
+        monkeypatch.setattr(sf, "STRICT_WEINSTEIN_MODE", False)
+        monkeypatch.setattr(sf, "PIVOT_EXT_AS_GATE", True)
+        monkeypatch.setattr(sf, "UPTHRUST_AS_GATE", True)
+        signal = _signal(signal_type="RE_BREAKOUT", pivot_ext_pct=20.0, upthrust_failed=True)
+        assert sf.apply_strict_filter(signal, {}) == (True, [])
+
+    def test_saramin_case_below_pivot_warns_but_is_never_suppressed(self, monkeypatch):
+        """Production 2026-10-14: 사람인 RE_BREAKOUT closed 2.5% under its pivot."""
+        import config
+        from scanner.entry_control import annotate_alert_freshness
+
+        monkeypatch.setattr(config, "ALERT_MAX_CUR_STOP_PCT", 12.0)
+        signal = _signal(signal_type="RE_BREAKOUT", market="KR", price=17320.0,
+                         pivot_price=17760.0, stop_loss=16483.5,
+                         entry_warnings=[], warning_flags=[])
+        annotate_alert_freshness(signal)
+        assert signal["cur_ext_pct"] == -2.48
+        assert "피벗 하회 — 현재가가 피벗 아래 2.5%" in signal["entry_warnings"]
+        assert signal["_alert_freshness_would_cut"] is False
+
+        broken = _signal(signal_type="RE_BREAKOUT", price=85.0, entry_warnings=[], warning_flags=[])
+        annotate_alert_freshness(broken)
+        assert any("손절가 이탈" in w for w in broken["entry_warnings"])
+        assert broken["_alert_freshness_would_cut"] is False
+
+    def test_breakout_below_pivot_warns_without_changing_suppression(self):
+        from scanner.entry_control import annotate_alert_freshness
+
+        signal = _signal(price=98.0, stop_loss=90.0, entry_warnings=[], warning_flags=[])
+        annotate_alert_freshness(signal)
+        assert "피벗 하회 — 현재가가 피벗 아래 2.0%" in signal["entry_warnings"]
+        assert signal["_alert_freshness_would_cut"] is False
+
+    def test_rebreakout_failure_never_starts_breakout_cooldown(self):
+        from scanner.scan_engine import _sync_upthrust_cooldown
+        from database.models import UpthrustCooldown
+
+        db = _fresh_db()
+        try:
+            signal = _signal(signal_type="RE_BREAKOUT", upthrust_failed=True,
+                             _upthrust_failed_date="2026-08-05")
+            _sync_upthrust_cooldown(db, signal)
+            assert db.query(UpthrustCooldown).count() == 0
+        finally:
+            db.close()
+
+    def test_rebreakout_notification_lists_warnings(self, monkeypatch):
+        from scanner.scan_engine import _notify
+
+        monkeypatch.setattr("scanner.scan_engine._sector_summary", lambda market: "")
+        messages = []
+        signal = _signal(_grade="B", signal_type="RE_BREAKOUT",
+                         entry_warnings=["피벗 하회 — 현재가가 피벗 아래 2.5%"])
+        _notify([signal], [], messages.append)
+        assert len(messages) == 1
+        assert "⚠️ 피벗 하회 — 현재가가 피벗 아래 2.5%" in messages[0]
