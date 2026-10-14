@@ -26,7 +26,8 @@ def _sizing_config(market: str) -> dict[str, float]:
     }
 
 
-def _account_context(summary: dict[str, Any], market: str) -> tuple[float, float]:
+def account_context(summary: dict[str, Any], market: str) -> tuple[float, float]:
+    """(total equity, orderable cash) of one broker account in market currency."""
     if market == "KR":
         domestic = summary.get("domestic", {})
         equity = float(domestic.get("estimated_assets") or 0)
@@ -63,7 +64,7 @@ def apply_live_position_sizing(
         summary = summaries.get(profile)
         if not summary:
             continue
-        equity, cash = _account_context(summary, market)
+        equity, cash = account_context(summary, market)
         account_holdings = [
             holding
             for holding in holdings

@@ -241,3 +241,87 @@ class TestEquityApiAndPersistence:
         assert signal["suggested_qty"] is None
         assert row.suggested_qty is None
         assert row.equity_snapshot is None
+
+
+class TestBrokerEquityAutoRecord:
+    """2026-10-14: scan-time equity comes from 자유투자(account1), US only."""
+
+    ACCOUNT1 = {"account_profile": "account1", "display_name": "자유투자",
+                "overseas": {"cash": 12282.26, "evaluation_amount": 47703.68,
+                             "orderable_cash": 12196.85},
+                "domestic": {"estimated_assets": 0}}
+
+    def _signal(self, market="US", ticker="SLB"):
+        return {"market": market, "ticker": ticker, "name": ticker,
+                "signal_type": "BREAKOUT", "price": 34.2, "strict_price": 34.2,
+                "stop_loss": 30.72, "signal_date": "2026-10-13",
+                "ma150": 30.0, "volume_ratio": 1.82}
+
+    def _summaries(self, monkeypatch, value):
+        calls = []
+
+        def fake(force=False):
+            calls.append(force)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        monkeypatch.setattr("web.kiwoom_holdings.get_kiwoom_account_summaries", fake)
+        return calls
+
+    def test_account1_us_equity_is_recorded_and_used_for_suggested_qty(self, db, monkeypatch):
+        from scanner.scan_engine import _attach_position_sizing
+
+        monkeypatch.setenv("KIWOOM_WEB_ENABLED", "true")
+        monkeypatch.setattr("scanner.scan_engine._sizing_config", lambda market: BASE_CFG)
+        calls = self._summaries(monkeypatch, [self.ACCOUNT1])
+        signal = self._signal()
+        _attach_position_sizing(db, [signal])
+
+        row = db.query(AccountEquity).one()
+        assert (row.market, row.currency) == ("US", "USD")
+        assert row.total_equity == pytest.approx(59985.94)
+        assert row.cash_balance == pytest.approx(12196.85)
+        assert row.note == "키움 account1 자동 기록"
+        assert calls == [True]  # fresh broker read, not the 60s web cache
+        assert signal["equity_snapshot"] == pytest.approx(59985.94)
+        assert signal["suggested_qty"] is not None
+
+    def test_disabled_kiwoom_never_calls_broker(self, db, monkeypatch):
+        from scanner.scan_engine import _attach_position_sizing
+
+        monkeypatch.setenv("KIWOOM_WEB_ENABLED", "false")
+        calls = self._summaries(monkeypatch, [self.ACCOUNT1])
+        _attach_position_sizing(db, [self._signal()])
+        assert calls == []
+        assert db.query(AccountEquity).count() == 0
+
+    @pytest.mark.parametrize("value", [
+        RuntimeError("broker offline"),
+        [],                                                         # account1 missing
+        [{**ACCOUNT1, "overseas": {"cash": 0, "evaluation_amount": 0, "orderable_cash": 0}}],
+        [{**ACCOUNT1, "overseas": {"cash": 10, "evaluation_amount": 0, "orderable_cash": 50}}],
+    ])
+    def test_failed_or_invalid_read_keeps_previous_equity_row(self, db, monkeypatch, value):
+        from scanner.scan_engine import _attach_position_sizing
+
+        monkeypatch.setenv("KIWOOM_WEB_ENABLED", "true")
+        monkeypatch.setattr("scanner.scan_engine._sizing_config", lambda market: BASE_CFG)
+        db.add(AccountEquity(market="US", currency="USD", total_equity=100_000,
+                             cash_balance=100_000, note="manual"))
+        db.commit()
+        self._summaries(monkeypatch, value)
+        signal = self._signal()
+        _attach_position_sizing(db, [signal])
+        assert db.query(AccountEquity).count() == 1
+        assert signal["equity_snapshot"] == 100_000
+
+    def test_kr_signals_never_auto_record(self, db, monkeypatch):
+        from scanner.scan_engine import _attach_position_sizing
+
+        monkeypatch.setenv("KIWOOM_WEB_ENABLED", "true")
+        calls = self._summaries(monkeypatch, [self.ACCOUNT1])
+        signal = self._signal(market="KR", ticker="143240")
+        _attach_position_sizing(db, [signal])
+        assert calls == []
+        assert db.query(AccountEquity).count() == 0
+        assert signal["suggested_qty"] is None

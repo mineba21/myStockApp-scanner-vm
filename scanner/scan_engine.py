@@ -1,6 +1,8 @@
 """스캔 엔진 - 전체 스캔 오케스트레이션"""
 import json
 import logging
+import math
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
@@ -605,10 +607,62 @@ def _sizing_config(market: str) -> dict:
             for name, default in defaults.items()}
 
 
+# 2026-10-14 사용자 결정: 스캔 시점 자산은 자유투자(account1)만 자동 기록한다.
+# account1은 미국 전용이라 US만 해당한다. KR은 기존 수동 입력(/api/equity)을 유지한다.
+AUTO_EQUITY_MARKETS = ("US",)
+_EQUITY_CURRENCY = {"KR": "KRW", "US": "USD"}
+
+
+def _record_broker_equity(db, markets) -> None:
+    """키움 실계좌 요약으로 AccountEquity 행을 append 한다 (조회 전용).
+
+    웹 결과 화면의 실계좌 사이징(``web.kiwoom_sizing``)과 같은 계좌·계산을 쓴다.
+    조회 실패나 0/비정상 값은 기록하지 않고 기존 최신 행(수동 입력 포함)을 그대로 쓴다.
+    """
+    if os.getenv("KIWOOM_WEB_ENABLED", "false").lower() != "true":
+        return
+    wanted = [m for m in AUTO_EQUITY_MARKETS if m in markets]
+    if not wanted:
+        return
+    from database.models import AccountEquity
+    from web.kiwoom_holdings import get_kiwoom_account_summaries
+    from web.kiwoom_sizing import TARGET_ACCOUNT_BY_MARKET, account_context
+
+    try:
+        summaries = {str(s.get("account_profile")): s
+                     for s in get_kiwoom_account_summaries(force=True)}
+    except Exception as exc:
+        logger.warning("키움 자산 자동 기록 실패 — 기존 자산 행 사용: %s", type(exc).__name__)
+        return
+    for market in wanted:
+        profile = TARGET_ACCOUNT_BY_MARKET[market]
+        summary = summaries.get(profile)
+        if not summary:
+            logger.warning("키움 자산 자동 기록: %s 요약 없음", profile)
+            continue
+        try:
+            equity, cash = account_context(summary, market)
+        except (TypeError, ValueError):
+            equity, cash = float("nan"), float("nan")
+        if (not math.isfinite(equity) or not math.isfinite(cash)
+                or equity <= 0 or cash < 0 or cash > equity):
+            # 0은 빈 계좌가 아니라 조회 불가일 수 있다 — 기록하지 않는다.
+            logger.warning("키움 자산 자동 기록: %s %s 값이 유효하지 않음", profile, market)
+            continue
+        db.add(AccountEquity(
+            market=market, currency=_EQUITY_CURRENCY[market],
+            total_equity=equity, cash_balance=cash,
+            note=f"키움 {profile} 자동 기록",
+        ))
+    db.flush()
+
+
 def _attach_position_sizing(db, signals: list) -> None:
     """알림 후보에 시장별 최신 자산/heat 기준 사이징 스냅샷을 붙인다."""
     from database.models import AccountEquity, Holding
     from scanner.sizing import calculate_open_risk, calculate_position
+
+    _record_broker_equity(db, {str(s.get("market", "")).upper() for s in signals})
 
     holdings = db.query(Holding).filter(
         Holding.is_active == True,
