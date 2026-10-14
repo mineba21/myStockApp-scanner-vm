@@ -182,6 +182,13 @@ class Rebalance:
                 # Broker history is matched against the actual send time, which
                 # differs from created_at when an unsent intent is resumed.
                 db.execute("ALTER TABLE allocation_intents ADD COLUMN sent_at REAL")
+            cycle_columns = {r["name"] for r in db.execute("PRAGMA table_info(allocation_cycles)")}
+            if "closing_out" not in cycle_columns:
+                # A column (not only the JSON payload) so the send claim can test
+                # it inside its own UPDATE statement.
+                db.execute("ALTER TABLE allocation_cycles ADD COLUMN closing_out INTEGER NOT NULL DEFAULT 0")
+                db.execute("UPDATE allocation_cycles SET closing_out=1"
+                           " WHERE payload LIKE '%\"closing_out\": true%'")
 
     @contextmanager
     def db(self):
@@ -249,7 +256,8 @@ class Rebalance:
         cycle_id = uuid.uuid4().hex
         try:
             with self.db() as db:
-                db.execute("INSERT INTO allocation_cycles VALUES (?, ?, 'account2', 'SELL_PREVIEW', ?)",
+                db.execute("INSERT INTO allocation_cycles (id, cycle_key, active_account, state, payload)"
+                           " VALUES (?, ?, 'account2', 'SELL_PREVIEW', ?)",
                            (cycle_id, cycle_key, json.dumps(payload)))
         except sqlite3.IntegrityError as exc:
             raise RebalanceBlocked("account2의 기존 재구성 기록을 먼저 확인하세요.") from exc
@@ -370,11 +378,14 @@ class Rebalance:
                 # fails while any intent is sending, ambiguous, rejected or being
                 # closed out, so a second dispatcher can never send past a
                 # reply that is still pending (and may yet be a rejection).
+                # The cycle must still be in this side's pending phase and not
+                # closing out — checked in the same statement as the claim.
                 claimed = db.execute(
                     "UPDATE allocation_intents SET state='SENDING', sent_at=? WHERE id=? AND state='PREPARED'"
                     " AND NOT EXISTS (SELECT 1 FROM allocation_intents WHERE cycle_id=? AND side=?"
-                    f" AND state IN ({', '.join(repr(x) for x in sorted(self.STOPS_DISPATCH))}))",
-                    (sent_at, order["id"], cycle_id, side)).rowcount
+                    f" AND state IN ({', '.join(repr(x) for x in sorted(self.STOPS_DISPATCH))}))"
+                    " AND EXISTS (SELECT 1 FROM allocation_cycles WHERE id=? AND state=? AND closing_out=0)",
+                    (sent_at, order["id"], cycle_id, side, cycle_id, side + "_PENDING")).rowcount
             if not claimed:
                 break  # another dispatcher is sending or the side is stopped
             order = {**order, "state": "SENDING", "sent_at": sent_at}
@@ -513,10 +524,16 @@ class Rebalance:
         if not current["payload"].get("closing_out"):
             previous_json = json.dumps(current["payload"])
             payload = {**current["payload"], "closing_out": True, "closing_requested_at": time.time()}
+            # One write transaction: from its commit on, no dispatcher can claim
+            # an intent of this cycle, and every unsent intent is already dropped.
             with self.db() as db:
+                db.execute("BEGIN IMMEDIATE")
                 changed = db.execute(
-                    "UPDATE allocation_cycles SET payload=? WHERE id=? AND state=? AND payload=?",
+                    "UPDATE allocation_cycles SET payload=?, closing_out=1 WHERE id=? AND state=? AND payload=?",
                     (json.dumps(payload), cycle_id, current["state"], previous_json)).rowcount
+                if changed:
+                    db.execute("UPDATE allocation_intents SET state='ABANDONED'"
+                               " WHERE cycle_id=? AND side=? AND state='PREPARED'", (cycle_id, side))
             if not changed:
                 raise RebalanceBlocked("계획이 다른 요청에서 변경되었습니다. 최신 상태를 다시 확인하세요.")
         problems = []
@@ -625,7 +642,8 @@ class Rebalance:
             old_payload = {**json.loads(row["payload"]), "superseded_by": new_id}
             db.execute("UPDATE allocation_cycles SET state='SUPERSEDED', active_account=NULL, payload=? WHERE id=?",
                        (json.dumps(old_payload), cycle_id))
-            db.execute("INSERT INTO allocation_cycles VALUES (?, ?, 'account2', 'SELL_PREVIEW', ?)",
+            db.execute("INSERT INTO allocation_cycles (id, cycle_key, active_account, state, payload)"
+                           " VALUES (?, ?, 'account2', 'SELL_PREVIEW', ?)",
                        (new_id, f"{base}#r{count}", json.dumps(successor_payload)))
         return {**self.status(new_id), "replanned": True, "blockers": [
             "미체결·미전송 주문을 정리하고 실제 보유수량 기준으로 남은 차액을 다시 계산했습니다. "

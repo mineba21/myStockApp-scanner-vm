@@ -743,7 +743,11 @@ def _two_prepared_buys(flow):
 
 
 def test_close_out_never_replans_when_an_unsent_intent_was_claimed_concurrently(flow, monkeypatch):
-    """[P1] A resume claims PREPARED -> SENDING between close-out's read and its abandon."""
+    """[P1] A resume claims PREPARED -> SENDING just before close-out's flag transaction.
+
+    After that transaction no claim can succeed (see the next test), so this is
+    the only remaining window: the in-flight order must block the re-plan.
+    """
     service, broker, cid = _two_prepared_buys(flow)
     real_status = service.status
     calls = {'n': 0}
@@ -751,7 +755,7 @@ def test_close_out_never_replans_when_an_unsent_intent_was_claimed_concurrently(
     def racing_status(cycle_id):
         view = real_status(cycle_id)
         calls['n'] += 1
-        if calls['n'] == 2:  # close-out's loop read: another dispatcher claims first
+        if calls['n'] == 1:  # close-out's first read: another dispatcher claims first
             with service.db() as db:
                 db.execute("UPDATE allocation_intents SET state='SENDING' WHERE cycle_id=? AND side='BUY'"
                            " AND state='PREPARED'", (cycle_id,))
@@ -762,8 +766,9 @@ def test_close_out_never_replans_when_an_unsent_intent_was_claimed_concurrently(
     monkeypatch.setattr(service, 'status', real_status)
 
     assert not result.get('replanned')
-    assert result['blockers']
+    assert any('접수 여부 불명' in b for b in result['blockers'])
     current = service.status(cid)
+    assert {o['state'] for o in current['orders'] if o['side'] == 'BUY'} == {'SENDING'}
     assert current['state'] == 'BUY_PENDING'
     assert service.active()['id'] == cid
 
@@ -820,3 +825,61 @@ def test_cancel_with_lost_reply_is_never_resent_automatically(flow):
     broker.pending = []
     assert service.close_out(cid)['replanned'] is True
     assert len(broker.cancelled) == 1
+
+
+def test_dispatcher_cannot_send_after_close_out_started(flow):
+    """[P1 2nd review] While close-out reconciles order 1, a running dispatcher
+    must not claim and send order 2."""
+    service, broker, cid = _two_prepared_buys(flow)
+    first, second = [o for o in service.status(cid)['orders'] if o['side'] == 'BUY']
+    with service.db() as db:  # order 1 already went out before the close-out
+        db.execute("UPDATE allocation_intents SET state='SUBMITTED', order_number='7', sent_at=? WHERE id=?",
+                   (time.time(), first['id']))
+    broker.evidence[first['id']] = {'matched_intent_id': first['id'], 'state': 'OPEN', 'filled_quantity': 0}
+    payload = service.status(cid)['payload']
+    sent_before = len(broker.sent)
+    original_lookup = broker.lookup
+
+    def lookup_while_dispatcher_runs(order):
+        # The existing dispatcher resumes exactly while close-out reads order 1.
+        Rebalance(service.path, broker)._dispatch(cid, 'BUY', payload)
+        return original_lookup(order)
+
+    broker.lookup = lookup_while_dispatcher_runs
+    service.close_out(cid)
+
+    assert len(broker.sent) == sent_before
+    states = {o['id']: o['state'] for o in service.status(cid)['orders']}
+    assert states[second['id']] == 'ABANDONED'
+    assert states[first['id']] == 'CANCEL_REQUESTED'
+
+
+def test_existing_journal_gains_send_and_closing_columns(tmp_path):
+    """A journal created before sent_at/closing_out is migrated in place."""
+    import sqlite3
+    path = tmp_path / 'old.sqlite'
+    db = sqlite3.connect(path)
+    db.executescript('''
+        CREATE TABLE allocation_cycles (
+            id TEXT PRIMARY KEY, cycle_key TEXT NOT NULL UNIQUE,
+            active_account TEXT UNIQUE, state TEXT NOT NULL, payload TEXT NOT NULL);
+        CREATE TABLE allocation_intents (
+            id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, side TEXT NOT NULL,
+            ticker TEXT NOT NULL, quantity INTEGER NOT NULL, price TEXT NOT NULL,
+            state TEXT NOT NULL, order_number TEXT, created_at REAL NOT NULL,
+            UNIQUE(cycle_id, side, ticker));
+    ''')
+    db.execute("INSERT INTO allocation_cycles VALUES ('a', 'k', 'account2', 'BUY_PENDING', ?)",
+               (json.dumps({'mode': 'DELTA_V1', 'closing_out': True}),))
+    db.execute("INSERT INTO allocation_cycles VALUES ('b', 'k2', NULL, 'COMPLETE', ?)",
+               (json.dumps({'mode': 'DELTA_V1'}),))
+    db.commit()
+    db.close()
+
+    service = Rebalance(path, Broker())
+    with service.db() as conn:
+        flags = dict(conn.execute('SELECT id, closing_out FROM allocation_cycles'))
+        intent_columns = {r['name'] for r in conn.execute('PRAGMA table_info(allocation_intents)')}
+    assert flags == {'a': 1, 'b': 0}
+    assert 'sent_at' in intent_columns
+    Rebalance(path, Broker())  # idempotent on restart

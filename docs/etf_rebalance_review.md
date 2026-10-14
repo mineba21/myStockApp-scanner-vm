@@ -137,9 +137,14 @@ VAA/LAA/듀얼 모멘텀 계산기는 `ASSET_ALLOCATION_DIR/asset_allocation.py`
     (다른 요청이 먼저 전송 선점) 정리를 멈춘다.
   - 후속 사이클 생성 직전, 같은 쓰기 트랜잭션 안에서 해당 방향의 모든 의도가 종료 상태인지 다시
     확인한다. 하나라도 아니면 후속 사이클을 만들지 않는다.
-- **전송 직렬화:** 의도 선점(`PREPARED → SENDING`)은 같은 사이클·방향에 SENDING/UNKNOWN/REJECTED/
-  ABANDONED/CANCEL_* 의도가 하나도 없을 때만 성공한다. 동시 advance가 겹쳐도 응답 대기 중인 주문
-  뒤의 주문을 다른 요청이 먼저 보내지 못한다. 선점에 실패한 요청은 다음 주문으로 넘어가지 않고 멈춘다.
+- **전송 직렬화:** 의도 선점(`PREPARED → SENDING`)은 한 UPDATE 문 안에서 (1) 같은 사이클·방향에
+  SENDING/UNKNOWN/REJECTED/ABANDONED/CANCEL_* 의도가 하나도 없고 (2) 사이클이 그 방향의 `*_PENDING`
+  상태이며 (3) `allocation_cycles.closing_out=0`일 때만 성공한다. 동시 advance가 겹쳐도 응답 대기 중인
+  주문 뒤의 주문을 다른 요청이 먼저 보내지 못한다. 선점에 실패한 요청은 다음 주문으로 넘어가지 않고 멈춘다.
+- **정리 시작 원자성:** close-out은 첫 쓰기 트랜잭션에서 `closing_out=1`(열 + payload)을 켜고 같은 방향의
+  PREPARED를 모두 ABANDONED로 바꾼다. 이 커밋 이후에는 어떤 dispatcher도 그 사이클의 의도를 선점할 수
+  없다. 커밋 직전에 이미 선점된 의도는 SENDING으로 남아 대조 전까지 재계산을 막는다.
+  기존 저널은 시작 시 `closing_out` 열을 자동 추가하고 payload에 정리 표시가 있던 행은 1로 옮긴다.
   - 해당 방향의 의도가 모두 FILLED/CANCELLED/REJECTED/ABANDONED이고 증권사 미체결이 0건이면,
     기존 사이클을 SUPERSEDED로 닫고(활성 해제) 실제 잔고·현금·시세로 다시 계산한 새
     `SELL_PREVIEW` 사이클(`<월간키>#r<n>`)을 같은 트랜잭션에서 만든다. 새 사이클은 미승인이라

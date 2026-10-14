@@ -2524,7 +2524,8 @@ function allocationRebalancePanel() {
       if (this.pollTimer) clearTimeout(this.pollTimer);
       const pending = ['SELL_PENDING','BUY_PENDING'].includes(this.cycle?.state);
       const orders = this.cycle?.orders || [];
-      const unsafe = orders.some(row => ['UNKNOWN','REJECTED','PREPARED','SENDING'].includes(row.state));
+      const unsafe = orders.some(row => ['UNKNOWN','REJECTED','PREPARED','SENDING',
+        'CANCEL_SENDING','CANCEL_UNKNOWN'].includes(row.state));
       // A close-out only cancels once and never sends, so it may keep polling
       // for the cancel confirmation unless an order's receipt is still unknown.
       const closing = this.cycle?.payload?.closing_out
