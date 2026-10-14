@@ -158,7 +158,12 @@ def test_one_button_execute_persists_authorization_and_stops_for_unfilled_sell(c
     base = '/api/asset-allocation/rebalance/' + cycle['id']
 
     assert test_client.post(base + '/execute', json={'confirmation':'wrong'}).status_code == 422
-    result = test_client.post(base + '/execute', json={'confirmation':'account2'}).json()
+    unseen = test_client.post(base + '/execute', json={'confirmation':'account2'}).json()
+    assert unseen['state'] == 'SELL_PREVIEW' and unseen['plan_changed'] is True
+    assert broker.sent == []
+    from tests.test_allocation_rebalance import seen
+    result = test_client.post(base + '/execute', json={'confirmation':'account2',
+                                                       'expected_plan': seen(unseen)}).json()
 
     assert result['state'] == 'SELL_PENDING'
     assert result['blockers']

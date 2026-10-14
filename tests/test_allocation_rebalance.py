@@ -66,6 +66,14 @@ def flow(tmp_path):
     return service, broker, cycle['id']
 
 
+def seen(cycle):
+    """The plan the browser displays and sends back with the execute click."""
+    p = cycle['payload']
+    return {'sells': [{'ticker': o['ticker'], 'quantity': o['quantity']} for o in p['preview']],
+            'targets': p['planning']['targets'],
+            'current': {t: q for t, q in p['original_quantities'].items() if Decimal(q)}}
+
+
 def sold(flow):
     service, broker, cid = flow
     sell = service.confirm(cid, 'SELL')
@@ -105,7 +113,7 @@ def test_excess_sale_fill_cash_refresh_buys_only_deficits_preserves_other_strate
 def test_one_user_authorization_advances_sell_then_buy_without_second_confirmation(flow):
     service, broker, cid = flow
 
-    selling = service.execute_authorized_cycle(cid)
+    selling = service.execute_authorized_cycle(cid, seen(service.status(cid)))
     assert selling['state'] == 'SELL_PENDING'
     assert selling['payload']['authorization_scope'] == 'FULL_CYCLE_V1'
     assert selling['blockers']
@@ -138,7 +146,7 @@ def test_one_button_stops_after_broker_rejection(flow):
     service, broker, cid = flow
     broker.failure = OrderRejected("market closed")
 
-    result = service.execute_authorized_cycle(cid)
+    result = service.execute_authorized_cycle(cid, seen(service.status(cid)))
 
     assert result['state'] == 'SELL_PENDING'
     assert result['orders'][0]['state'] == 'REJECTED'
@@ -319,17 +327,24 @@ def test_refresh_failure_does_not_return_stale_preview(flow):
     assert broker.sent == []
 
 
-def test_authorized_preview_cannot_be_replaced(flow):
+def test_legacy_authorized_preview_without_intents_is_recoverable(flow):
+    """Old code saved authorization before an expired confirm and locked the
+    month. No intent row means nothing was sent, so a refresh may replace it."""
     service, broker, cid = flow
     payload = service.status(cid)['payload']
     payload['execution_authorized'] = True
+    payload['expires_at'] = time.time() - 1
     with service.db() as db:
         db.execute('UPDATE allocation_cycles SET payload=? WHERE id=?', (json.dumps(payload), cid))
-    before = service.status(cid)
-    with pytest.raises(RebalanceBlocked):
-        service.refresh_sell_preview(cid)
-    assert service.create('easy-2026-08-31', {'SPY': 1}, ['SPY']) == before
+    refreshed = service.create('easy-2026-08-31', {'SPY': 1}, ['SPY'])
+    assert refreshed['id'] == cid
+    assert refreshed['state'] == 'SELL_PREVIEW'
+    assert 'execution_authorized' not in refreshed['payload']
+    assert refreshed['payload']['expires_at'] > time.time()
     assert broker.sent == []
+    result = service.execute_authorized_cycle(cid, seen(refreshed))
+    assert result['state'] == 'SELL_PENDING'
+    assert len(broker.sent) == 1
 
 
 def test_concurrent_authorization_blocks_refresh(flow, monkeypatch):
@@ -486,3 +501,113 @@ def test_retained_position_change_blocks_buy(flow):
     with pytest.raises(RebalanceBlocked):
         service.confirm(cid, 'BUY')
     assert len(broker.sent) == 1
+
+
+def test_click_after_preview_expiry_replans_instead_of_locking_the_month(flow, monkeypatch):
+    """Kiwoom quote times are minute-precision, so a preview may expire before
+    the user finishes reading. The click must re-plan, not lock the cycle."""
+    service, broker, cid = flow
+    shown = service.status(cid)
+    payload = shown['payload']
+    payload['expires_at'] = time.time() - 30
+    with service.db() as db:
+        db.execute('UPDATE allocation_cycles SET payload=? WHERE id=?', (json.dumps(payload), cid))
+
+    result = service.execute_authorized_cycle(cid, seen(shown))
+
+    assert result['state'] == 'SELL_PENDING'
+    assert result['payload']['execution_authorized'] is True
+    assert result['payload']['expires_at'] > time.time()
+    assert [(o['ticker'], o['quantity']) for o in broker.sent] == [('SPY', 2)]
+
+
+def test_changed_plan_is_shown_again_and_never_executed_by_the_same_click(flow):
+    service, broker, cid = flow
+    shown = service.status(cid)
+    broker.holdings['SPY'] = 6  # another fill changed account2 after the preview
+
+    result = service.execute_authorized_cycle(cid, seen(shown))
+
+    assert result['plan_changed'] is True
+    assert result['state'] == 'SELL_PREVIEW'
+    assert 'execution_authorized' not in result['payload']
+    assert result['payload']['original_quantities']['SPY'] == '6'
+    assert broker.sent == []
+    again = service.execute_authorized_cycle(cid, seen(result))
+    assert again['state'] == 'SELL_PENDING'
+    assert [(o['ticker'], o['quantity']) for o in broker.sent] == [('SPY', 3)]  # 50% of $610
+
+
+def test_failure_before_first_order_does_not_persist_authorization(flow):
+    service, broker, cid = flow
+    shown = service.status(cid)
+    broker.pending = [{'ticker': 'SPY'}]
+    with pytest.raises(RebalanceBlocked, match='미체결'):
+        service.execute_authorized_cycle(cid, seen(shown))
+    current = service.status(cid)
+    assert current['state'] == 'SELL_PREVIEW'
+    assert 'execution_authorized' not in current['payload']
+    broker.pending = []
+    assert service.refresh_sell_preview(cid)['state'] == 'SELL_PREVIEW'
+    assert broker.sent == []
+
+
+def _authorized_buy_preview(flow, cash='1000'):
+    service, broker, cid = flow
+    selling = service.execute_authorized_cycle(cid, seen(service.status(cid)))
+    broker.fill([o for o in selling['orders'] if o['side'] == 'SELL'])
+    broker.cash = Decimal(cash)
+    assert service.reconcile(cid)['state'] == 'SELL_CONFIRMED'
+    preview = service.preview_buys(cid)
+    payload = preview['payload']
+    payload['expires_at'] = time.time() - 1  # buy plan expired before dispatch
+    with service.db() as db:
+        db.execute('UPDATE allocation_cycles SET payload=? WHERE id=?', (json.dumps(payload), cid))
+    return service, broker, cid
+
+
+def test_expired_buy_plan_sends_at_approved_limit_when_fresh_quote_is_no_worse(flow):
+    service, broker, cid = _authorized_buy_preview(flow)
+    broker.quotes = lambda tickers: {t: {'limit_price': '99.50', 'as_of': time.time()} for t in tickers}
+
+    result = service.advance_authorized_cycle(cid)
+
+    assert result['state'] == 'BUY_PENDING'
+    buys = [o for o in broker.sent if o['side'] == 'BUY']
+    assert buys and {o['price'] for o in buys} == {'100.00'}
+    assert not [o for o in result['orders'] if o['state'] == 'PREPARED']
+
+
+def test_expired_buy_plan_stops_when_price_rose_then_resumes_without_duplicates(flow):
+    service, broker, cid = _authorized_buy_preview(flow)
+    sells = len(broker.sent)
+    broker.quotes = lambda tickers: {t: {'limit_price': '101.00', 'as_of': time.time()} for t in tickers}
+
+    stopped = service.advance_authorized_cycle(cid)
+
+    assert stopped['state'] == 'BUY_PENDING'
+    assert stopped['blockers']
+    assert len(broker.sent) == sells
+    prepared = [o for o in stopped['orders'] if o['side'] == 'BUY' and o['state'] == 'PREPARED']
+    assert prepared
+
+    broker.quotes = lambda tickers: {t: {'limit_price': '100.00', 'as_of': time.time()} for t in tickers}
+    resumed = service.advance_authorized_cycle(cid)
+    sent_buys = [o for o in broker.sent if o['side'] == 'BUY']
+    assert len(sent_buys) == len(prepared)
+    assert len({o['id'] for o in sent_buys}) == len(sent_buys)
+    broker.fill([o for o in resumed['orders'] if o['side'] == 'BUY'])
+    assert service.advance_authorized_cycle(cid)['state'] == 'COMPLETE'
+    assert len([o for o in broker.sent if o['side'] == 'BUY']) == len(prepared)
+
+
+def test_unsent_intents_never_resume_after_rejection_or_unknown(flow):
+    service, broker, cid = _authorized_buy_preview(flow)
+    broker.failure = OrderRejected('rejected')
+    first = service.advance_authorized_cycle(cid)
+    buys = [o for o in first['orders'] if o['side'] == 'BUY']
+    assert [o['state'] for o in buys][0] == 'REJECTED'
+    sent = len(broker.sent)
+    broker.failure = None
+    service.advance_authorized_cycle(cid)
+    assert len(broker.sent) == sent

@@ -2498,7 +2498,15 @@ function allocationRebalancePanel() {
     },
     async executeCycle() {
       if (!this.cycle || !confirm('표시된 ETF 종목·비중과 매수·매도 수량을 확인했습니까?\n확인 후 매도 체결 → 현금 재조회 → 매수를 진행합니다.')) return;
-      await this.action('/' + this.cycle.id + '/execute', {confirmation:'account2'});
+      const p = this.cycle.payload || {};
+      const positive = (rows) => Object.fromEntries(Object.entries(rows || {}).filter(([, q]) => Number(q) > 0));
+      const expected_plan = {
+        sells: (p.preview || []).map(row => ({ticker: row.ticker, quantity: row.quantity})),
+        targets: positive(p.planning?.targets),
+        current: positive(p.original_quantities),
+      };
+      await this.action('/' + this.cycle.id + '/execute', {confirmation:'account2', expected_plan});
+      if (this.cycle?.plan_changed) this.reason = '최신 잔고·시세로 계획이 바뀌어 실행하지 않았습니다. 갱신된 표를 확인한 뒤 다시 실행하세요.';
       this.queueAdvance();
     },
     async advanceCycle() {

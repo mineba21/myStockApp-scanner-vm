@@ -244,6 +244,9 @@ class RebalanceConfirmation(BaseModel):
 
 class RebalanceExecution(BaseModel):
     confirmation: str
+    # The plan the user saw (sells, current and target quantities). Missing or
+    # different plans are re-previewed and never executed by this click.
+    expected_plan: Optional[dict] = None
 
 
 @router.get("/asset-allocation/rebalance/capabilities")
@@ -337,7 +340,7 @@ def execute_rebalance(cycle_id: str, body: RebalanceExecution):
     if os.getenv("KIWOOM_TRADING_ENABLED", "false").lower() != "true":
         raise HTTPException(status_code=503, detail="주문 기능이 비활성화되어 있습니다.")
     try:
-        return _rebalance_service().execute_authorized_cycle(cycle_id)
+        return _rebalance_service().execute_authorized_cycle(cycle_id, body.expected_plan)
     except RebalanceBlocked as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
