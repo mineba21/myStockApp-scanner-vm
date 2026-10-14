@@ -355,6 +355,19 @@ def advance_rebalance(cycle_id: str):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/asset-allocation/rebalance/{cycle_id}/close-out")
+def close_out_rebalance(cycle_id: str, body: RebalanceExecution):
+    """Cancel open orders, drop unsent intents, then re-plan. Sends no new order."""
+    if body.confirmation != "account2":
+        raise HTTPException(status_code=422, detail="account2 확인 문구가 일치하지 않습니다.")
+    if os.getenv("KIWOOM_TRADING_ENABLED", "false").lower() != "true":
+        raise HTTPException(status_code=503, detail="주문 기능이 비활성화되어 있습니다.")
+    try:
+        return _rebalance_service().close_out(cycle_id)
+    except RebalanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/asset-allocation/rebalance/{cycle_id}/reconcile")
 def reconcile_rebalance(cycle_id: str):
     try:

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from trading.asset_allocation_universe import ETF_EXCHANGES
 from trading.kiwoom_execution_evidence import ExecutionEvidence, quantity
-from trading.kiwoom_orders import KiwoomOrderClient
+from trading.kiwoom_orders import KiwoomOrderClient, OrderRejected
 from trading.kiwoom_readonly import MOCK_BASE_URL, KiwoomError, KiwoomReadOnlyClient
 
 KST = ZoneInfo("Asia/Seoul")
@@ -99,6 +99,16 @@ class KiwoomAllocationMockBroker:
         return method(
             self.token, exchange=exchange, ticker=ticker,
             quantity=int(intent["quantity"]), price=float(intent["price"]),
+        )
+
+    def cancel(self, intent):
+        ticker = intent["ticker"]
+        exchange = ETF_EXCHANGES.get(ticker)
+        if not exchange or not intent.get("order_number"):
+            raise OrderRejected(f"{ticker}: 취소할 원주문을 확정할 수 없습니다.")
+        return self.orders.cancel_us_order(
+            self.token, exchange=exchange, ticker=ticker,
+            original_order_number=str(intent["order_number"]),
         )
 
     def lookup(self, intent):

@@ -789,6 +789,7 @@
         <button class="btn btn-primary" :disabled="busy || !enabled || cycle.state !== 'SELL_PREVIEW'" @click="executeCycle()">종목·비중 확인 후 리밸런싱 실행</button>
         <button class="btn btn-ghost" :disabled="busy || !enabled || cycle.state !== 'SELL_PREVIEW'" @click="action('/' + cycle.id + '/sell-preview')">매도 미리보기 갱신</button>
         <button class="btn btn-ghost" :disabled="busy || !cycle.payload.execution_authorized" @click="advanceCycle()">체결 상태 다시 확인</button>
+        <button class="btn btn-ghost" x-show="['SELL_PENDING','BUY_PENDING'].includes(cycle.state)" :disabled="busy || !enabled" @click="closeOutCycle()">미체결 취소 후 남은 차액 재계산</button>
       </div>
     </template>
   </section>
@@ -2509,6 +2510,11 @@ function allocationRebalancePanel() {
       if (this.cycle?.plan_changed) this.reason = '최신 잔고·시세로 계획이 바뀌어 실행하지 않았습니다. 갱신된 표를 확인한 뒤 다시 실행하세요.';
       this.queueAdvance();
     },
+    async closeOutCycle() {
+      if (!this.cycle || !confirm('미체결 주문은 취소 요청하고, 아직 보내지 않은 주문은 보내지 않습니다.\n취소가 확인되면 실제 보유수량으로 남은 차액을 다시 계산하며, 새 계획은 다시 확인 후 실행해야 합니다.')) return;
+      await this.action('/' + this.cycle.id + '/close-out', {confirmation:'account2'});
+      this.queueAdvance();
+    },
     async advanceCycle() {
       if (!this.cycle || this.busy) return;
       await this.action('/' + this.cycle.id + '/advance');
@@ -2517,8 +2523,13 @@ function allocationRebalancePanel() {
     queueAdvance() {
       if (this.pollTimer) clearTimeout(this.pollTimer);
       const pending = ['SELL_PENDING','BUY_PENDING'].includes(this.cycle?.state);
-      const unsafe = (this.cycle?.orders || []).some(row => ['UNKNOWN','REJECTED','PREPARED','SENDING'].includes(row.state));
-      if (pending && this.cycle?.payload?.execution_authorized && !unsafe) {
+      const orders = this.cycle?.orders || [];
+      const unsafe = orders.some(row => ['UNKNOWN','REJECTED','PREPARED','SENDING'].includes(row.state));
+      // A close-out only cancels once and never sends, so it may keep polling
+      // for the cancel confirmation unless an order's receipt is still unknown.
+      const closing = this.cycle?.payload?.closing_out
+        && !orders.some(row => ['UNKNOWN','SENDING'].includes(row.state));
+      if (pending && this.cycle?.payload?.execution_authorized && (!unsafe || closing)) {
         this.pollTimer = setTimeout(() => this.advanceCycle(), 5000);
       }
     },
@@ -2527,7 +2538,8 @@ function allocationRebalancePanel() {
         SELL_CONFIRMED:'조정 매도 및 유지수량 확인', BUY_PREVIEW:'매수 확인 대기', BUY_PENDING:'매수 체결 확인 대기',
         COMPLETE:'매수 체결 완료', PREPARED:'미전송 · 검토 필요', SENDING:'전송 중 · 응답 미확정',
         SUBMITTED:'접수됨 · 체결 미확인', UNKNOWN:'접수 여부 불명 · 재전송 금지',
-        REJECTED:'증권사 거절', FILLED:'체결 확인'})[state] || state;
+        REJECTED:'증권사 거절', FILLED:'체결 확인', CANCEL_REQUESTED:'취소 요청 · 확인 대기',
+        CANCELLED:'취소 확인', ABANDONED:'미전송 · 정리됨', SUPERSEDED:'재계산된 계획으로 대체'})[state] || state;
     }
   };
 }

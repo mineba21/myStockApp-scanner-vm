@@ -40,6 +40,9 @@ class UnavailableBroker:
     def submit(self, intent):
         raise RebalanceBlocked(LIVE_BLOCK_REASON)
 
+    def cancel(self, intent):
+        raise RebalanceBlocked(LIVE_BLOCK_REASON)
+
 
 def number(value, name, *, positive=False):
     try:
@@ -104,6 +107,18 @@ def buy_plan(cash, allocations, quotes, reserve_bps=100, max_age=60):
                     "estimated_cost": str(cost), "reserve_bps": str(reserve), "valid_until": valid_until}
 
 
+def order_limit(quote, side, ticker):
+    """Marketable side price when the adapter provides one, else the last price.
+
+    ``limit_price`` stays the valuation price for equity and targets.
+    """
+    key = "buy_limit" if side == "BUY" else "sell_limit"
+    price = number(quote.get(key, quote.get("limit_price")), f"{ticker} {side} 지정가", positive=True)
+    if price != price.quantize(Decimal(".01")):
+        raise RebalanceBlocked(f"{ticker}: 지정가 센트 단위 오류")
+    return price
+
+
 def differential_plan(cash, allocations, holdings, quotes, reserve_bps=100):
     """Value only scoped positions; sell excess and buy deficits in integer shares.
 
@@ -131,8 +146,9 @@ def differential_plan(cash, allocations, holdings, quotes, reserve_bps=100):
         retained[ticker] = min(held, target)
         delta = target - held
         if delta:
-            order = {"ticker": ticker, "side": "BUY" if delta > 0 else "SELL",
-                     "quantity": abs(delta), "limit_price": str(prices[ticker])}
+            side = "BUY" if delta > 0 else "SELL"
+            order = {"ticker": ticker, "side": side, "quantity": abs(delta),
+                     "limit_price": str(order_limit(quotes[ticker], side, ticker))}
             (buys if delta > 0 else sells).append(order)
     _, cash_info = buy_plan(cash, allocations, quotes, reserve_bps)
     budget = number(cash_info["budget"], "매수 예산")
@@ -212,7 +228,11 @@ class Rebalance:
         # One permanent key per strategy period. Re-preview cannot create a new
         # cycle while account2 is active, even across workers/process restarts.
         with self.db() as db:
-            row = db.execute("SELECT id FROM allocation_cycles WHERE cycle_key=?", (cycle_key,)).fetchone()
+            # A re-planned cycle continues the same month as "<key>#r<n>".
+            row = db.execute(
+                "SELECT id FROM allocation_cycles WHERE (cycle_key=? OR substr(cycle_key, 1, ?)=?)"
+                " AND state != 'SUPERSEDED' ORDER BY rowid DESC LIMIT 1",
+                (cycle_key, len(cycle_key) + 2, cycle_key + "#r")).fetchone()
         if row:
             current = self.status(row["id"])
             if current["state"] == "SELL_PREVIEW" and not current["orders"]:
@@ -321,7 +341,7 @@ class Rebalance:
         try:
             quote = self.broker.quotes([order["ticker"]])[order["ticker"]]
             age = time.time() - float(quote["as_of"])
-            fresh = number(quote["limit_price"], "재조회 지정가", positive=True)
+            fresh = order_limit(quote, order["side"], order["ticker"])
         except Exception:
             return False
         if not math.isfinite(age) or not 0 <= age <= 60:
@@ -436,6 +456,8 @@ class Rebalance:
             if current["payload"].get("execution_authorized") is not True:
                 raise RebalanceBlocked("사용자가 승인한 리밸런싱 사이클이 아닙니다.")
             if current["state"] in {"SELL_PENDING", "BUY_PENDING"}:
+                if current["payload"].get("closing_out"):
+                    return self.close_out(cycle_id)
                 side = current["state"].split("_")[0]
                 if self._resumable(current, side):
                     self._dispatch(cycle_id, side, current["payload"])
@@ -463,6 +485,99 @@ class Rebalance:
                 return {**result, "blockers": stopped} if stopped else result
             return current
         return self.status(cycle_id)
+
+    TERMINAL = {"FILLED", "CANCELLED", "REJECTED", "ABANDONED"}
+
+    def close_out(self, cycle_id):
+        """User-requested: cancel open orders, drop unsent intents, then re-plan.
+
+        Never sends a new buy or sell. Once every intent of the pending side is
+        terminal and the broker shows no open order, this cycle is SUPERSEDED by
+        a fresh SELL_PREVIEW computed from actual holdings and cash, which needs
+        a new user execution.
+        """
+        current = self.status(cycle_id)
+        self._check_mode(current)
+        if current["state"] not in {"SELL_PENDING", "BUY_PENDING"}:
+            raise RebalanceBlocked("체결 대기 중인 사이클에서만 미체결 주문을 정리할 수 있습니다.")
+        side = current["state"].split("_")[0]
+        if not current["payload"].get("closing_out"):
+            previous_json = json.dumps(current["payload"])
+            payload = {**current["payload"], "closing_out": True, "closing_requested_at": time.time()}
+            with self.db() as db:
+                changed = db.execute(
+                    "UPDATE allocation_cycles SET payload=? WHERE id=? AND state=? AND payload=?",
+                    (json.dumps(payload), cycle_id, current["state"], previous_json)).rowcount
+            if not changed:
+                raise RebalanceBlocked("계획이 다른 요청에서 변경되었습니다. 최신 상태를 다시 확인하세요.")
+        problems = []
+        for order in self.status(cycle_id)["orders"]:
+            if order["side"] != side or order["state"] in self.TERMINAL:
+                continue
+            if order["state"] == "PREPARED":
+                with self.db() as db:
+                    db.execute("UPDATE allocation_intents SET state='ABANDONED' WHERE id=? AND state='PREPARED'",
+                               (order["id"],))
+                continue
+            evidence = self.broker.lookup(order)
+            if not evidence or evidence.get("matched_intent_id") != order["id"]:
+                problems.append(f"{order['ticker']}: 접수 여부 불명 — 주문내역 대조 전에는 정리할 수 없습니다.")
+                continue
+            state = evidence.get("state")
+            filled = number(evidence.get("filled_quantity"), "체결수량")
+            if state == "FILLED" and filled == order["quantity"]:
+                self._order_state(order["id"], "FILLED")
+            elif state in {"CANCELLED", "CANCELED"}:
+                self._order_state(order["id"], "CANCELLED")
+            elif state == "REJECTED":
+                self._order_state(order["id"], "REJECTED")
+            elif state in {"OPEN", "PARTIAL"}:
+                if order["state"] == "CANCEL_REQUESTED":
+                    problems.append(f"{order['ticker']}: 취소 확인 대기")
+                    continue
+                try:
+                    result = self.broker.cancel(order)
+                    if result.get("status") != "submitted":
+                        raise OrderUnknown("취소 접수 응답을 확인할 수 없습니다.")
+                except OrderRejected:
+                    problems.append(f"{order['ticker']}: 증권사 취소 거절 — 체결 여부를 다시 확인합니다.")
+                    continue
+                except Exception:
+                    problems.append(f"{order['ticker']}: 취소 요청 응답 불명 — 다시 확인합니다.")
+                    continue
+                self._order_state(order["id"], "CANCEL_REQUESTED")
+                problems.append(f"{order['ticker']}: 취소 요청 접수 — 취소 확인 대기")
+            else:
+                problems.append(f"{order['ticker']}: {state} — 수동 확인 필요")
+        if problems:
+            return {**self.status(cycle_id), "blockers": problems}
+        snapshot = self.snapshot()
+        if snapshot["open_orders"]:
+            return {**self.status(cycle_id), "blockers": ["증권사에 미체결 주문이 남아 있습니다. 취소 확인 대기"]}
+        payload = current["payload"]
+        successor = self._sell_payload(snapshot, payload["allocations"], payload["scope"], payload["reserve_bps"])
+        successor["replaces"] = cycle_id
+        return self._supersede(cycle_id, current["state"], successor)
+
+    def _supersede(self, cycle_id, state, successor_payload):
+        new_id = uuid.uuid4().hex
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT cycle_key, payload FROM allocation_cycles WHERE id=? AND state=?",
+                             (cycle_id, state)).fetchone()
+            if row is None:
+                raise RebalanceBlocked("계획이 다른 요청에서 변경되었습니다. 최신 상태를 다시 확인하세요.")
+            base = row["cycle_key"].split("#r")[0]
+            count = db.execute("SELECT COUNT(*) FROM allocation_cycles WHERE cycle_key=? OR substr(cycle_key, 1, ?)=?",
+                               (base, len(base) + 2, base + "#r")).fetchone()[0]
+            old_payload = {**json.loads(row["payload"]), "superseded_by": new_id}
+            db.execute("UPDATE allocation_cycles SET state='SUPERSEDED', active_account=NULL, payload=? WHERE id=?",
+                       (json.dumps(old_payload), cycle_id))
+            db.execute("INSERT INTO allocation_cycles VALUES (?, ?, 'account2', 'SELL_PREVIEW', ?)",
+                       (new_id, f"{base}#r{count}", json.dumps(successor_payload)))
+        return {**self.status(new_id), "replanned": True, "blockers": [
+            "미체결·미전송 주문을 정리하고 실제 보유수량 기준으로 남은 차액을 다시 계산했습니다. "
+            "표를 확인한 뒤 다시 실행하세요."]}
 
     def _order_state(self, intent_id, state, order_number=None):
         with self.db() as db:

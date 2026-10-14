@@ -116,3 +116,64 @@ def test_sell_checks_fresh_sellable_quantity_before_order():
             {"ticker": "QQQ", "side": "SELL", "quantity": 2, "price": "600.13"}
         )
     assert orders.calls == []
+
+
+class BookClient(Client):
+    def __init__(self, book, **kw):
+        super().__init__(**kw)
+        self.book = book
+
+    def get_overseas_orderbook(self, token, *, exchange, ticker):
+        quote = super().get_overseas_orderbook(token, exchange=exchange, ticker=ticker)
+        quote["quote"].update(self.book)
+        return quote
+
+
+def test_unset_orderbook_fields_keep_last_price_for_both_sides(monkeypatch):
+    monkeypatch.delenv("KIWOOM_US_ORDERBOOK_ASK_FIELD", raising=False)
+    monkeypatch.delenv("KIWOOM_US_ORDERBOOK_BID_FIELD", raising=False)
+    quote = broker().quotes(["QQQ"])["QQQ"]
+    assert quote["limit_price"] == quote["buy_limit"] == quote["sell_limit"] == "600.13"
+
+
+def test_configured_orderbook_fields_set_marketable_side_limits(monkeypatch):
+    monkeypatch.setenv("KIWOOM_US_ORDERBOOK_ASK_FIELD", "ask1")
+    monkeypatch.setenv("KIWOOM_US_ORDERBOOK_BID_FIELD", "bid1")
+    client = BookClient({"ask1": "+600.1400", "bid1": "-600.1200"})
+    quote = broker(client=client).quotes(["QQQ"])["QQQ"]
+    assert (quote["limit_price"], quote["buy_limit"], quote["sell_limit"]) == ("600.13", "600.14", "600.12")
+
+
+@pytest.mark.parametrize("env,book", [
+    ({"KIWOOM_US_ORDERBOOK_ASK_FIELD": "ask1"}, {"ask1": "600.14"}),          # only one side
+    ({"KIWOOM_US_ORDERBOOK_ASK_FIELD": "ask1", "KIWOOM_US_ORDERBOOK_BID_FIELD": "bid1"},
+     {"ask1": "600.14"}),                                                      # field missing
+    ({"KIWOOM_US_ORDERBOOK_ASK_FIELD": "ask1", "KIWOOM_US_ORDERBOOK_BID_FIELD": "bid1"},
+     {"ask1": "600.10", "bid1": "600.12"}),                                    # crossed
+    ({"KIWOOM_US_ORDERBOOK_ASK_FIELD": "ask1", "KIWOOM_US_ORDERBOOK_BID_FIELD": "bid1"},
+     {"ask1": "610.00", "bid1": "590.00"}),                                    # spread > 1%
+])
+def test_bad_orderbook_configuration_fails_closed(monkeypatch, env, book):
+    monkeypatch.delenv("KIWOOM_US_ORDERBOOK_ASK_FIELD", raising=False)
+    monkeypatch.delenv("KIWOOM_US_ORDERBOOK_BID_FIELD", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(KiwoomError):
+        broker(client=BookClient(book)).quotes(["QQQ"])
+
+
+def test_cancel_targets_the_original_order_number_once():
+    calls = []
+
+    class CancelOrders(Orders):
+        def cancel_us_order(self, token, **kwargs):
+            calls.append(kwargs)
+            return {"status": "submitted", "order_number": "777"}
+
+    result = broker(orders=CancelOrders()).cancel(
+        {"ticker": "QQQ", "order_number": "0000123", "side": "BUY"})
+    assert result["status"] == "submitted"
+    assert calls == [{"exchange": "ND", "ticker": "QQQ", "original_order_number": "0000123"}]
+    with pytest.raises(OrderRejected):
+        broker(orders=CancelOrders()).cancel({"ticker": "QQQ", "order_number": None})
+    assert len(calls) == 1

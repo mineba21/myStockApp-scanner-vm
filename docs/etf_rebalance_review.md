@@ -113,6 +113,31 @@ VAA/LAA/듀얼 모멘텀 계산기는 `ASSET_ALLOCATION_DIR/asset_allocation.py`
 - 재개: 같은 방향에 REJECTED/UNKNOWN/SENDING이 하나도 없을 때만 `advance`가 남은 PREPARED를
   같은 규칙으로 다시 전송한다. 의도 상태를 `PREPARED → SENDING` 조건부 UPDATE로 선점해 중복 전송을 막는다.
 - 미승인 수동 `confirm`은 기존처럼 만료 시 차단한다.
+- 재개된 의도는 준비 시각보다 늦게 전송될 수 있다. 주문내역 대조의 ±120초 창은
+  `created_at`이 아니라 실제 전송 시각 `sent_at`(기존 저널에 열 자동 추가)을 기준으로 한다.
+
+### 2026-10-14 1호가 지정가와 미체결 정리
+
+- **지정가:** 평가·목표수량은 계속 현재가(`limit_price`)를 쓴다. 주문 지정가만 매수는
+  `buy_limit`(매도1호가), 매도는 `sell_limit`(매수1호가)를 쓴다. 실계좌 어댑터는
+  `KIWOOM_US_ORDERBOOK_ASK_FIELD`·`KIWOOM_US_ORDERBOOK_BID_FIELD`가 **둘 다** 설정된 경우에만
+  usa20101 응답에서 1호가를 읽는다. 미설정이면 기존처럼 현재가로 주문한다. 한쪽만 설정,
+  필드 누락, 역전 호가, 현재가 대비 1% 초과 스프레드는 시세 오류로 차단한다.
+- **필드명 미확정:** usa20101 1호가 필드명은 저장소·공개 문서로 확인하지 못했다. VM에서
+  `.venv/bin/python -m scripts.kiwoom_us_orderbook_fields --ticker SPY`(조회 전용)로 응답 필드를
+  출력하고, 증권사 앱의 매도1호가·매수1호가와 같은 값의 필드를 설정한다. 확인 전에는 설정하지 않는다.
+- **미체결 정리(`POST /rebalance/{id}/close-out`):** SELL_PENDING/BUY_PENDING에서 사용자가
+  버튼을 누를 때만 실행한다. 새 매수·매도는 절대 보내지 않는다.
+  - PREPARED(미전송)는 조건부 UPDATE로 ABANDONED 처리한다.
+  - 주문내역 대조가 된 OPEN/PARTIAL만 원주문번호로 1회 취소 요청 → CANCEL_REQUESTED.
+    취소 요청은 자동 재전송하지 않는다. 응답이 불명이면 다음 확인에서 대조 결과로 다시 판단한다.
+  - 대조 안 되는 UNKNOWN/SENDING이 있으면 정리하지 않는다.
+  - 해당 방향의 의도가 모두 FILLED/CANCELLED/REJECTED/ABANDONED이고 증권사 미체결이 0건이면,
+    기존 사이클을 SUPERSEDED로 닫고(활성 해제) 실제 잔고·현금·시세로 다시 계산한 새
+    `SELL_PREVIEW` 사이클(`<월간키>#r<n>`)을 같은 트랜잭션에서 만든다. 새 사이클은 미승인이라
+    화면 확인 후 다시 실행해야 한다. 같은 월간 키의 미리보기 요청은 최신 후속 사이클을 돌려준다.
+  - 같은 사이클 내 같은 종목 의도 유일성(`UNIQUE(cycle_id, side, ticker)`)을 유지하기 위해 기존 사이클에
+    새 의도를 추가하지 않고 후속 사이클로 넘긴다. 스키마 변경 없음.
 
 ## 예산, 범위, 실연결의 제한
 

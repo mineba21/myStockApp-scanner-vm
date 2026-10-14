@@ -24,6 +24,7 @@ class Broker:
         self.pending = []
         self.failure = None
         self.path = None
+        self.cancelled = []
 
     def snapshot(self):
         return {'account_profile': 'account2', 'currency': 'USD', 'complete': True,
@@ -47,6 +48,10 @@ class Broker:
 
     def lookup(self, order):
         return self.evidence.get(order['id'])
+
+    def cancel(self, order):
+        self.cancelled.append(order)
+        return {'order_number': '9' + str(len(self.cancelled)), 'status': 'submitted'}
 
     def fill(self, orders):
         for o in orders:
@@ -611,3 +616,114 @@ def test_unsent_intents_never_resume_after_rejection_or_unknown(flow):
     broker.failure = None
     service.advance_authorized_cycle(cid)
     assert len(broker.sent) == sent
+
+
+
+def test_orders_use_side_limits_while_targets_use_valuation_price():
+    from trading.allocation_rebalance import differential_plan
+    now = time.time()
+    quotes = {t: {'limit_price': '100.00', 'buy_limit': '100.02', 'sell_limit': '99.98', 'as_of': now}
+              for t in ('SPY', 'QQQ')}
+    sells, buys, info = differential_plan(400, {'SPY': '.3', 'QQQ': '.7'}, {'SPY': 6, 'QQQ': 4}, quotes, 0)
+    assert info['equity'] == '1400.00'  # valued at limit_price, not bid/ask
+    assert info['targets'] == {'SPY': 4, 'QQQ': 9}
+    assert sells == [{'ticker': 'SPY', 'side': 'SELL', 'quantity': 2, 'limit_price': '99.98'}]
+    assert [(o['ticker'], o['limit_price']) for o in buys] == [('QQQ', '100.02')]
+
+
+def _open_sell(flow):
+    service, broker, cid = flow
+    selling = service.execute_authorized_cycle(cid, seen(service.status(cid)))
+    order = next(o for o in selling['orders'] if o['side'] == 'SELL')
+    broker.evidence[order['id']] = {'matched_intent_id': order['id'], 'state': 'OPEN', 'filled_quantity': 0}
+    broker.pending = [{'order_number': order['order_number']}]
+    return service, broker, cid, order
+
+
+def test_close_out_cancels_open_sell_then_replans_from_actual_holdings(flow):
+    service, broker, cid, order = _open_sell(flow)
+    sent = len(broker.sent)
+
+    requested = service.close_out(cid)
+    assert [o['id'] for o in broker.cancelled] == [order['id']]
+    assert requested['orders'][0]['state'] == 'CANCEL_REQUESTED'
+    assert requested['payload']['closing_out'] is True
+    assert any('취소 확인 대기' in b for b in requested['blockers'])
+    # Still waiting: the button may be pressed again without a second cancel.
+    assert service.close_out(cid)['blockers']
+    assert len(broker.cancelled) == 1
+
+    # Broker confirms: 1 of 2 shares filled before the cancel.
+    broker.evidence[order['id']] = {'matched_intent_id': order['id'], 'state': 'CANCELLED', 'filled_quantity': 1}
+    broker.holdings['SPY'] = 3
+    broker.cash = Decimal('110')
+    broker.pending = []
+    successor = service.advance_authorized_cycle(cid)
+
+    assert successor['replanned'] is True
+    assert successor['id'] != cid
+    assert successor['state'] == 'SELL_PREVIEW'
+    assert successor['cycle_key'] == 'easy-2026-08-31#r1'
+    assert 'execution_authorized' not in successor['payload']
+    assert successor['payload']['replaces'] == cid
+    assert successor['payload']['original_quantities']['SPY'] == '3'
+    old = service.status(cid)
+    assert old['state'] == 'SUPERSEDED' and old['active_account'] is None
+    assert old['payload']['superseded_by'] == successor['id']
+    assert old['orders'][0]['state'] == 'CANCELLED'
+    assert service.active()['id'] == successor['id']
+    assert service.create('easy-2026-08-31', {'SPY': .5, 'QQQ': .5}, ['SPY', 'QQQ'])['id'] == successor['id']
+    assert len(broker.sent) == sent  # close-out never sends a new order
+
+    again = service.execute_authorized_cycle(successor['id'], seen(successor))
+    assert again['state'] in {'SELL_PENDING', 'SELL_CONFIRMED', 'BUY_PREVIEW', 'BUY_PENDING'}
+
+
+def test_close_out_abandons_unsent_buys_and_rejected_orders_then_replans(flow):
+    service, broker, cid = _authorized_buy_preview(flow)
+    broker.quotes = lambda tickers: {t: {'limit_price': '101.00', 'as_of': time.time()} for t in tickers}
+    stopped = service.advance_authorized_cycle(cid)
+    assert any(o['state'] == 'PREPARED' for o in stopped['orders'])
+    sent = len(broker.sent)
+
+    broker.quotes = lambda tickers: {t: {'limit_price': '100.00', 'as_of': time.time()} for t in tickers}
+    result = service.close_out(cid)
+
+    assert result['replanned'] is True
+    assert {o['state'] for o in service.status(cid)['orders'] if o['side'] == 'BUY'} == {'ABANDONED'}
+    assert len(broker.sent) == sent
+    assert broker.cancelled == []
+
+
+def test_close_out_never_replans_past_an_unmatched_unknown_order(flow):
+    service, broker, cid = flow
+    broker.failure = requests.Timeout('lost')
+    service.execute_authorized_cycle(cid, seen(service.status(cid)))
+    broker.failure = None
+    result = service.close_out(cid)
+    assert result['state'] == 'SELL_PENDING'
+    assert any('접수 여부 불명' in b for b in result['blockers'])
+    assert broker.cancelled == []
+    assert service.active()['id'] == cid
+
+
+def test_close_out_requires_a_pending_cycle(flow):
+    service, broker, cid = flow
+    with pytest.raises(RebalanceBlocked, match='체결 대기'):
+        service.close_out(cid)
+
+
+def test_repeated_replans_number_successors_and_keep_one_active(flow):
+    service, broker, cid, order = _open_sell(flow)
+    broker.evidence[order['id']] = {'matched_intent_id': order['id'], 'state': 'CANCELLED', 'filled_quantity': 0}
+    broker.pending = []
+    first = service.close_out(cid)
+    second_cycle = service.execute_authorized_cycle(first['id'], seen(first))
+    second_order = next(o for o in second_cycle['orders'] if o['side'] == 'SELL')
+    broker.evidence[second_order['id']] = {'matched_intent_id': second_order['id'],
+                                           'state': 'CANCELLED', 'filled_quantity': 0}
+    second = service.close_out(first['id'])
+    assert second['cycle_key'] == 'easy-2026-08-31#r2'
+    with service.db() as db:
+        active = db.execute("SELECT COUNT(*) FROM allocation_cycles WHERE active_account='account2'").fetchone()[0]
+    assert active == 1

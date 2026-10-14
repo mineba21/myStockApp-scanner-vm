@@ -57,6 +57,9 @@
   모의투자 프로필, real은 기본 프로필 파일의 account2를 사용한다.
 - `KIWOOM_OVERSEAS_MOCK_PROFILES_FILE`: 모의투자 account2 키 파일. 저장소와 로그에
   키 원문을 넣지 않는다.
+- `KIWOOM_US_ORDERBOOK_ASK_FIELD`, `KIWOOM_US_ORDERBOOK_BID_FIELD`: usa20101 매도1호가·매수1호가
+  필드명. 기본 미설정(현재가 지정가). `scripts/kiwoom_us_orderbook_fields.py`로 실제 응답을 확인한 뒤에만
+  둘 다 설정한다. 상세: [검토 기록의 1호가 지정가와 미체결 정리](etf_rebalance_review.md).
 
 ## 배포 상태와 화면 안내
 
