@@ -161,6 +161,11 @@ class Rebalance:
                     state TEXT NOT NULL, order_number TEXT, created_at REAL NOT NULL,
                     UNIQUE(cycle_id, side, ticker));
             ''')
+            columns = {r["name"] for r in db.execute("PRAGMA table_info(allocation_intents)")}
+            if "sent_at" not in columns:
+                # Broker history is matched against the actual send time, which
+                # differs from created_at when an unsent intent is resumed.
+                db.execute("ALTER TABLE allocation_intents ADD COLUMN sent_at REAL")
 
     @contextmanager
     def db(self):
@@ -305,7 +310,8 @@ class Rebalance:
             if not changed:
                 return False
             for o in payload["preview"]:
-                db.execute("INSERT INTO allocation_intents VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', NULL, ?)",
+                db.execute("INSERT INTO allocation_intents (id, cycle_id, side, ticker, quantity, price, state, order_number, created_at)"
+                           " VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', NULL, ?)",
                            (uuid.uuid4().hex, cycle_id, side, o["ticker"], o["quantity"], o["limit_price"], time.time()))
         return True
 
@@ -339,11 +345,13 @@ class Rebalance:
                 if cost > available * (1 - number(payload["reserve_bps"], "여유금") / 10000):
                     break  # PREPARED: not sent, manual review required
             with self.db() as db:
+                sent_at = time.time()
                 claimed = db.execute(
-                    "UPDATE allocation_intents SET state='SENDING' WHERE id=? AND state='PREPARED'",
-                    (order["id"],)).rowcount
+                    "UPDATE allocation_intents SET state='SENDING', sent_at=? WHERE id=? AND state='PREPARED'",
+                    (sent_at, order["id"])).rowcount
             if not claimed:
                 continue  # another dispatcher owns this intent
+            order = {**order, "state": "SENDING", "sent_at": sent_at}
             try:
                 result = self.broker.submit(order)
                 order_no = result.get("order_number")

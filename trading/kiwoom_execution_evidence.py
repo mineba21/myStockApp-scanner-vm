@@ -206,7 +206,10 @@ class ExecutionEvidence:
         if not intent.get('order_number'):
             return None
         number = order_number(intent['order_number'])
-        created = datetime.fromtimestamp(intent['created_at'], KST)
+        # An intent may be dispatched later than it was prepared (resume after
+        # a stale quote). Match against the moment it was actually sent.
+        sent_at = intent.get('sent_at') or intent['created_at']
+        created = datetime.fromtimestamp(sent_at, KST)
         # The live mock response uses the US trading date in ord_dt while ord_time
         # is KST.  During the post-midnight KST session the row is therefore on
         # the previous calendar date.  Only fall back when the current date has
@@ -223,7 +226,7 @@ class ExecutionEvidence:
             if (row['ticker'] != intent['ticker'] or row['side'] != intent['side'] or
                 row['quantity'] != intent['quantity'] or
                 amount(row['price']) != amount(intent['price']) or
-                not intent['created_at'] - 1 <= observed_at <= intent['created_at'] + 120):
+                not sent_at - 1 <= observed_at <= sent_at + 120):
                 return None
             return {**row, 'ordered_at': observed_at,
                     'matched_intent_id': intent['id']}
