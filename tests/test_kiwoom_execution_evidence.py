@@ -197,3 +197,14 @@ def test_capacity_invalid_price_before_http(price):
     s=service()
     with pytest.raises(KiwoomError): s.buy_capacity('SPY','NY',price)
     assert not s.client.session.calls
+
+
+
+def test_resumed_intent_matches_broker_history_by_actual_send_time():
+    """An intent prepared earlier but sent ten minutes later must still match."""
+    sent_row = row()
+    sent_row['ord_time'] = '22:40:00'
+    resumed = {**intent(), 'sent_at': intent()['created_at'] + 600}
+    assert service(response([sent_row])).lookup(resumed)['matched_intent_id'] == 'intent'
+    # Without the send time, the 120-second identity window rejects the match.
+    assert service(response([sent_row]), response([])).lookup(intent()) is None

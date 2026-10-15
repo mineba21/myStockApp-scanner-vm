@@ -40,6 +40,9 @@ class UnavailableBroker:
     def submit(self, intent):
         raise RebalanceBlocked(LIVE_BLOCK_REASON)
 
+    def cancel(self, intent):
+        raise RebalanceBlocked(LIVE_BLOCK_REASON)
+
 
 def number(value, name, *, positive=False):
     try:
@@ -104,6 +107,18 @@ def buy_plan(cash, allocations, quotes, reserve_bps=100, max_age=60):
                     "estimated_cost": str(cost), "reserve_bps": str(reserve), "valid_until": valid_until}
 
 
+def order_limit(quote, side, ticker):
+    """Marketable side price when the adapter provides one, else the last price.
+
+    ``limit_price`` stays the valuation price for equity and targets.
+    """
+    key = "buy_limit" if side == "BUY" else "sell_limit"
+    price = number(quote.get(key, quote.get("limit_price")), f"{ticker} {side} 지정가", positive=True)
+    if price != price.quantize(Decimal(".01")):
+        raise RebalanceBlocked(f"{ticker}: 지정가 센트 단위 오류")
+    return price
+
+
 def differential_plan(cash, allocations, holdings, quotes, reserve_bps=100):
     """Value only scoped positions; sell excess and buy deficits in integer shares.
 
@@ -131,8 +146,9 @@ def differential_plan(cash, allocations, holdings, quotes, reserve_bps=100):
         retained[ticker] = min(held, target)
         delta = target - held
         if delta:
-            order = {"ticker": ticker, "side": "BUY" if delta > 0 else "SELL",
-                     "quantity": abs(delta), "limit_price": str(prices[ticker])}
+            side = "BUY" if delta > 0 else "SELL"
+            order = {"ticker": ticker, "side": side, "quantity": abs(delta),
+                     "limit_price": str(order_limit(quotes[ticker], side, ticker))}
             (buys if delta > 0 else sells).append(order)
     _, cash_info = buy_plan(cash, allocations, quotes, reserve_bps)
     budget = number(cash_info["budget"], "매수 예산")
@@ -161,6 +177,18 @@ class Rebalance:
                     state TEXT NOT NULL, order_number TEXT, created_at REAL NOT NULL,
                     UNIQUE(cycle_id, side, ticker));
             ''')
+            columns = {r["name"] for r in db.execute("PRAGMA table_info(allocation_intents)")}
+            if "sent_at" not in columns:
+                # Broker history is matched against the actual send time, which
+                # differs from created_at when an unsent intent is resumed.
+                db.execute("ALTER TABLE allocation_intents ADD COLUMN sent_at REAL")
+            cycle_columns = {r["name"] for r in db.execute("PRAGMA table_info(allocation_cycles)")}
+            if "closing_out" not in cycle_columns:
+                # A column (not only the JSON payload) so the send claim can test
+                # it inside its own UPDATE statement.
+                db.execute("ALTER TABLE allocation_cycles ADD COLUMN closing_out INTEGER NOT NULL DEFAULT 0")
+                db.execute("UPDATE allocation_cycles SET closing_out=1"
+                           " WHERE payload LIKE '%\"closing_out\": true%'")
 
     @contextmanager
     def db(self):
@@ -207,11 +235,14 @@ class Rebalance:
         # One permanent key per strategy period. Re-preview cannot create a new
         # cycle while account2 is active, even across workers/process restarts.
         with self.db() as db:
-            row = db.execute("SELECT id FROM allocation_cycles WHERE cycle_key=?", (cycle_key,)).fetchone()
+            # A re-planned cycle continues the same month as "<key>#r<n>".
+            row = db.execute(
+                "SELECT id FROM allocation_cycles WHERE (cycle_key=? OR substr(cycle_key, 1, ?)=?)"
+                " AND state != 'SUPERSEDED' ORDER BY rowid DESC LIMIT 1",
+                (cycle_key, len(cycle_key) + 2, cycle_key + "#r")).fetchone()
         if row:
             current = self.status(row["id"])
-            if (current["state"] == "SELL_PREVIEW" and not current["orders"]
-                    and not current["payload"].get("execution_authorized")):
+            if current["state"] == "SELL_PREVIEW" and not current["orders"]:
                 return self.refresh_sell_preview(row["id"])
             return current
         allocations = {t: str(w) for t, w in weights(allocations).items()}
@@ -225,7 +256,8 @@ class Rebalance:
         cycle_id = uuid.uuid4().hex
         try:
             with self.db() as db:
-                db.execute("INSERT INTO allocation_cycles VALUES (?, ?, 'account2', 'SELL_PREVIEW', ?)",
+                db.execute("INSERT INTO allocation_cycles (id, cycle_key, active_account, state, payload)"
+                           " VALUES (?, ?, 'account2', 'SELL_PREVIEW', ?)",
                            (cycle_id, cycle_key, json.dumps(payload)))
         except sqlite3.IntegrityError as exc:
             raise RebalanceBlocked("account2의 기존 재구성 기록을 먼저 확인하세요.") from exc
@@ -246,16 +278,37 @@ class Rebalance:
         if current["payload"].get("mode") != "DELTA_V1":
             raise RebalanceBlocked("이전 전량매도 계획입니다. 기존 주문 대조 및 계획 재검토가 필요합니다.")
 
-    def confirm(self, cycle_id, side):
-        if side not in {"SELL", "BUY"}:
-            raise RebalanceBlocked("잘못된 주문 방향")
-        current = self.status(cycle_id)
-        self._check_mode(current)
-        if current["state"] != side + "_PREVIEW":
-            return current  # duplicate confirm: no network submission
-        payload = current["payload"]
-        if payload["expires_at"] < time.time():
-            raise RebalanceBlocked("미리보기가 만료되었습니다. 기존 사이클에서 갱신해야 합니다.")
+    @staticmethod
+    def plan_fingerprint(payload):
+        """What the user saw: sell quantities, current and target quantities.
+
+        Limit prices are excluded on purpose; every refresh re-reads them.
+        """
+        planning = payload.get("planning") or {}
+        return {
+            "sells": sorted([str(o["ticker"]).strip().upper(), int(o["quantity"])]
+                            for o in payload.get("preview") or []),
+            "targets": {str(t).strip().upper(): int(q)
+                        for t, q in (planning.get("targets") or {}).items() if int(q)},
+            "current": {str(t).strip().upper(): int(Decimal(str(q)))
+                        for t, q in (payload.get("original_quantities") or {}).items()
+                        if Decimal(str(q))},
+        }
+
+    def _same_plan(self, payload, expected):
+        if not isinstance(expected, dict):
+            return False
+        try:
+            seen = self.plan_fingerprint({
+                "preview": expected.get("sells") or [],
+                "planning": {"targets": expected.get("targets") or {}},
+                "original_quantities": expected.get("current") or {},
+            })
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            return False
+        return seen == self.plan_fingerprint(payload)
+
+    def _preflight(self, payload, side):
         s = self.snapshot()
         if s["open_orders"]:
             raise RebalanceBlocked("미체결 주문이 있어 실행을 중단했습니다.")
@@ -269,22 +322,47 @@ class Rebalance:
             budget = number(s["orderable_cash"], "현금") * (1 - number(payload["reserve_bps"], "여유금") / 10000)
             if cost > budget:
                 raise RebalanceBlocked("주문가능 현금 감소: 매수 미리보기를 갱신하세요.")
-        # Commit every intent BEFORE the first network side effect. Atomic state
-        # transition gives exactly one dispatcher; crash leaves durable evidence.
+
+    def _start_phase(self, cycle_id, side, previous_json, payload):
+        """Commit the state transition and every intent BEFORE any network side effect.
+
+        The compare-and-set on the previous payload gives exactly one dispatcher;
+        a crash after this point leaves durable evidence.
+        """
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            changed = db.execute("UPDATE allocation_cycles SET state=? WHERE id=? AND state=? AND payload=?",
-                                 (side + "_PENDING", cycle_id, side + "_PREVIEW", json.dumps(payload))).rowcount
+            changed = db.execute(
+                "UPDATE allocation_cycles SET state=?, payload=? WHERE id=? AND state=? AND payload=?",
+                (side + "_PENDING", json.dumps(payload), cycle_id, side + "_PREVIEW", previous_json),
+            ).rowcount
             if not changed:
-                return self.status(cycle_id)
+                return False
             for o in payload["preview"]:
-                db.execute("INSERT INTO allocation_intents VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', NULL, ?)",
+                db.execute("INSERT INTO allocation_intents (id, cycle_id, side, ticker, quantity, price, state, order_number, created_at)"
+                           " VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', NULL, ?)",
                            (uuid.uuid4().hex, cycle_id, side, o["ticker"], o["quantity"], o["limit_price"], time.time()))
+        return True
+
+    def _requote_allows(self, order):
+        """An expired plan may still send an unsent intent at its approved limit
+        when a fresh quote is no worse than that limit. Anything else stops."""
+        try:
+            quote = self.broker.quotes([order["ticker"]])[order["ticker"]]
+            age = time.time() - float(quote["as_of"])
+            fresh = order_limit(quote, order["side"], order["ticker"])
+        except Exception:
+            return False
+        if not math.isfinite(age) or not 0 <= age <= 60:
+            return False
+        limit = number(order["price"], "지정가", positive=True)
+        return fresh <= limit if order["side"] == "BUY" else fresh >= limit
+
+    def _dispatch(self, cycle_id, side, payload):
         for order in self.status(cycle_id)["orders"]:
             if order["side"] != side or order["state"] != "PREPARED":
                 continue
-            if time.time() > payload["expires_at"]:
-                break  # stale quote: leave unsent intents for review
+            if time.time() > payload["expires_at"] and not self._requote_allows(order):
+                break  # stale quote moved against the approved limit: leave unsent
             if side == "BUY":
                 fresh = self.snapshot()
                 available = number(fresh["orderable_cash"], "현금")
@@ -295,7 +373,22 @@ class Rebalance:
                 if cost > available * (1 - number(payload["reserve_bps"], "여유금") / 10000):
                     break  # PREPARED: not sent, manual review required
             with self.db() as db:
-                db.execute("UPDATE allocation_intents SET state='SENDING' WHERE id=?", (order["id"],))
+                sent_at = time.time()
+                # One in-flight order per cycle side, across workers: the claim
+                # fails while any intent is sending, ambiguous, rejected or being
+                # closed out, so a second dispatcher can never send past a
+                # reply that is still pending (and may yet be a rejection).
+                # The cycle must still be in this side's pending phase and not
+                # closing out — checked in the same statement as the claim.
+                claimed = db.execute(
+                    "UPDATE allocation_intents SET state='SENDING', sent_at=? WHERE id=? AND state='PREPARED'"
+                    " AND NOT EXISTS (SELECT 1 FROM allocation_intents WHERE cycle_id=? AND side=?"
+                    f" AND state IN ({', '.join(repr(x) for x in sorted(self.STOPS_DISPATCH))}))"
+                    " AND EXISTS (SELECT 1 FROM allocation_cycles WHERE id=? AND state=? AND closing_out=0)",
+                    (sent_at, order["id"], cycle_id, side, cycle_id, side + "_PENDING")).rowcount
+            if not claimed:
+                break  # another dispatcher is sending or the side is stopped
+            order = {**order, "state": "SENDING", "sent_at": sent_at}
             try:
                 result = self.broker.submit(order)
                 order_no = result.get("order_number")
@@ -310,28 +403,67 @@ class Rebalance:
             self._order_state(order["id"], "SUBMITTED", order_no)
         return self.status(cycle_id)
 
-    def execute_authorized_cycle(self, cycle_id):
-        """Persist one user authorization, then start the sell phase once."""
+    def confirm(self, cycle_id, side):
+        if side not in {"SELL", "BUY"}:
+            raise RebalanceBlocked("잘못된 주문 방향")
+        current = self.status(cycle_id)
+        self._check_mode(current)
+        if current["state"] != side + "_PREVIEW":
+            return current  # duplicate confirm: no network submission
+        payload = current["payload"]
+        # A user-authorized cycle re-quotes each unsent order at dispatch time,
+        # so only a manual (unauthorized) confirm needs the whole plan fresh.
+        if payload["expires_at"] < time.time() and not payload.get("execution_authorized"):
+            raise RebalanceBlocked("미리보기가 만료되었습니다. 기존 사이클에서 갱신해야 합니다.")
+        self._preflight(payload, side)
+        if not self._start_phase(cycle_id, side, json.dumps(payload), payload):
+            return self.status(cycle_id)
+        return self._dispatch(cycle_id, side, payload)
+
+    def execute_authorized_cycle(self, cycle_id, expected_plan=None):
+        """Re-plan from fresh broker state, then start the sell phase once.
+
+        The click authorizes only the plan the user saw. If the fresh plan
+        differs, it is stored unauthorized and returned for another review.
+        Authorization is persisted atomically with the SELL_PENDING transition,
+        so a failure before the first order never locks the cycle.
+        """
         current = self.status(cycle_id)
         self._check_mode(current)
         if current["state"] != "SELL_PREVIEW":
             if current["payload"].get("execution_authorized") is True:
                 return self.advance_authorized_cycle(cycle_id)
             raise RebalanceBlocked("최종 매도·매수 계획을 다시 확인해야 합니다.")
-        previous_payload = json.dumps(current["payload"])
-        payload = dict(current["payload"])
-        payload["execution_authorized"] = True
-        payload["authorized_at"] = time.time()
-        payload["authorization_scope"] = "FULL_CYCLE_V1"
-        with self.db() as db:
-            changed = db.execute(
-                "UPDATE allocation_cycles SET payload=? WHERE id=? AND state='SELL_PREVIEW' AND payload=?",
-                (json.dumps(payload), cycle_id, previous_payload),
-            ).rowcount
-        if not changed:
+        if current["orders"]:
+            raise RebalanceBlocked("이미 주문 의도가 기록된 사이클입니다. 주문내역 대조가 필요합니다.")
+        previous = current["payload"]
+        previous_json = json.dumps(previous)
+        snapshot = self.snapshot()
+        if snapshot["open_orders"]:
+            raise RebalanceBlocked("미체결 주문이 있어 실행을 중단했습니다.")
+        payload = self._sell_payload(snapshot, previous["allocations"], previous["scope"],
+                                     previous["reserve_bps"])
+        if not self._same_plan(payload, expected_plan):
+            with self.db() as db:
+                updated = db.execute(
+                    "UPDATE allocation_cycles SET payload=? WHERE id=? AND state='SELL_PREVIEW' AND payload=?",
+                    (json.dumps(payload), cycle_id, previous_json)).rowcount
+            if updated != 1:
+                raise RebalanceBlocked("계획이 다른 요청에서 변경되었습니다. 최신 상태를 다시 확인하세요.")
+            return {**self.status(cycle_id), "plan_changed": True, "blockers": [
+                "최신 잔고·시세로 계획이 바뀌었습니다. 갱신된 종목·수량을 확인한 뒤 다시 실행하세요."]}
+        payload.update(execution_authorized=True, authorized_at=time.time(),
+                       authorization_scope="FULL_CYCLE_V1")
+        if not self._start_phase(cycle_id, "SELL", previous_json, payload):
             return self.status(cycle_id)
-        self.confirm(cycle_id, "SELL")
+        self._dispatch(cycle_id, "SELL", payload)
         return self.advance_authorized_cycle(cycle_id)
+
+    def _resumable(self, current, side):
+        """Unsent intents may resume only when nothing on that side is ambiguous."""
+        orders = [o for o in current["orders"] if o["side"] == side]
+        return (any(o["state"] == "PREPARED" for o in orders)
+                and not any(o["state"] in {"REJECTED", "UNKNOWN", "SENDING"} for o in orders))
 
     def advance_authorized_cycle(self, cycle_id):
         """Advance only a persisted user-authorized cycle; stop on blockers."""
@@ -341,6 +473,11 @@ class Rebalance:
             if current["payload"].get("execution_authorized") is not True:
                 raise RebalanceBlocked("사용자가 승인한 리밸런싱 사이클이 아닙니다.")
             if current["state"] in {"SELL_PENDING", "BUY_PENDING"}:
+                if current["payload"].get("closing_out"):
+                    return self.close_out(cycle_id)
+                side = current["state"].split("_")[0]
+                if self._resumable(current, side):
+                    self._dispatch(cycle_id, side, current["payload"])
                 result = self.reconcile(cycle_id)
                 if result.get("blockers") or result["state"] == current["state"]:
                     return result
@@ -365,6 +502,152 @@ class Rebalance:
                 return {**result, "blockers": stopped} if stopped else result
             return current
         return self.status(cycle_id)
+
+    TERMINAL = {"FILLED", "CANCELLED", "REJECTED", "ABANDONED"}
+    CANCEL_UNRESOLVED = {"CANCEL_SENDING", "CANCEL_UNKNOWN"}
+    STOPS_DISPATCH = {"SENDING", "UNKNOWN", "REJECTED", "ABANDONED",
+                      "CANCEL_REQUESTED"} | CANCEL_UNRESOLVED
+
+    def close_out(self, cycle_id):
+        """User-requested: cancel open orders, drop unsent intents, then re-plan.
+
+        Never sends a new buy or sell. Once every intent of the pending side is
+        terminal and the broker shows no open order, this cycle is SUPERSEDED by
+        a fresh SELL_PREVIEW computed from actual holdings and cash, which needs
+        a new user execution.
+        """
+        current = self.status(cycle_id)
+        self._check_mode(current)
+        if current["state"] not in {"SELL_PENDING", "BUY_PENDING"}:
+            raise RebalanceBlocked("체결 대기 중인 사이클에서만 미체결 주문을 정리할 수 있습니다.")
+        side = current["state"].split("_")[0]
+        if not current["payload"].get("closing_out"):
+            previous_json = json.dumps(current["payload"])
+            payload = {**current["payload"], "closing_out": True, "closing_requested_at": time.time()}
+            # One write transaction: from its commit on, no dispatcher can claim
+            # an intent of this cycle, and every unsent intent is already dropped.
+            with self.db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                changed = db.execute(
+                    "UPDATE allocation_cycles SET payload=?, closing_out=1 WHERE id=? AND state=? AND payload=?",
+                    (json.dumps(payload), cycle_id, current["state"], previous_json)).rowcount
+                if changed:
+                    db.execute("UPDATE allocation_intents SET state='ABANDONED'"
+                               " WHERE cycle_id=? AND side=? AND state='PREPARED'", (cycle_id, side))
+            if not changed:
+                raise RebalanceBlocked("계획이 다른 요청에서 변경되었습니다. 최신 상태를 다시 확인하세요.")
+        problems = []
+        for order in self.status(cycle_id)["orders"]:
+            if order["side"] != side or order["state"] in self.TERMINAL:
+                continue
+            if order["state"] == "PREPARED":
+                with self.db() as db:
+                    abandoned = db.execute(
+                        "UPDATE allocation_intents SET state='ABANDONED' WHERE id=? AND state='PREPARED'",
+                        (order["id"],)).rowcount
+                if not abandoned:
+                    # Another dispatcher claimed it first: it may be on the wire.
+                    problems.append(f"{order['ticker']}: 다른 요청이 전송 중 — 접수 대조 후 다시 정리하세요.")
+                continue
+            evidence = self.broker.lookup(order)
+            if not evidence or evidence.get("matched_intent_id") != order["id"]:
+                problems.append(f"{order['ticker']}: 접수 여부 불명 — 주문내역 대조 전에는 정리할 수 없습니다.")
+                continue
+            state = evidence.get("state")
+            filled = number(evidence.get("filled_quantity"), "체결수량")
+            if state == "FILLED" and filled == order["quantity"]:
+                self._order_state(order["id"], "FILLED")
+            elif state in {"CANCELLED", "CANCELED"}:
+                self._order_state(order["id"], "CANCELLED")
+            elif state == "REJECTED":
+                self._order_state(order["id"], "REJECTED")
+            elif state in {"OPEN", "PARTIAL"}:
+                if order["state"] == "CANCEL_REQUESTED":
+                    problems.append(f"{order['ticker']}: 취소 확인 대기")
+                    continue
+                if order["state"] in self.CANCEL_UNRESOLVED:
+                    problems.append(f"{order['ticker']}: 취소 요청 응답 불명 — 자동 재전송하지 않습니다. "
+                                    "증권사에서 취소 여부를 확인하세요.")
+                    continue
+                # Persist the cancel attempt BEFORE the network call, claiming the
+                # exact state we observed so only one request can send it.
+                with self.db() as db:
+                    claimed = db.execute(
+                        "UPDATE allocation_intents SET state='CANCEL_SENDING' WHERE id=? AND state=?",
+                        (order["id"], order["state"])).rowcount
+                if not claimed:
+                    problems.append(f"{order['ticker']}: 다른 요청이 처리 중 — 다시 확인하세요.")
+                    continue
+                try:
+                    result = self.broker.cancel(order)
+                    if result.get("status") != "submitted":
+                        raise OrderUnknown("취소 접수 응답을 확인할 수 없습니다.")
+                except OrderRejected:
+                    # Explicit refusal: nothing is pending, so restore the order state.
+                    with self.db() as db:
+                        db.execute("UPDATE allocation_intents SET state=? WHERE id=? AND state='CANCEL_SENDING'",
+                                   (order["state"], order["id"]))
+                    problems.append(f"{order['ticker']}: 증권사 취소 거절 — 체결 여부를 다시 확인합니다.")
+                    continue
+                except Exception:
+                    with self.db() as db:
+                        db.execute("UPDATE allocation_intents SET state='CANCEL_UNKNOWN' WHERE id=? AND state='CANCEL_SENDING'",
+                                   (order["id"],))
+                    problems.append(f"{order['ticker']}: 취소 요청 응답 불명 — 자동 재전송하지 않습니다. "
+                                    "증권사에서 취소 여부를 확인하세요.")
+                    continue
+                with self.db() as db:
+                    db.execute("UPDATE allocation_intents SET state='CANCEL_REQUESTED' WHERE id=? AND state='CANCEL_SENDING'",
+                               (order["id"],))
+                problems.append(f"{order['ticker']}: 취소 요청 접수 — 취소 확인 대기")
+            else:
+                problems.append(f"{order['ticker']}: {state} — 수동 확인 필요")
+        if problems:
+            return {**self.status(cycle_id), "blockers": problems}
+        snapshot = self.snapshot()
+        if snapshot["open_orders"]:
+            return {**self.status(cycle_id), "blockers": ["증권사에 미체결 주문이 남아 있습니다. 취소 확인 대기"]}
+        payload = current["payload"]
+        successor = self._sell_payload(snapshot, payload["allocations"], payload["scope"], payload["reserve_bps"])
+        successor["replaces"] = cycle_id
+        result = self._supersede(cycle_id, current["state"], side, successor)
+        if result is None:
+            return {**self.status(cycle_id), "blockers": [
+                "정리 중 주문 상태가 바뀌었습니다. 전송·취소가 끝난 뒤 다시 정리하세요."]}
+        return result
+
+    def _supersede(self, cycle_id, state, side, successor_payload):
+        """Atomically close the cycle and open its successor.
+
+        The terminal check runs inside the same write transaction, so an intent
+        claimed for sending after close-out's own checks always blocks the re-plan.
+        Returns None when any intent on that side is not terminal.
+        """
+        new_id = uuid.uuid4().hex
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT cycle_key, payload FROM allocation_cycles WHERE id=? AND state=?",
+                             (cycle_id, state)).fetchone()
+            if row is None:
+                raise RebalanceBlocked("계획이 다른 요청에서 변경되었습니다. 최신 상태를 다시 확인하세요.")
+            open_intents = db.execute(
+                "SELECT COUNT(*) FROM allocation_intents WHERE cycle_id=? AND side=?"
+                f" AND state NOT IN ({', '.join(repr(x) for x in sorted(self.TERMINAL))})",
+                (cycle_id, side)).fetchone()[0]
+            if open_intents:
+                return None
+            base = row["cycle_key"].split("#r")[0]
+            count = db.execute("SELECT COUNT(*) FROM allocation_cycles WHERE cycle_key=? OR substr(cycle_key, 1, ?)=?",
+                               (base, len(base) + 2, base + "#r")).fetchone()[0]
+            old_payload = {**json.loads(row["payload"]), "superseded_by": new_id}
+            db.execute("UPDATE allocation_cycles SET state='SUPERSEDED', active_account=NULL, payload=? WHERE id=?",
+                       (json.dumps(old_payload), cycle_id))
+            db.execute("INSERT INTO allocation_cycles (id, cycle_key, active_account, state, payload)"
+                           " VALUES (?, ?, 'account2', 'SELL_PREVIEW', ?)",
+                       (new_id, f"{base}#r{count}", json.dumps(successor_payload)))
+        return {**self.status(new_id), "replanned": True, "blockers": [
+            "미체결·미전송 주문을 정리하고 실제 보유수량 기준으로 남은 차액을 다시 계산했습니다. "
+            "표를 확인한 뒤 다시 실행하세요."]}
 
     def _order_state(self, intent_id, state, order_number=None):
         with self.db() as db:
@@ -441,8 +724,10 @@ class Rebalance:
     def refresh_sell_preview(self, cycle_id):
         current = self.status(cycle_id)
         self._check_mode(current)
-        if (current["state"] != "SELL_PREVIEW" or current["orders"]
-                or current["payload"].get("execution_authorized")):
+        # No intent row means nothing was ever sent. A legacy cycle that saved
+        # authorization before an expired confirm is recoverable here: the
+        # fresh payload does not carry the old authorization.
+        if current["state"] != "SELL_PREVIEW" or current["orders"]:
             raise RebalanceBlocked("이미 전송한 주문은 새 미리보기로 재전송할 수 없습니다.")
         payload = current["payload"]
         previous_payload = json.dumps(payload)

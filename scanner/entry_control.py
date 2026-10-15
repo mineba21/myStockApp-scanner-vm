@@ -11,6 +11,12 @@ from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 
 
+# BREAKOUT keeps its opt-in gates. RE_BREAKOUT receives the same observations
+# as warnings only: strict pass/fail, upthrust cooldowns and alert suppression
+# stay BREAKOUT-only (see ``_check_entry_controls`` / ``_sync_upthrust_cooldown``).
+OBSERVED_ENTRY_TYPES = ("BREAKOUT", "RE_BREAKOUT")
+
+
 def _append_unique(values: list, message: str) -> None:
     if message not in values:
         values.append(message)
@@ -74,7 +80,8 @@ def annotate_signal_entry(signal: Dict[str, Any], daily: pd.DataFrame) -> Dict[s
     signal["upthrust_failed"] = None
     signal["_upthrust_failed_date"] = None
 
-    if signal.get("signal_type") == "BREAKOUT":
+    signal_type = signal.get("signal_type")
+    if signal_type in OBSERVED_ENTRY_TYPES:
         pivot_ext = _pct(signal.get("strict_price"), signal.get("pivot_price"))
         signal["pivot_ext_pct"] = pivot_ext
         if pivot_ext is not None and pivot_ext > config.MAX_PIVOT_EXT_PCT:
@@ -101,6 +108,17 @@ def annotate_signal_entry(signal: Dict[str, Any], daily: pd.DataFrame) -> Dict[s
             _append_unique(warnings, message)
             _append_unique(flags, message)
 
+    if signal_type == "RE_BREAKOUT":
+        # A BREAKOUT that misses the weekly volume gate falls through to
+        # RE_BREAKOUT by design (Step 1 item 7). Surface that instead of
+        # silently dropping the weekly check.
+        wvr = signal.get("strict_weekly_volume_ratio")
+        if wvr is not None and wvr < config.BREAKOUT_WEEKLY_VOL_RATIO:
+            message = (f"주봉 거래량 미달 — {wvr:.2f}x "
+                       f"(돌파 기준 {config.BREAKOUT_WEEKLY_VOL_RATIO:g}x)")
+            _append_unique(warnings, message)
+            _append_unique(flags, message)
+
     signal["entry_warnings"] = warnings
     signal["warning_flags"] = flags
     return signal
@@ -116,7 +134,10 @@ def annotate_alert_freshness(signal: Dict[str, Any]) -> Dict[str, Any]:
     signal["cur_stop_pct"] = None
     signal["_alert_freshness_would_cut"] = False
 
-    if signal.get("signal_type") == "BREAKOUT":
+    signal_type = signal.get("signal_type")
+    if signal_type in OBSERVED_ENTRY_TYPES:
+        # Only BREAKOUT may be suppressed by ALERT_FRESHNESS_AS_GATE.
+        gated = signal_type == "BREAKOUT"
         cur_ext = _pct(signal.get("price"), signal.get("pivot_price"))
         cur_stop = _stop_pct(signal.get("price"), signal.get("stop_loss"))
         signal["cur_ext_pct"] = cur_ext
@@ -127,7 +148,13 @@ def annotate_alert_freshness(signal: Dict[str, Any]) -> Dict[str, Any]:
                        f"(기준 {config.ALERT_MAX_CUR_EXT_PCT:g}%)")
             _append_unique(warnings, message)
             _append_unique(flags, message)
-            signal["_alert_freshness_would_cut"] = True
+            signal["_alert_freshness_would_cut"] = gated
+        elif cur_ext is not None and cur_ext < 0:
+            # 돌파 직후 종가가 피벗 아래로 돌아온 상태. D+N 확정 전이라도
+            # 보이도록 경고만 남기고 판정(upthrust_failed)은 바꾸지 않는다.
+            message = f"피벗 하회 — 현재가가 피벗 아래 {abs(cur_ext):.1f}%"
+            _append_unique(warnings, message)
+            _append_unique(flags, message)
         if cur_stop is not None:
             if cur_stop < 0:
                 # 현재가가 이미 stop_loss 아래로 내려간 상태 — 손절폭 초과보다
@@ -135,13 +162,13 @@ def annotate_alert_freshness(signal: Dict[str, Any]) -> Dict[str, Any]:
                 message = f"손절가 이탈 — 현재가가 손절선 아래 {abs(cur_stop):.1f}%"
                 _append_unique(warnings, message)
                 _append_unique(flags, message)
-                signal["_alert_freshness_would_cut"] = True
+                signal["_alert_freshness_would_cut"] = gated
             elif cur_stop > config.ALERT_MAX_CUR_STOP_PCT:
                 message = (f"손절폭 과대 — {cur_stop:.1f}% "
                            f"(기준 {config.ALERT_MAX_CUR_STOP_PCT:g}%)")
                 _append_unique(warnings, message)
                 _append_unique(flags, message)
-                signal["_alert_freshness_would_cut"] = True
+                signal["_alert_freshness_would_cut"] = gated
 
     signal["entry_warnings"] = warnings
     signal["warning_flags"] = flags

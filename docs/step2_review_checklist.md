@@ -480,6 +480,38 @@ $PY -m pytest "tests/test_strict_filter.py::TestBaseGate" -v
 
 ---
 
+## 9. RE_BREAKOUT 진입 경고 — 경고만 추가, 통과/차단 불변 (2026-10-14)
+
+배경: 주봉 거래량 게이트에 걸린 BREAKOUT은 항목 6·Step 1 항목 7대로 RE_BREAKOUT
+탐지기로 넘어간다. RE_BREAKOUT에는 피벗 추격·돌파 실패·현재가 경고가 전혀 붙지 않아,
+운영 2026-10-14 KR 사람인(143240)이 주봉 0.41x·현재가 피벗 −2.5%인데도 경고 없이
+B등급으로 알림됐다.
+
+변경 범위:
+
+- `entry_control.annotate_signal_entry`: RE_BREAKOUT에도 `pivot_ext_pct`/`upthrust_failed`
+  관측과 경고를 붙인다. RE_BREAKOUT만 `strict_weekly_volume_ratio < BREAKOUT_WEEKLY_VOL_RATIO`
+  이면 "주봉 거래량 미달" 경고를 추가한다.
+- `entry_control.annotate_alert_freshness`: RE_BREAKOUT에도 현재가 추격·손절 경고를 붙이고,
+  BREAKOUT·RE_BREAKOUT 모두 현재가가 피벗 아래면 "피벗 하회" 경고를 붙인다.
+- `scan_engine._notify`: BREAKOUT 외 신호도 `entry_warnings`를 알림에 출력한다.
+- **바꾸지 않은 것**: `strict_filter._check_entry_controls`(게이트), `_sync_upthrust_cooldown`
+  (쿨다운 기록), `_alert_freshness_would_cut`(알림 억제), funnel shadow 카운터는 BREAKOUT 전용 유지.
+  RE_BREAKOUT은 게이트 토글을 켜도 통과/차단이 바뀌지 않는다. 새 "피벗 하회" 경고는 억제 판정에 쓰지 않는다.
+
+```bash
+$PY -m pytest "tests/test_entry_controls.py::TestReBreakoutWarningsOnly" -v
+```
+
+**기대**: 7개 전부 PASS. 특히
+`test_rebreakout_strict_result_unchanged_even_with_entry_gates_on`(게이트 ON에서도 `(True, [])`)과
+`test_rebreakout_failure_never_starts_breakout_cooldown`(쿨다운 행 0개)이 불변 계약을 고정한다.
+
+> 판단 필요: RE_BREAKOUT을 실제로 차단할지는 이번 범위가 아니다. 경고 누적 후
+> 실스캔 결과로 결정한다.
+
+---
+
 ## 리뷰 판단이 필요한 지점 요약
 
 | # | 사안 | 상태 |

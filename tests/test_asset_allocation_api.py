@@ -158,7 +158,12 @@ def test_one_button_execute_persists_authorization_and_stops_for_unfilled_sell(c
     base = '/api/asset-allocation/rebalance/' + cycle['id']
 
     assert test_client.post(base + '/execute', json={'confirmation':'wrong'}).status_code == 422
-    result = test_client.post(base + '/execute', json={'confirmation':'account2'}).json()
+    unseen = test_client.post(base + '/execute', json={'confirmation':'account2'}).json()
+    assert unseen['state'] == 'SELL_PREVIEW' and unseen['plan_changed'] is True
+    assert broker.sent == []
+    from tests.test_allocation_rebalance import seen
+    result = test_client.post(base + '/execute', json={'confirmation':'account2',
+                                                       'expected_plan': seen(unseen)}).json()
 
     assert result['state'] == 'SELL_PENDING'
     assert result['blockers']
@@ -198,3 +203,35 @@ def test_capability_enables_explicit_real_user_trigger(client, monkeypatch):
     assert data['execution_mode'] == 'real'
     assert data['per_order_buy_capacity_required'] is True
     assert data['user_trigger_required'] is True
+
+
+
+def test_close_out_requires_confirmation_and_trading_flag(client, monkeypatch, tmp_path):
+    from tests.test_allocation_rebalance import Broker, seen
+    from trading.allocation_rebalance import Rebalance
+    test_client, api = client
+    broker = Broker()
+    broker.path = tmp_path / 'journal'
+    service = Rebalance(broker.path, broker)
+    monkeypatch.setattr(api, '_rebalance_service', lambda: service)
+    monkeypatch.setenv('ALLOCATION_LIQUIDATION_SCOPE', 'SPY,QQQ')
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
+    api.ASSET_ALLOCATION_CACHE_DIR.mkdir()
+    api._allocation_cache_path('easy', api.date(2026, 8, 31)).write_text(json.dumps({
+        'report': {'combined_allocations': {'SPY': .5, 'QQQ': .5}}}))
+    cycle = test_client.post('/api/asset-allocation/rebalance/preview?as_of=2026-08-31').json()
+    base = '/api/asset-allocation/rebalance/' + cycle['id']
+    assert test_client.post(base + '/close-out', json={'confirmation': 'account2'}).status_code == 409
+    selling = test_client.post(base + '/execute', json={'confirmation': 'account2',
+                                                        'expected_plan': seen(cycle)}).json()
+    order = selling['orders'][0]
+    broker.evidence[order['id']] = {'matched_intent_id': order['id'], 'state': 'OPEN', 'filled_quantity': 0}
+
+    assert test_client.post(base + '/close-out', json={'confirmation': 'wrong'}).status_code == 422
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'false')
+    assert test_client.post(base + '/close-out', json={'confirmation': 'account2'}).status_code == 503
+    assert broker.cancelled == []
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
+    result = test_client.post(base + '/close-out', json={'confirmation': 'account2'}).json()
+    assert result['orders'][0]['state'] == 'CANCEL_REQUESTED'
+    assert len(broker.cancelled) == 1

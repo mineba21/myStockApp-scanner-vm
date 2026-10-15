@@ -44,6 +44,9 @@ D+3 확정 및 경고 전용 전략은 변경하지 않는다. 저장된 경고�
 
 저장된 추천수량 `suggested_qty`와 최초 검출 시각 `first_detected_at`을 목록과 상세에 제공한다.
 추천수량은 스캔 당시 저장된 값으로, 현재 계좌·현금 기준 주문 가능 수량이 아니다.
+2026-10-14부터 US 추천수량의 자산은 `KIWOOM_WEB_ENABLED=true`일 때 스캔 시점에 자유투자(account1)
+실계좌 요약(USD 현금+평가액, 주문가능 현금)을 `account_equity`에 자동 append해 계산한다.
+조회 실패·0·비정상 값은 기록하지 않고 기존 최신 행을 쓴다. KR은 수동 입력(`/api/equity`)만 사용한다.
 기존 행은 최초 검출 시각을 복원할 수 없어 `first_detected_at=null`이다.
 `scan_time`은 마지막 스캔 갱신 시각이며 `signal_date`는 신호 발생 날짜다.
 계좌자산·알림 전송 여부·오류 traceback은 응답에서 제외한다.
