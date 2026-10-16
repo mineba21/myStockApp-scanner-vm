@@ -913,6 +913,7 @@
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">손익 <span x-text="holdingSortIndicator('profit_loss')"></span></button></th>
                 <th class="px-4 py-3 text-center"><button @click="setHoldingSort('unrealized_r')" class="inline-flex items-center gap-1 hover:text-indigo-600">R / 손절 <span x-text="holdingSortIndicator('unrealized_r')"></span></button></th>
                 <th class="px-4 py-3 text-center"><button @click="setHoldingSort('price_updated_at')" class="inline-flex items-center gap-1 hover:text-indigo-600">업데이트 <span x-text="holdingSortIndicator('price_updated_at')"></span></button></th>
+                <th class="px-4 py-3 text-center">차트·주문</th>
                 <th class="px-4 py-3 text-center">편집</th>
                 <th class="px-4 py-3 text-center">삭제</th>
               </tr>
@@ -948,6 +949,14 @@
                   </td>
                   <td class="px-4 py-3 text-center text-slate-400"
                     x-text="h.price_updated_at ? fmtDt(h.price_updated_at) : '미업데이트'"></td>
+                  <td class="px-4 py-3 text-center whitespace-nowrap">
+                    <button @click="openHoldingChart(h)" title="차트"
+                      class="text-xs text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded transition">📈</button>
+                    <button @click="openOrderTicket(h,'BUY')"
+                      class="text-xs font-semibold text-emerald-700 hover:bg-emerald-50 px-2 py-1 rounded transition">매수</button>
+                    <button @click="openOrderTicket(h,'SELL')"
+                      class="text-xs font-semibold text-red-600 hover:bg-red-50 px-2 py-1 rounded transition">매도</button>
+                  </td>
                   <td class="px-4 py-3 text-center">
                     <button x-show="!h.read_only" @click="openHoldingEdit(h)" class="text-xs text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded transition">편집</button>
                     <span x-show="h.read_only" class="text-xs text-slate-400">읽기 전용</span>
@@ -1025,6 +1034,7 @@
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">손익(USD) <span x-text="holdingSortIndicator('profit_loss')"></span></button></th>
                 <th class="px-4 py-3 text-center"><button @click="setHoldingSort('unrealized_r')" class="inline-flex items-center gap-1 hover:text-indigo-600">R / 손절 <span x-text="holdingSortIndicator('unrealized_r')"></span></button></th>
                 <th class="px-4 py-3 text-center"><button @click="setHoldingSort('price_updated_at')" class="inline-flex items-center gap-1 hover:text-indigo-600">업데이트 <span x-text="holdingSortIndicator('price_updated_at')"></span></button></th>
+                <th class="px-4 py-3 text-center">차트·주문</th>
                 <th class="px-4 py-3 text-center">편집</th>
                 <th class="px-4 py-3 text-center">삭제</th>
               </tr>
@@ -1062,6 +1072,14 @@
                   </td>
                   <td class="px-4 py-3 text-center text-slate-400"
                     x-text="h.price_updated_at ? fmtDt(h.price_updated_at) : '미업데이트'"></td>
+                  <td class="px-4 py-3 text-center whitespace-nowrap">
+                    <button @click="openHoldingChart(h)" title="차트"
+                      class="text-xs text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded transition">📈</button>
+                    <button @click="openOrderTicket(h,'BUY')"
+                      class="text-xs font-semibold text-emerald-700 hover:bg-emerald-50 px-2 py-1 rounded transition">매수</button>
+                    <button @click="openOrderTicket(h,'SELL')"
+                      class="text-xs font-semibold text-red-600 hover:bg-red-50 px-2 py-1 rounded transition">매도</button>
+                  </td>
                   <td class="px-4 py-3 text-center">
                     <button x-show="!h.read_only" @click="openHoldingEdit(h)" class="text-xs text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded transition">편집</button>
                     <span x-show="h.read_only" class="text-xs text-slate-400">읽기 전용</span>
@@ -1476,7 +1494,7 @@
 </div>
 
 <!-- ══════════════════ 모달: 차트 ════════════════════════ -->
-<div x-show="chartModal.open" x-cloak class="modal-bg" @click.self="closeChart()" @keydown.escape.window="closeChart()">
+<div x-show="chartModal.open" x-cloak class="modal-bg" @click.self="closeChart()" @keydown.escape.window="orderModal.open ? closeOrderTicket() : closeChart()">
   <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-4 sm:p-6 max-h-[95vh] overflow-y-auto">
     <div class="flex justify-between items-start mb-4 gap-3 flex-wrap">
       <div class="flex items-center gap-2 flex-wrap">
@@ -1486,8 +1504,35 @@
         <h2 class="text-base font-bold text-slate-800" x-text="chartModal.name || chartModal.ticker"></h2>
         <span class="text-xs text-slate-400" x-text="chartModal.ticker"></span>
       </div>
-      <button @click="closeChart()" class="text-slate-400 text-2xl leading-none">×</button>
+      <div class="flex items-center gap-2">
+        <template x-if="chartModal.holding">
+          <div class="flex items-center gap-1.5">
+            <button @click="openOrderTicket(chartModal.holding,'BUY')"
+              class="btn !py-1 !px-3 text-xs bg-emerald-600 text-white hover:bg-emerald-700">매수</button>
+            <button @click="openOrderTicket(chartModal.holding,'SELL')"
+              class="btn !py-1 !px-3 text-xs bg-red-500 text-white hover:bg-red-600">매도</button>
+          </div>
+        </template>
+        <button @click="closeChart()" class="text-slate-400 text-2xl leading-none">×</button>
+      </div>
     </div>
+
+    <!-- 보유종목에서 연 차트: 평단가/손절가를 가격선으로 함께 표시 -->
+    <template x-if="chartModal.holding">
+      <div class="mb-3 flex flex-wrap gap-2 text-xs">
+        <span class="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-100"
+          x-text="(chartModal.holding.account_name ? chartModal.holding.account_name+' · ' : '')+'보유 '+Number(chartModal.holding.quantity||0).toLocaleString()+'주'"></span>
+        <span class="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 border border-amber-100"
+          x-text="'평단 '+fmtOverlayPrice(chartModal.holding.avg_price)"></span>
+        <span x-show="chartModal.holding.current_stop_loss!=null"
+          class="px-2.5 py-1 rounded-lg bg-slate-50 text-slate-700 border border-slate-200"
+          x-text="'손절 '+fmtOverlayPrice(chartModal.holding.current_stop_loss)"></span>
+        <span x-show="chartModal.holding.current_price"
+          class="px-2.5 py-1 rounded-lg font-semibold"
+          :class="chartModal.holding.profit_loss_pct>=0?'bg-emerald-50 text-emerald-700':'bg-red-50 text-red-700'"
+          x-text="'수익률 '+fmtSignedPct(chartModal.holding.profit_loss_pct)"></span>
+      </div>
+    </template>
 
     <div class="flex flex-wrap items-center gap-2 mb-3">
       <div class="inline-flex rounded-lg bg-slate-100 p-0.5">
@@ -1578,6 +1623,93 @@
         <div class="text-xs text-slate-400" x-text="chartModal.error"></div>
         <button @click="loadChart()" class="btn btn-ghost text-xs mt-1">다시 시도</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ 모달: 매수·매도 주문 (미리보기 전용, 전송 없음) ══ -->
+<div x-show="orderModal.open" x-cloak class="modal-bg" @click.self="closeOrderTicket()"
+  @keydown.escape.window="if (!chartModal.open) closeOrderTicket()">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[95vh] overflow-y-auto">
+    <div class="flex justify-between items-start mb-4 gap-3">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs px-2 py-0.5 rounded-full font-bold"
+            :class="orderModal.side==='BUY'?'bg-emerald-100 text-emerald-700':'bg-red-100 text-red-700'"
+            x-text="orderModal.side==='BUY'?'매수':'매도'"></span>
+          <h2 class="text-base font-bold text-slate-800" x-text="orderModal.holding?.name || orderModal.holding?.ticker"></h2>
+          <span class="text-xs text-slate-400" x-text="orderModal.holding?.ticker"></span>
+        </div>
+        <p class="text-xs text-slate-500 mt-1"
+          x-text="(orderModal.holding?.account_name || '계좌 미지정')+' · 보유 '+Number(orderModal.holding?.quantity||0).toLocaleString()+'주 · 현재가 '+fmtOrderPrice(orderModal.holding?.current_price)"></p>
+      </div>
+      <button @click="closeOrderTicket()" class="text-slate-400 text-2xl leading-none">×</button>
+    </div>
+
+    <div class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800 mb-4">
+      주문 미리보기만 제공합니다. 증권사로 주문을 보내지 않습니다.
+    </div>
+
+    <div class="inline-flex rounded-lg bg-slate-100 p-0.5 mb-4 w-full">
+      <button @click="setOrderSide('BUY')"
+        :class="orderModal.side==='BUY'?'bg-white shadow text-emerald-700':'text-slate-500'"
+        class="flex-1 text-sm font-semibold px-3 py-1.5 rounded-md transition">매수</button>
+      <button @click="setOrderSide('SELL')"
+        :class="orderModal.side==='SELL'?'bg-white shadow text-red-600':'text-slate-500'"
+        class="flex-1 text-sm font-semibold px-3 py-1.5 rounded-md transition">매도</button>
+    </div>
+
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block">수량 (주)</label>
+        <div class="flex gap-2">
+          <input type="number" min="1" step="1" class="input" x-model.number="orderModal.quantity" @input="orderModal.preview=null">
+          <button x-show="orderModal.side==='SELL'" @click="orderModal.quantity=Math.floor(Number(orderModal.holding?.quantity||0)); orderModal.preview=null"
+            class="btn btn-ghost text-xs whitespace-nowrap">전량</button>
+        </div>
+      </div>
+      <div>
+        <label class="text-xs text-slate-500 mb-1 block"
+          x-text="'지정가 ('+(orderModal.holding?.market==='US'?'USD':'KRW')+')'"></label>
+        <input type="number" min="0" class="input" x-model.number="orderModal.limitPrice"
+          :step="orderModal.holding?.market==='US'?'0.01':'1'" @input="orderModal.preview=null">
+      </div>
+      <div class="flex justify-between text-sm">
+        <span class="text-slate-500">예상 주문금액</span>
+        <span class="font-bold text-slate-800"
+          x-text="fmtOrderPrice((Number(orderModal.quantity)||0)*(Number(orderModal.limitPrice)||0))"></span>
+      </div>
+    </div>
+
+    <div x-show="orderModal.error" class="mt-3 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700"
+      x-text="orderModal.error"></div>
+
+    <template x-if="orderModal.preview">
+      <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-1.5">
+        <div class="font-bold text-slate-700 mb-1">주문 미리보기</div>
+        <div class="flex justify-between"><span class="text-slate-500">구분</span>
+          <span class="font-semibold" :class="orderModal.preview.side==='BUY'?'text-emerald-700':'text-red-600'"
+            x-text="(orderModal.preview.side==='BUY'?'매수':'매도')+' · 지정가'"></span></div>
+        <div class="flex justify-between"><span class="text-slate-500">수량 × 가격</span>
+          <span x-text="orderModal.preview.quantity.toLocaleString()+'주 × '+fmtOrderPrice(orderModal.preview.limit_price)"></span></div>
+        <div class="flex justify-between"><span class="text-slate-500">예상 주문금액</span>
+          <span class="font-semibold" x-text="fmtOrderPrice(orderModal.preview.estimated_amount)"></span></div>
+        <div class="flex justify-between"><span class="text-slate-500">주문 후 보유수량</span>
+          <span x-text="orderModal.preview.held_quantity.toLocaleString()+' → '+orderModal.preview.quantity_after.toLocaleString()+'주'"></span></div>
+        <template x-for="w in orderModal.preview.warnings" :key="w">
+          <div class="text-amber-700 font-semibold" x-text="'⚠ '+w"></div>
+        </template>
+        <div class="text-slate-500 pt-1 border-t border-slate-200" x-text="orderModal.preview.execution_block_reason"></div>
+      </div>
+    </template>
+
+    <div class="flex gap-2 mt-5">
+      <button @click="previewOrder()" :disabled="orderModal.busy"
+        class="flex-1 btn btn-ghost" x-text="orderModal.busy ? '확인 중…' : '미리보기'"></button>
+      <button disabled title="주문 전송은 아직 연결되지 않았습니다"
+        class="flex-1 btn text-white opacity-40 cursor-not-allowed"
+        :class="orderModal.side==='BUY'?'bg-emerald-600':'bg-red-500'"
+        x-text="(orderModal.side==='BUY'?'매수':'매도')+' 주문 (준비 중)'"></button>
     </div>
   </div>
 </div>
@@ -1704,7 +1836,11 @@ function app() {
     // 차트 (Phase 4)
     chartModal: {open:false, market:'', ticker:'', name:'', scanResultId:null,
                  timeframe:'daily', range:'1y',
-                 loading:false, error:null, empty:false, overlay:null},
+                 loading:false, error:null, empty:false, overlay:null, holding:null},
+
+    // 보유종목 매수·매도 주문 (미리보기 전용)
+    orderModal: {open:false, side:'BUY', holding:null, quantity:1, limitPrice:null,
+                 preview:null, error:null, busy:false},
     _chart: null, _chartCandles: null, _chartVolume: null, _chartMa: null,
     _chartResizeObs: null, _chartOverlayDraw: null,
 
@@ -2195,6 +2331,7 @@ function app() {
       this.chartModal.ticker = r.ticker;
       this.chartModal.name = r.name || r.ticker;
       this.chartModal.scanResultId = r.id || null;
+      this.chartModal.holding = null;
       this.chartModal.timeframe = 'daily';
       this.chartModal.range = '1y';
       this.chartModal.error = null;
@@ -2206,7 +2343,82 @@ function app() {
 
     closeChart() {
       this.chartModal.open = false;
+      this.chartModal.holding = null;
       this._destroyChart();
+    },
+
+    // 보유종목 행 → 차트. holding id는 스캔 결과 ID가 아니므로 overlay 조회에 쓰지 않는다.
+    openHoldingChart(h) {
+      this.openChart({market: h.market, ticker: h.ticker, name: h.name});
+      this.chartModal.holding = h;
+    },
+
+    // ── 보유종목 매수·매도 주문 (미리보기 전용, 전송 없음) ──
+    _defaultOrderPrice(h) {
+      const price = Number(h.current_price || h.avg_price || 0);
+      if (!price) return null;
+      return h.market === 'US' ? Math.round(price * 100) / 100 : Math.round(price);
+    },
+
+    openOrderTicket(h, side) {
+      this.orderModal.holding = h;
+      this.orderModal.side = side;
+      this.orderModal.quantity = 1;
+      this.orderModal.limitPrice = this._defaultOrderPrice(h);
+      this.orderModal.preview = null;
+      this.orderModal.error = null;
+      this.orderModal.busy = false;
+      this.orderModal.open = true;
+    },
+
+    closeOrderTicket() {
+      this.orderModal.open = false;
+      this.orderModal.preview = null;
+      this.orderModal.error = null;
+    },
+
+    setOrderSide(side) {
+      if (this.orderModal.side === side) return;
+      this.orderModal.side = side;
+      this.orderModal.preview = null;
+      this.orderModal.error = null;
+    },
+
+    fmtOrderPrice(value) {
+      if (value == null || value === '' || isNaN(Number(value))) return '-';
+      return this.orderModal.holding?.market === 'US'
+        ? '$'+Number(value).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})
+        : '₩'+Math.round(Number(value)).toLocaleString();
+    },
+
+    async previewOrder() {
+      const m = this.orderModal;
+      if (!m.holding) return;
+      m.error = null;
+      m.preview = null;
+      if (!Number.isInteger(m.quantity) || m.quantity < 1) { m.error = '수량은 1주 이상의 정수로 입력하세요.'; return; }
+      if (!(Number(m.limitPrice) > 0)) { m.error = '지정가를 입력하세요.'; return; }
+      m.busy = true;
+      try {
+        const resp = await fetch('/api/holding-orders/preview', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            holding_id: String(m.holding.id), side: m.side,
+            quantity: m.quantity, limit_price: Number(m.limitPrice),
+          }),
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const detail = Array.isArray(body.detail) ? body.detail.map(d => d.msg).join(', ') : body.detail;
+          throw new Error(detail || `HTTP ${resp.status}`);
+        }
+        m.preview = body;
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.busy = false;
+      }
     },
 
     setChartTimeframe(tf) {
@@ -2331,6 +2543,35 @@ function app() {
           price: overlay.stop_loss, color:'#111827', lineWidth:2,
           lineStyle: LightweightCharts.LineStyle.Dashed,
           axisLabelVisible:true, title:'stop',
+        });
+      }
+      const holding = this.chartModal.holding;
+      if (holding?.avg_price > 0) {
+        candleSeries.createPriceLine({
+          price: holding.avg_price, color:'#d97706', lineWidth:2,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible:true, title:'평단',
+        });
+      }
+      if (holding?.current_stop_loss > 0) {
+        candleSeries.createPriceLine({
+          price: holding.current_stop_loss, color:'#111827', lineWidth:2,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible:true, title:'손절',
+        });
+      }
+      // 평단/손절선이 캔들 범위 밖이어도 보이도록 자동 스케일에 포함한다.
+      const holdingLevels = [holding?.avg_price, holding?.current_stop_loss].filter(v => v > 0);
+      if (holdingLevels.length) {
+        candleSeries.applyOptions({
+          autoscaleInfoProvider: (original) => {
+            const res = original();
+            if (!res || !res.priceRange) return res;
+            return {...res, priceRange: {
+              minValue: Math.min(res.priceRange.minValue, ...holdingLevels),
+              maxValue: Math.max(res.priceRange.maxValue, ...holdingLevels),
+            }};
+          },
         });
       }
 

@@ -36,6 +36,7 @@ from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holding
 from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
 from web.kiwoom_sizing import apply_live_position_sizing
 from web.kiwoom_order_api import router as kiwoom_order_router
+from web.holding_order_api import router as holding_order_router
 from web.scanner_read_api import router as scanner_read_router
 from web.portfolio_read_api import router as portfolio_read_router
 
@@ -58,6 +59,7 @@ def _utc_iso(value: Optional[datetime]) -> Optional[str]:
 app = FastAPI(title="Weinstein Stock Scanner", version="1.0.0")
 app.include_router(asset_allocation_router)
 app.include_router(kiwoom_order_router)
+app.include_router(holding_order_router)
 app.include_router(scanner_read_router)
 app.include_router(portfolio_read_router)
 
