@@ -757,10 +757,25 @@
     <p class="text-sm text-amber-700 mt-2" role="status" x-text="reason"></p>
     <template x-if="sizing">
       <div class="text-sm mt-2">
-        <div>계획용 추정 자산 (USD): <strong x-text="sizing.planning_assets"></strong></div>
+        <p class="font-semibold">참고용 예상 수량</p>
+        <p>표시된 시세 기준으로 계산한 차액입니다. 실제 주문 수량은 최신 시세·잔고·현금과 여유금을 반영해 달라질 수 있습니다.</p>
+        <div>계획용 추정 자산 (USD): <strong x-text="sizing.planning_assets ?? '계산 불가'"></strong></div>
         <div>조회된 주문가능 현금 (USD): <span x-text="sizing.orderable_cash"></span></div>
+        <div>계좌 조회 시각: <span x-text="formatTime(sizing.account_as_of)"></span></div>
         <div>설정된 자산배분 관리 범위: <span x-text="(sizing.liquidation_scope || []).join(', ')"></span></div>
+        <template x-for="message in sizing.warnings || []"><p class="text-amber-700" x-text="message"></p></template>
         <template x-for="message in sizing.validation_errors || []"><p class="text-red-700" x-text="message"></p></template>
+        <div class="overflow-x-auto">
+          <table class="w-full my-2"><thead><tr><th>종목</th><th>목표 비중</th><th>가격 USD</th><th>시세 기준시각</th><th>현재 수량</th><th>예상 목표 수량</th><th>예상 매수</th><th>예상 매도</th></tr></thead>
+            <tbody><template x-for="row in sizing.items || []" :key="row.ticker"><tr>
+              <td x-text="row.ticker"></td><td x-text="(row.target_weight * 100).toFixed(2) + '%'"></td>
+              <td x-text="row.price ?? '가격 없음'"></td>
+              <td><span x-text="formatTime(row.price_as_of)"></span><span class="text-amber-700" x-show="row.price_status === 'reference'"> · 참고 가격</span></td>
+              <td x-text="row.current_quantity"></td><td x-text="row.target_quantity ?? '계산 불가'"></td>
+              <td x-text="row.buy_quantity ?? '계산 불가'"></td><td x-text="row.additional_sell_quantity ?? '계산 불가'"></td>
+            </tr></template></tbody>
+          </table>
+        </div>
       </div>
     </template>
     <button class="btn btn-ghost mt-2" :disabled="busy || !enabled" @click="action('/preview')">조정 매도 미리보기</button>
@@ -2474,6 +2489,7 @@ function allocationRebalancePanel() {
     },
     async load() {
       this.busy = true;
+      this.sizing = null;
       try {
         const cap = await this.request('/rebalance/capabilities');
         this.enabled = cap.execution_enabled;
@@ -2487,6 +2503,11 @@ function allocationRebalancePanel() {
         this.queueAdvance();
       } catch (e) { this.reason = e.message; }
       finally { this.busy = false; }
+    },
+    formatTime(value) {
+      if (!value) return '확인 불가';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? '확인 불가' : date.toLocaleString('ko-KR', {timeZone:'Asia/Seoul'}) + ' KST';
     },
     async action(path, body = {}) {
       if (this.busy) return;
