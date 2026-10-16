@@ -1663,8 +1663,8 @@
       <div>
         <label class="text-xs text-slate-500 mb-1 block">수량 (주)</label>
         <div class="flex gap-2">
-          <input type="number" min="1" step="1" class="input" x-model.number="orderModal.quantity" @input="orderModal.preview=null">
-          <button x-show="orderModal.side==='SELL'" @click="orderModal.quantity=Math.floor(Number(orderModal.holding?.quantity||0)); orderModal.preview=null"
+          <input type="number" min="1" step="1" class="input" x-model.number="orderModal.quantity" @input="resetOrderPreview()">
+          <button x-show="orderModal.side==='SELL'" @click="orderModal.quantity=Math.floor(Number(orderModal.holding?.quantity||0)); resetOrderPreview()"
             class="btn btn-ghost text-xs whitespace-nowrap">전량</button>
         </div>
       </div>
@@ -1672,7 +1672,7 @@
         <label class="text-xs text-slate-500 mb-1 block"
           x-text="'지정가 ('+(orderModal.holding?.market==='US'?'USD':'KRW')+')'"></label>
         <input type="number" min="0" class="input" x-model.number="orderModal.limitPrice"
-          :step="orderModal.holding?.market==='US'?'0.01':'1'" @input="orderModal.preview=null">
+          :step="orderModal.holding?.market==='US'?'0.01':'1'" @input="resetOrderPreview()">
       </div>
       <div class="flex justify-between text-sm">
         <span class="text-slate-500">예상 주문금액</span>
@@ -1840,7 +1840,7 @@ function app() {
 
     // 보유종목 매수·매도 주문 (미리보기 전용)
     orderModal: {open:false, side:'BUY', holding:null, quantity:1, limitPrice:null,
-                 preview:null, error:null, busy:false},
+                 preview:null, error:null, busy:false, requestSeq:0},
     _chart: null, _chartCandles: null, _chartVolume: null, _chartMa: null,
     _chartResizeObs: null, _chartOverlayDraw: null,
 
@@ -2365,23 +2365,38 @@ function app() {
       this.orderModal.side = side;
       this.orderModal.quantity = 1;
       this.orderModal.limitPrice = this._defaultOrderPrice(h);
-      this.orderModal.preview = null;
-      this.orderModal.error = null;
-      this.orderModal.busy = false;
+      this.resetOrderPreview();
       this.orderModal.open = true;
     },
 
     closeOrderTicket() {
       this.orderModal.open = false;
-      this.orderModal.preview = null;
-      this.orderModal.error = null;
+      this.resetOrderPreview();
     },
 
     setOrderSide(side) {
       if (this.orderModal.side === side) return;
       this.orderModal.side = side;
-      this.orderModal.preview = null;
-      this.orderModal.error = null;
+      this.resetOrderPreview();
+    },
+
+    // 종목·구분·입력이 바뀌면 진행 중인 미리보기 응답을 무효화한다.
+    resetOrderPreview() {
+      const m = this.orderModal;
+      m.requestSeq += 1;
+      m.preview = null;
+      m.error = null;
+      m.busy = false;
+    },
+
+    // 늦게 도착한 응답은 요청 번호와 현재 화면의 종목·구분·수량·가격이 모두 같을 때만 적용한다.
+    _isCurrentOrderRequest(seq, request) {
+      const m = this.orderModal;
+      return m.open && seq === m.requestSeq
+        && String(m.holding?.id) === request.holding_id
+        && m.side === request.side
+        && m.quantity === request.quantity
+        && Number(m.limitPrice) === request.limit_price;
     },
 
     fmtOrderPrice(value) {
@@ -2398,26 +2413,33 @@ function app() {
       m.preview = null;
       if (!Number.isInteger(m.quantity) || m.quantity < 1) { m.error = '수량은 1주 이상의 정수로 입력하세요.'; return; }
       if (!(Number(m.limitPrice) > 0)) { m.error = '지정가를 입력하세요.'; return; }
+      const seq = ++m.requestSeq;
+      const request = {
+        holding_id: String(m.holding.id), side: m.side,
+        quantity: m.quantity, limit_price: Number(m.limitPrice),
+      };
       m.busy = true;
       try {
         const resp = await fetch('/api/holding-orders/preview', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            holding_id: String(m.holding.id), side: m.side,
-            quantity: m.quantity, limit_price: Number(m.limitPrice),
-          }),
+          body: JSON.stringify(request),
         });
         const body = await resp.json().catch(() => ({}));
+        if (!this._isCurrentOrderRequest(seq, request)) return;
         if (!resp.ok) {
           const detail = Array.isArray(body.detail) ? body.detail.map(d => d.msg).join(', ') : body.detail;
           throw new Error(detail || `HTTP ${resp.status}`);
         }
+        if (String(body.holding_id) !== request.holding_id || body.side !== request.side
+            || body.quantity !== request.quantity || body.limit_price !== request.limit_price) {
+          throw new Error('미리보기 응답이 요청한 주문과 일치하지 않습니다. 다시 시도하세요.');
+        }
         m.preview = body;
       } catch (e) {
-        m.error = (e && e.message) ? e.message : String(e);
+        if (this._isCurrentOrderRequest(seq, request)) m.error = (e && e.message) ? e.message : String(e);
       } finally {
-        m.busy = false;
+        if (seq === m.requestSeq) m.busy = false;
       }
     },
 

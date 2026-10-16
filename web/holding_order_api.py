@@ -106,10 +106,12 @@ def preview_holding_order(body: HoldingOrderPreviewRequest, db: Session = Depend
         if int(price) % tick:
             warnings.append(f"주식 호가단위({tick:,}원)에 맞지 않습니다. ETF·ETN이면 호가단위가 다를 수 있습니다.")
 
-    held_quantity = int(float(holding.get("quantity") or 0))
-    if body.side == "SELL" and body.quantity > held_quantity:
+    # 주문수량은 정수(주)만 받지만 보유수량은 소수점(해외 소수점 주식)일 수 있다.
+    held = Decimal(str(holding.get("quantity") or 0))
+    if body.side == "SELL" and body.quantity > held:
         raise HTTPException(status_code=422, detail="매도수량이 보유수량을 초과합니다.")
-    quantity_after = held_quantity + body.quantity if body.side == "BUY" else held_quantity - body.quantity
+    after = held + body.quantity if body.side == "BUY" else held - body.quantity
+    held_quantity, quantity_after = float(held), float(after)
 
     current_price = float(holding.get("current_price") or 0) or None
     if current_price:

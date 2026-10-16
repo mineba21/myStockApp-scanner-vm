@@ -72,6 +72,27 @@ def test_sell_cannot_exceed_held_quantity():
     assert preview(side="SELL", quantity=10)["quantity_after"] == 0
 
 
+def test_fractional_holding_keeps_remainder_after_order(monkeypatch):
+    monkeypatch.setenv("KIWOOM_WEB_ENABLED", "true")
+    monkeypatch.setattr(api, "get_kiwoom_holdings", lambda: [kiwoom_row(quantity=1.5)])
+    holding_id = "kiwoom:account1:US:AAPL"
+
+    sell = preview(holding_id=holding_id, side="SELL", quantity=1, limit_price=200)
+    assert sell["held_quantity"] == 1.5
+    assert sell["quantity_after"] == 0.5
+
+    assert preview(holding_id=holding_id, side="BUY", quantity=1, limit_price=200)["quantity_after"] == 2.5
+
+    with pytest.raises(HTTPException) as exc:
+        preview(holding_id=holding_id, side="SELL", quantity=2, limit_price=200)
+    assert exc.value.status_code == 422
+
+
+def test_fractional_remainder_has_no_float_drift():
+    result = preview(db=FakeDb(manual_holding(quantity=1.1)), side="SELL", quantity=1)
+    assert result["quantity_after"] == 0.1
+
+
 def test_kr_price_must_be_whole_won_and_warns_off_tick():
     with pytest.raises(HTTPException) as exc:
         preview(limit_price=70_000.5)
