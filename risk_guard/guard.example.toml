@@ -1,0 +1,46 @@
+# 리스크 가드 설정 예시. guard.toml 로 복사해서 값을 정하세요.
+# 모르는 키가 있으면 로딩 단계에서 에러가 납니다 (오타로 한도가 기본값이 되는 것 방지).
+
+[guard]
+# --- 범위 ---
+enabled_markets = ["US"]          # KR 은 KIS 어댑터를 붙인 뒤에 추가
+allowed_order_types = ["LIMIT"]   # 시장가는 기본 금지
+symbol_allowlist = []             # 비우면 전체 허용. 처음엔 ETF 몇 개로 좁혀도 좋음
+symbol_blocklist = ["SOXL", "TQQQ"]  # 예: 레버리지 ETF는 에이전트 대상에서 제외
+allow_short = false
+
+# --- 에이전트에 떼어준 자금 (USD) ---
+capital_cap = 5000
+
+# --- 사이징 (R 기준) ---
+risk_per_trade_pct = 0.01         # 1R = capital_cap 의 1%
+max_position_notional = 1000
+max_position_pct = 0.20
+require_stop_for_buy = true
+max_stop_distance_pct = 0.10
+allow_resize = true
+
+# --- 일일/보유 한도 (매수 기준) ---
+max_open_positions = 5
+max_orders_per_day = 5
+max_new_positions_per_day = 2
+max_buy_notional_per_day = 2000
+
+# --- 주문 품질 ---
+max_price_deviation_pct = 0.03
+duplicate_window_minutes = 60
+
+# --- 시간 ---
+market_hours_only = true
+market_timezone = "America/New_York"
+market_holidays = ["2026-11-26", "2026-12-25"]  # 휴장일은 직접 관리
+
+# --- 실행 ---
+require_human_approval = true
+decision_ttl_minutes = 15
+live_trading = false              # true 여도 RISK_GUARD_LIVE=1 환경변수가 있어야 실주문
+
+# --- 파일 ---
+kill_switch_path = "./state/KILL"
+ledger_path = "./state/ledger.json"
+audit_log_path = "./state/audit.jsonl"
