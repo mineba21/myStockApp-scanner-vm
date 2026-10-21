@@ -1,4 +1,6 @@
-"""Strict, read-only account2 execution evidence. Never submits orders.
+"""Strict, read-only US execution evidence (account2, or account1 for scanner buys).
+
+Never submits orders.
 
 Official contracts: docs/kiwoom_execution_evidence.md.
 Cash reservation semantics remain unverified; this module cannot enable trading.
@@ -53,9 +55,10 @@ def order_date(value):
 class ExecutionEvidence:
     def __init__(self, client, token, *, account='account2', max_pages=100,
                  rate_limit_delays=(2, 4, 8, 16), sleeper=time.sleep):
-        if account != 'account2' or not 1 <= max_pages <= 100:
-            raise KiwoomError('account2 및 유효한 페이지 제한이 필요합니다.')
+        if account not in ('account1', 'account2') or not 1 <= max_pages <= 100:
+            raise KiwoomError('account1/account2 및 유효한 페이지 제한이 필요합니다.')
         self.client, self.token, self.max_pages = client, token, max_pages
+        self.account = account
         self.rate_limit_delays = tuple(rate_limit_delays)
         self.sleeper = sleeper
 
@@ -155,7 +158,7 @@ class ExecutionEvidence:
         day = order_date(day)
         rows = self.rows('ust21150', {'ord_dt': day, 'query_tp': '1', 'slby_tp': '0',
                                     'stex_tp': '', 'stk_cd': '', 'oppo_trde_tp': '%', 'fr_ord_no': ''})
-        normalized = [self.normalize(row, day) for row in rows]
+        normalized = [{**self.normalize(row, day), 'account': self.account} for row in rows]
         ids = [row['order_number'] for row in normalized]
         if len(ids) != len(set(ids)):
             raise KiwoomError('주문번호가 중복되어 고유 대조할 수 없습니다.')
@@ -260,7 +263,7 @@ class ExecutionEvidence:
             blockers.append('조회일자에 미체결 주문이 남아 있습니다.')
         if time.time() - started > 60:
             blockers.append('조회가 60초를 초과했습니다. 재조회가 필요합니다.')
-        return {'account': 'account2', 'currency': 'USD', 'order_date': day,
+        return {'account': self.account, 'currency': 'USD', 'order_date': day,
                 'broker_orderable_cash': str(cash), 'cash_source': 'ust21110.fc_ord_alowa',
                 'open_order_count': len(pending), 'cash_includes_reservations': None,
                 'validated_for_execution': False, 'blockers': blockers, 'observed_at': started}
