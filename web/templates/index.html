@@ -408,6 +408,17 @@
               x-text="(r.volume_ratio||0).toFixed(1)+'x'"></div>
           </div>
         </div>
+        <!-- 손절가: 스캔 시 저장된 값. 손절폭은 카드의 현재가(스캔 시점 스냅샷) 기준 -->
+        <div class="flex justify-between items-center bg-white/70 rounded-lg px-2 py-1.5 text-xs mb-3">
+          <span class="text-slate-400">손절가</span>
+          <span x-show="r.stop_loss==null" class="text-slate-400">-</span>
+          <span x-show="r.stop_loss!=null" class="font-bold text-red-600">
+            <span x-text="r.market==='KR' ? r.stop_loss?.toLocaleString()+'원' : '$'+r.stop_loss?.toFixed(2)"></span>
+            <span x-show="r.price>0" class="font-medium text-red-400"
+              title="카드의 현재가 대비 손절폭"
+              x-text="'('+((r.stop_loss/r.price-1)*100).toFixed(1)+'%)'"></span>
+          </span>
+        </div>
         <!-- 거부 사유 펼치기 (strict 거부 행만) -->
         <template x-if="r.strict_filter_passed === false && (r.filter_reasons||[]).length">
           <div class="mb-2">
@@ -436,7 +447,7 @@
             :title="r.strict_filter_passed === false ? 'Strict 거부 행은 매수 동선 차단 (QA 인스펙트 전용)' : ''"
             class="flex-1 text-xs bg-white/80 hover:bg-white border border-slate-200 rounded-lg py-1.5 text-slate-600 hover:text-indigo-600 transition font-medium"
             :class="r.strict_filter_passed === false ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''">
-            + 매수
+            + 기록
           </button>
           <button @click="openAddWatch(r)"
             :disabled="r.strict_filter_passed === false"
@@ -446,6 +457,14 @@
             👁 감시
           </button>
         </div>
+        <!-- 표시 전용 매수 버튼: 주문 동작은 아직 연결하지 않았다 -->
+        <button type="button"
+          :disabled="r.strict_filter_passed === false"
+          :title="r.strict_filter_passed === false ? 'Strict 거부 행은 매수 동선 차단 (QA 인스펙트 전용)' : '주문 기능 미연결 (표시 전용)'"
+          class="w-full mt-2 text-xs font-semibold rounded-lg py-1.5 bg-emerald-600 text-white hover:bg-emerald-700 transition"
+          :class="r.strict_filter_passed === false ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''">
+          🛒 매수
+        </button>
       </div>
     </template>
   </div>
