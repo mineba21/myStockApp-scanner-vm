@@ -249,6 +249,34 @@ def test_request_resolved_during_precheck_is_never_sent(setup):
     assert service.status(first["id"])["state"] == "RESOLVED_MANUAL"
 
 
+def test_abandoned_preview_cannot_be_sent_by_a_delayed_execute(setup):
+    # 리뷰 재현: execute A가 서버에서 지연된 채 브라우저만 끊김 → 복구 → 새 주문 B 전송 → A 뒤늦게 처리.
+    service, broker, _, _ = setup
+    a = service.prepare(candidate(), 1, 100)
+    assert service.abandon(a["id"])["state"] == "ABANDONED"
+
+    b = service.prepare(candidate(), 1, 100)
+    assert service.execute(b["id"], "NVDA")["state"] == "SUBMITTED"
+    with pytest.raises(ScannerBuyBlocked, match="이미 사용"):
+        service.execute(a["id"], "NVDA")
+    assert len(broker.buys) == 1
+    assert [r["id"] for r in service.recent()] == [b["id"]]
+
+
+def test_abandon_never_changes_a_claimed_or_sent_order(setup):
+    service, broker, _, _ = setup
+    sent = service.prepare(candidate(), 1, 100)
+    service.execute(sent["id"], "NVDA")
+    assert service.abandon(sent["id"])["state"] == "SUBMITTED"
+
+    claimed = service.prepare(candidate(), 1, 100)
+    with service.db() as db:
+        db.execute("UPDATE scanner_buy_orders SET state='SENDING' WHERE id=?", (claimed["id"],))
+    assert service.abandon(claimed["id"])["state"] == "SENDING"
+    with pytest.raises(ScannerBuyBlocked):
+        service.abandon("missing")
+
+
 def test_submitted_save_failure_reports_order_number_and_keeps_lock(setup, monkeypatch):
     service, broker, _, _ = setup
     row = service.prepare(candidate(), 1, 100)
@@ -563,6 +591,15 @@ def test_api_status_returns_journal_row_for_lost_responses(api_env, monkeypatch)
     with pytest.raises(HTTPException) as exc:
         api.buy_status("missing")
     assert exc.value.status_code == 409
+
+
+def test_api_abandon_blocks_late_execute(api_env, monkeypatch):
+    monkeypatch.setenv("ACCOUNT1_ORDER_ENABLED", "true")
+    order = preview(scan_row())
+    assert api.abandon_buy(order["id"])["state"] == "ABANDONED"
+    with pytest.raises(HTTPException) as exc:
+        execute(order["id"], "NVDA")
+    assert exc.value.status_code == 409 and api_env["US"].buys == []
 
 
 def test_api_hides_broker_errors(api_env, monkeypatch):

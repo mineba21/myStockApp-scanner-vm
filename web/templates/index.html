@@ -2713,8 +2713,8 @@ function app() {
       }
     },
 
-    // 전송 결과는 요청을 보낸 주문창에만 반영한다. 응답이 유실되면 주문 ID로 기록을 다시 확인하고,
-    // 확인 전에는 새 주문 입력으로 돌아가지 않는다.
+    // 전송 결과는 요청을 보낸 주문창에만 반영한다. 응답을 받지 못하면 같은 주문 ID로 서버에서
+    // 정리(_settleScanBuy)하고, 정리가 확인되기 전에는 새 주문 입력으로 돌아가지 않는다.
     async executeScanBuy() {
       const s = this.scanBuy;
       if (!s.preview || s.busy) return;
@@ -2728,13 +2728,7 @@ function app() {
           {confirmation_ticker: s.confirm.trim().toUpperCase()});
       } catch (e) {
         error = e.message || String(e);
-        try {
-          order = await this._scanBuyFetch(`/api/scanner-orders/buy/${sent.id}`);
-          // 아직 PREPARED면 전송 단계에 들어가지 않았다(만료·확인 불일치 등). 입력 화면으로 돌아간다.
-          if (order.state === 'PREPARED') order = null;
-        } catch (_) {
-          order = {...sent, state: 'CHECK_REQUIRED', order_number: null, broker_state: null, details: {}};
-        }
+        ({order, error} = await this._settleScanBuy(sent, error));
       }
       if (order) {
         this.toast(order.state === 'SUBMITTED' ? `${order.ticker} 매수 주문 접수됨`
@@ -2747,22 +2741,37 @@ function app() {
       s.busy = false;
     },
 
-    // 응답 유실·처리 중 상태의 주문을 저널 기록으로 다시 확인한다. 조회만 한다.
+    // 전송 응답을 받지 못한 주문을 정리한다. 상태 조회만으로 PREPARED를 버리면, 서버에서 뒤늦게
+    // 처리되는 원래 전송 요청과 새 주문이 겹칠 수 있다. 그래서 서버가 PREPARED를 원자적으로
+    // ABANDONED로 바꾼 것을 확인한 경우에만 입력 화면으로 돌려보낸다(order=null).
+    // 이미 선점·전송된 주문은 그 상태를 그대로 보여준다. 정리 요청까지 실패하면 주문 ID를 남긴다.
+    async _settleScanBuy(sent, error) {
+      try {
+        const order = await this._scanBuyFetch(`/api/scanner-orders/buy/${sent.id}/abandon`, {});
+        if (order.state === 'ABANDONED') {
+          return {order: null, error: (error ? error+' ' : '')+'이 미리보기는 폐기되어 전송되지 않습니다. 다시 미리보기하세요.'};
+        }
+        return {order, error};
+      } catch (_) {
+        return {order: {...sent, state: 'CHECK_REQUIRED', order_number: null, broker_state: null, details: {}},
+                error};
+      }
+    },
+
     async recheckScanBuy() {
       const s = this.scanBuy;
       if (!s.order) return;
       const session = s.session;
       s.busy = true;
-      try {
-        const order = await this._scanBuyFetch(`/api/scanner-orders/buy/${s.order.id}`);
-        if (session !== s.session) return;
+      const {order, error} = await this._settleScanBuy(s.order, null);
+      if (session !== s.session) return;
+      if (order?.state === 'CHECK_REQUIRED') {
+        s.error = '아직 주문 상태를 확인하지 못했습니다. 잠시 후 다시 확인하세요.';
+      } else {
         s.order = order;
-        s.error = null;
-      } catch (e) {
-        if (session === s.session) s.error = e.message || String(e);
-      } finally {
-        if (session === s.session) s.busy = false;
+        s.error = error;
       }
+      s.busy = false;
     },
 
     async refreshScanBuy() {

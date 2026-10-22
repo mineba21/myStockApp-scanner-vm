@@ -161,6 +161,13 @@ def buy_status(order_id: str):
     return _view(_run(lambda: service.status(order_id), MAY_BE_SENT_DETAIL))
 
 
+@router.post("/buy/{order_id}/abandon")
+def abandon_buy(order_id: str):
+    """전송 응답을 놓친 화면의 복구 경로. PREPARED만 폐기하고, 선점된 주문은 그대로 돌려준다."""
+    service = _service()
+    return _view(_run(lambda: service.abandon(order_id), MAY_BE_SENT_DETAIL))
+
+
 @router.post("/buy/{order_id}/refresh")
 def refresh_buy(order_id: str):
     service = _service()

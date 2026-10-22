@@ -297,7 +297,7 @@ class ScannerBuyOrders:
         return result
 
     def recent(self, market=None, ticker=None, limit=20):
-        query, args = "SELECT * FROM scanner_buy_orders WHERE state != 'PREPARED'", []
+        query, args = "SELECT * FROM scanner_buy_orders WHERE state NOT IN ('PREPARED', 'ABANDONED')", []
         if market:
             query += " AND market=?"
             args.append(market)
@@ -502,6 +502,17 @@ class ScannerBuyOrders:
                 f"키움 접수(주문번호 {number})는 됐지만 기록 저장에 실패했습니다. "
                 "다시 주문하지 말고 키움 주문내역을 확인하세요."
             ) from exc
+        return self.status(order_id)
+
+    def abandon(self, order_id):
+        """아직 전송 선점 전(PREPARED)인 미리보기를 원자적으로 폐기하고 현재 상태를 돌려준다.
+
+        전송 응답을 놓친 화면은 상태 조회만으로 새 주문을 허용하면 안 된다. 원래 execute
+        요청이 서버에서 뒤늦게 처리될 수 있기 때문이다. 여기서 ABANDONED로 바꾸면 그 뒤의
+        execute는 PREPARED 선점에 실패한다. 이미 선점된 주문은 바꾸지 않고 그대로 돌려준다.
+        """
+        self.status(order_id)
+        self._set_state(order_id, "ABANDONED", expected="PREPARED")
         return self.status(order_id)
 
     def refresh(self, order_id):
