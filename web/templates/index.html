@@ -408,6 +408,17 @@
               x-text="(r.volume_ratio||0).toFixed(1)+'x'"></div>
           </div>
         </div>
+        <!-- 손절가: 스캔 시 저장된 값. 손절폭은 카드의 현재가(스캔 시점 스냅샷) 기준 -->
+        <div class="flex justify-between items-center bg-white/70 rounded-lg px-2 py-1.5 text-xs mb-3">
+          <span class="text-slate-400">손절가</span>
+          <span x-show="r.stop_loss==null" class="text-slate-400">-</span>
+          <span x-show="r.stop_loss!=null" class="font-bold text-red-600">
+            <span x-text="r.market==='KR' ? r.stop_loss?.toLocaleString()+'원' : '$'+r.stop_loss?.toFixed(2)"></span>
+            <span x-show="r.price>0" class="font-medium text-red-400"
+              title="카드의 현재가 대비 손절폭"
+              x-text="'('+((r.stop_loss/r.price-1)*100).toFixed(1)+'%)'"></span>
+          </span>
+        </div>
         <!-- 거부 사유 펼치기 (strict 거부 행만) -->
         <template x-if="r.strict_filter_passed === false && (r.filter_reasons||[]).length">
           <div class="mb-2">
@@ -436,7 +447,7 @@
             :title="r.strict_filter_passed === false ? 'Strict 거부 행은 매수 동선 차단 (QA 인스펙트 전용)' : ''"
             class="flex-1 text-xs bg-white/80 hover:bg-white border border-slate-200 rounded-lg py-1.5 text-slate-600 hover:text-indigo-600 transition font-medium"
             :class="r.strict_filter_passed === false ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''">
-            + 매수
+            + 기록
           </button>
           <button @click="openAddWatch(r)"
             :disabled="r.strict_filter_passed === false"
@@ -446,6 +457,14 @@
             👁 감시
           </button>
         </div>
+        <!-- 지정가 매수 티켓: 미국 → 자유투자(account1), 국내 → ISA(account4) -->
+        <button type="button" @click="openScanBuy(r)"
+          :disabled="r.strict_filter_passed === false"
+          :title="r.strict_filter_passed === false ? 'Strict 거부 행은 매수 동선 차단 (QA 인스펙트 전용)' : scanBuyAccountLabel(r.market)+' 지정가 매수'"
+          class="w-full mt-2 text-xs font-semibold rounded-lg py-1.5 bg-emerald-600 text-white hover:bg-emerald-700 transition"
+          :class="r.strict_filter_passed === false ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''"
+          x-text="'🛒 매수 · '+(r.market === 'US' ? '자유투자' : 'ISA')">
+        </button>
       </div>
     </template>
   </div>
@@ -1730,6 +1749,143 @@
   </div>
 </div>
 
+<!-- ══════════════════ 모달: 스캐너 후보 매수 (미국 account1 / 국내 account4, 지정가) ══ -->
+<div x-show="scanBuy.open" x-cloak class="modal-bg" @click.self="closeScanBuy()"
+  @keydown.escape.window="if (scanBuy.open) closeScanBuy()">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[95vh] overflow-y-auto">
+    <div class="flex justify-between items-start mb-4 gap-3">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs px-2 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-700">매수</span>
+          <h2 class="text-base font-bold text-slate-800" x-text="scanBuy.result?.name || scanBuy.result?.ticker"></h2>
+          <span class="text-xs text-slate-400" x-text="scanBuy.result?.ticker"></span>
+        </div>
+        <p class="text-xs text-slate-500 mt-1"
+          x-text="scanBuyAccountLabel(scanBuy.result?.market)+' · '+(scanBuy.result?.market==='US'?'미국':'국내')+' 지정가 · 스캔가 '+fmtScanBuy(scanBuy.result?.price)+' · 손절 '+fmtScanBuy(scanBuy.result?.stop_loss)"></p>
+      </div>
+      <button @click="closeScanBuy()" class="text-slate-400 text-2xl leading-none">×</button>
+    </div>
+
+    <div class="rounded-lg border px-3 py-2 text-xs mb-4"
+      :class="scanBuy.capabilities?.execution_enabled ? 'bg-red-50 border-red-200 text-red-700' : 'bg-amber-50 border-amber-200 text-amber-800'"
+      x-text="scanBuy.capabilities?.execution_enabled ? '실계좌 주문입니다. 확인 후 전송하면 키움으로 지정가 매수 1건이 나갑니다.' : (scanBuy.capabilities?.reason || '주문 전송 가능 여부를 확인 중입니다.')"></div>
+
+    <!-- 이 종목의 확인되지 않은 이전 주문: 키움에서 확인한 뒤에만 정리한다 -->
+    <template x-for="o in scanBuy.recent.filter(o => o.state==='UNKNOWN' || o.state==='SENDING')" :key="o.id">
+      <div class="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700 mb-3">
+        <div class="font-semibold" x-text="'확인되지 않은 주문 ('+o.state+') · '+o.quantity+'주 @ '+fmtScanBuy(o.price)"></div>
+        <div class="mt-0.5">키움 앱의 주문내역에서 접수 여부를 확인하기 전에는 이 종목을 다시 주문할 수 없습니다.</div>
+        <button @click="resolveScanBuy(o)" class="mt-1.5 underline font-semibold">키움에서 확인함 · 잠금 해제</button>
+      </div>
+    </template>
+
+    <!-- 이미 접수된 주문: 응답을 놓친 주문을 모르고 다시 사는 일을 막기 위해 함께 보여준다 -->
+    <template x-if="!scanBuy.order && scanBuy.recent.some(o => o.state==='SUBMITTED')">
+      <div class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800 mb-3">
+        <div class="font-semibold mb-0.5">이 종목의 최근 접수 주문 — 중복 주문인지 확인하세요</div>
+        <template x-for="o in scanBuy.recent.filter(o => o.state==='SUBMITTED')" :key="o.id">
+          <div x-text="new Date((o.sent_at||o.created_at)*1000).toLocaleString()+' · '+o.quantity+'주 @ '+fmtScanBuy(o.price, o.market)+' · 주문번호 '+o.order_number+(o.broker_state?' · '+o.broker_state:'')"></div>
+        </template>
+      </div>
+    </template>
+
+    <template x-if="!scanBuy.order">
+      <div>
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">
+              수량 (주) <span x-show="scanBuy.result?.suggested_qty>0" class="text-slate-400"
+                x-text="'· 제안 '+scanBuy.result?.suggested_qty+'주'"></span>
+            </label>
+            <input type="number" min="1" step="1" class="input" x-model.number="scanBuy.quantity" @input="resetScanBuy()">
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block" x-text="'지정가 ('+(scanBuy.result?.market==='US'?'USD':'KRW · 호가단위 확인')+')'"></label>
+            <div class="flex gap-2">
+              <input type="number" min="0" :step="scanBuy.result?.market==='US'?'0.01':'1'" class="input" x-model.number="scanBuy.limitPrice" @input="resetScanBuy()">
+              <button x-show="scanBuy.preview" @click="scanBuy.limitPrice=Number(scanBuy.preview.details.current_price); resetScanBuy()"
+                class="btn btn-ghost text-xs whitespace-nowrap">현재가 적용</button>
+            </div>
+          </div>
+          <div class="flex justify-between text-sm">
+            <span class="text-slate-500">예상 주문금액</span>
+            <span class="font-bold text-slate-800" x-text="fmtScanBuy((Number(scanBuy.quantity)||0)*(Number(scanBuy.limitPrice)||0))"></span>
+          </div>
+        </div>
+
+        <template x-if="scanBuy.preview">
+          <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-1.5">
+            <div class="font-bold text-slate-700 mb-1">주문 미리보기 (2분간 유효)</div>
+            <div class="flex justify-between"><span class="text-slate-500">거래소 · 키움 현재가</span>
+              <span x-text="scanBuy.preview.exchange+' · '+fmtScanBuy(scanBuy.preview.details.current_price)"></span></div>
+            <div class="flex justify-between"><span class="text-slate-500">수량 × 지정가</span>
+              <span class="font-semibold" x-text="scanBuy.preview.quantity+'주 × '+fmtScanBuy(scanBuy.preview.price)"></span></div>
+            <div class="flex justify-between"><span class="text-slate-500">예상 주문금액</span>
+              <span class="font-semibold" x-text="fmtScanBuy(scanBuy.preview.quantity*Number(scanBuy.preview.price))"></span></div>
+            <div class="flex justify-between"><span class="text-slate-500" x-text="'키움 주문가능수량'+(scanBuy.preview.details.capacity_at_preview.reserve_bps!=null ? ' (여유금 '+(scanBuy.preview.details.capacity_at_preview.reserve_bps/100)+'%)' : '')"></span>
+              <span x-text="scanBuy.preview.details.capacity_at_preview.max_quantity_with_reserve+'주'"></span></div>
+            <template x-if="scanBuy.preview.details.risk">
+              <div class="flex justify-between"><span class="text-slate-500">손절가 · 손절 시 손실</span>
+                <span class="text-red-600 font-semibold"
+                  x-text="fmtScanBuy(scanBuy.preview.details.risk.stop_loss)+' · -'+fmtScanBuy(scanBuy.preview.details.risk.total_risk)+' ('+fmtScanBuy(scanBuy.preview.details.risk.risk_per_share)+'/주)'"></span></div>
+            </template>
+            <template x-for="w in scanBuy.preview.details.warnings" :key="w">
+              <div class="text-amber-700 font-semibold" x-text="'⚠ '+w"></div>
+            </template>
+          </div>
+        </template>
+
+        <div x-show="scanBuy.preview && scanBuy.capabilities?.execution_enabled" class="mt-3">
+          <label class="text-xs text-slate-500 mb-1 block">확인: 종목코드를 입력하세요</label>
+          <input type="text" class="input uppercase" x-model="scanBuy.confirm" :placeholder="scanBuy.result?.ticker">
+        </div>
+      </div>
+    </template>
+
+    <!-- 전송 결과: 접수(SUBMITTED)는 체결이 아니다 -->
+    <template x-if="scanBuy.order">
+      <div class="rounded-xl border p-3 text-xs space-y-1.5"
+        :class="scanBuy.order.state==='SUBMITTED' ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'">
+        <div class="font-bold"
+          :class="scanBuy.order.state==='SUBMITTED' ? 'text-emerald-700' : 'text-red-700'"
+          x-text="{SUBMITTED:'키움 접수 완료 (체결 아님)', REJECTED:'키움이 주문을 거절했습니다', UNKNOWN:'접수 여부 불명 — 키움 주문내역 확인 전 재주문 금지', BLOCKED:'전송 직전 검증 실패 — 주문을 보내지 않았습니다', SENDING:'전송 처리 중이거나 중단됨 — 확인 전 재주문 금지', RESOLVED_MANUAL:'키움에서 확인 후 수동 정리된 주문', CHECK_REQUIRED:'서버 응답을 받지 못했습니다 — 주문이 접수됐을 수 있으니 상태를 다시 확인하세요'}[scanBuy.order.state] || scanBuy.order.state"></div>
+        <div x-show="scanBuy.order.order_number" x-text="'주문번호 '+scanBuy.order.order_number"></div>
+        <div x-text="scanBuy.order.quantity+'주 × '+fmtScanBuy(scanBuy.order.price, scanBuy.order.market)+' · '+(scanBuy.order.account_name||'')+' · '+scanBuy.order.exchange"></div>
+        <div x-show="scanBuy.order.broker_state"
+          x-text="'키움 상태: '+scanBuy.order.broker_state+' · 체결 '+(scanBuy.order.details.filled_quantity??0)+'주 · 잔량 '+(scanBuy.order.details.remaining_quantity??'-')+'주'"></div>
+        <div x-show="scanBuy.order.details.error" class="text-red-700" x-text="scanBuy.order.details.error"></div>
+      </div>
+    </template>
+
+    <div x-show="scanBuy.error" class="mt-3 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700"
+      x-text="scanBuy.error"></div>
+
+    <div class="flex gap-2 mt-5">
+      <template x-if="!scanBuy.order">
+        <button @click="previewScanBuy()" :disabled="scanBuy.busy"
+          class="flex-1 btn btn-ghost" x-text="scanBuy.busy && !scanBuy.preview ? '확인 중…' : '미리보기'"></button>
+      </template>
+      <template x-if="!scanBuy.order">
+        <button @click="executeScanBuy()"
+          :disabled="scanBuy.busy || !scanBuy.preview || !scanBuy.capabilities?.execution_enabled || scanBuy.confirm.trim().toUpperCase()!==scanBuy.preview?.ticker"
+          class="flex-1 btn text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          x-text="scanBuy.capabilities?.execution_enabled ? (scanBuy.busy && scanBuy.preview ? '전송 중…' : '매수 주문 전송') : '주문 전송 꺼짐'"></button>
+      </template>
+      <template x-if="scanBuy.order?.state==='SUBMITTED'">
+        <button @click="refreshScanBuy()" :disabled="scanBuy.busy" class="flex-1 btn btn-ghost"
+          x-text="scanBuy.busy ? '조회 중…' : '체결 확인'"></button>
+      </template>
+      <template x-if="scanBuy.order?.state==='SENDING' || scanBuy.order?.state==='CHECK_REQUIRED'">
+        <button @click="recheckScanBuy()" :disabled="scanBuy.busy" class="flex-1 btn btn-ghost"
+          x-text="scanBuy.busy ? '확인 중…' : '상태 다시 확인'"></button>
+      </template>
+      <template x-if="scanBuy.order">
+        <button @click="closeScanBuy()" class="flex-1 btn btn-ghost">닫기</button>
+      </template>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════════════ 토스트 ════════════════════════════ -->
 <div class="fixed bottom-5 right-5 z-50 flex flex-col gap-2" style="pointer-events:none">
   <template x-for="t in toasts" :key="t.id">
@@ -1857,6 +2013,10 @@ function app() {
     // 보유종목 매수·매도 주문 (미리보기 전용)
     orderModal: {open:false, side:'BUY', holding:null, quantity:1, limitPrice:null,
                  preview:null, error:null, busy:false, requestSeq:0},
+
+    // 스캐너 후보 매수 (미국 → 자유투자 account1, 국내 → ISA account4. 지정가 1건씩 전송)
+    scanBuy: {open:false, result:null, quantity:1, limitPrice:null, preview:null, order:null,
+              confirm:'', error:null, busy:false, capabilities:null, recent:[], requestSeq:0, session:0},
     _chart: null, _chartCandles: null, _chartVolume: null, _chartMa: null,
     _chartResizeObs: null, _chartOverlayDraw: null,
 
@@ -2456,6 +2616,191 @@ function app() {
         if (this._isCurrentOrderRequest(seq, request)) m.error = (e && e.message) ? e.message : String(e);
       } finally {
         if (seq === m.requestSeq) m.busy = false;
+      }
+    },
+
+    // ── 스캐너 후보 매수 (미국 account1 / 국내 account4) ──
+    scanBuyAccountLabel(market) {
+      return market === 'US' ? '자유투자(account1)' : 'ISA(account4)';
+    },
+
+    fmtScanBuy(value, market = this.scanBuy.result?.market) {
+      if (value == null || value === '' || isNaN(Number(value))) return '-';
+      return market === 'US'
+        ? '$'+Number(value).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})
+        : Math.round(Number(value)).toLocaleString()+'원';
+    },
+
+    async _scanBuyFetch(url, payload) {
+      const resp = await fetch(url, payload === undefined ? {} : {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const detail = Array.isArray(body.detail) ? body.detail.map(d => d.msg).join(', ') : body.detail;
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
+      return body;
+    },
+
+    async openScanBuy(r) {
+      if (r.strict_filter_passed === false) return;
+      const s = this.scanBuy;
+      const session = ++s.session;
+      s.result = r;
+      s.quantity = r.suggested_qty > 0 ? r.suggested_qty : 1;
+      s.limitPrice = r.price ? (r.market === 'US' ? Math.round(r.price * 100) / 100 : Math.round(r.price)) : null;
+      s.order = null;
+      s.capabilities = null;
+      s.recent = [];
+      this.resetScanBuy();
+      s.open = true;
+      try {
+        const capabilities = await this._scanBuyFetch('/api/scanner-orders/capabilities?market='+r.market);
+        if (session !== s.session) return;
+        s.capabilities = capabilities;
+        await this._loadScanBuyRecent(session, r.market, r.ticker);
+      } catch (e) {
+        if (session === s.session) s.error = e.message || String(e);
+      }
+    },
+
+    // 이 종목의 최근 주문 기록. 늦게 도착한 응답은 같은 주문창일 때만 반영한다.
+    async _loadScanBuyRecent(session, market, ticker) {
+      const s = this.scanBuy;
+      const rows = await this._scanBuyFetch(`/api/scanner-orders/buy?market=${market}&ticker=${encodeURIComponent(ticker)}&limit=5`);
+      if (session === s.session) s.recent = rows;
+    },
+
+    closeScanBuy() {
+      this.scanBuy.session += 1;
+      this.scanBuy.open = false;
+      this.resetScanBuy();
+    },
+
+    // 수량·가격이 바뀌면 이전 미리보기는 무효다. 서버 미리보기도 2분 뒤 만료된다.
+    resetScanBuy() {
+      const s = this.scanBuy;
+      s.requestSeq += 1;
+      s.preview = null;
+      s.confirm = '';
+      s.error = null;
+      s.busy = false;
+    },
+
+    async previewScanBuy() {
+      const s = this.scanBuy;
+      if (!s.result) return;
+      this.resetScanBuy();
+      if (!Number.isInteger(s.quantity) || s.quantity < 1) { s.error = '수량은 1주 이상의 정수로 입력하세요.'; return; }
+      if (!(Number(s.limitPrice) > 0)) { s.error = '지정가를 입력하세요.'; return; }
+      const seq = s.requestSeq;
+      s.busy = true;
+      try {
+        const body = await this._scanBuyFetch('/api/scanner-orders/buy/preview', {
+          result_id: s.result.id, quantity: s.quantity, limit_price: Number(s.limitPrice),
+        });
+        if (seq !== s.requestSeq) return;
+        if (body.ticker !== s.result.ticker || body.quantity !== s.quantity
+            || Number(body.price) !== Number(s.limitPrice)) {
+          throw new Error('미리보기 응답이 요청한 주문과 일치하지 않습니다. 다시 시도하세요.');
+        }
+        s.preview = body;
+      } catch (e) {
+        if (seq === s.requestSeq) s.error = e.message || String(e);
+      } finally {
+        if (seq === s.requestSeq) s.busy = false;
+      }
+    },
+
+    // 전송 결과는 요청을 보낸 주문창에만 반영한다. 응답을 받지 못하면 같은 주문 ID로 서버에서
+    // 정리(_settleScanBuy)하고, 정리가 확인되기 전에는 새 주문 입력으로 돌아가지 않는다.
+    async executeScanBuy() {
+      const s = this.scanBuy;
+      if (!s.preview || s.busy) return;
+      const session = s.session;
+      const sent = s.preview;
+      s.busy = true;
+      s.error = null;
+      let order = null, error = null;
+      try {
+        order = await this._scanBuyFetch(`/api/scanner-orders/buy/${sent.id}/execute`,
+          {confirmation_ticker: s.confirm.trim().toUpperCase()});
+      } catch (e) {
+        error = e.message || String(e);
+        ({order, error} = await this._settleScanBuy(sent, error));
+      }
+      if (order) {
+        this.toast(order.state === 'SUBMITTED' ? `${order.ticker} 매수 주문 접수됨`
+          : `${order.ticker} 주문 상태: ${order.state}`, order.state === 'SUBMITTED' ? 'success' : 'error');
+      }
+      if (session !== s.session) return;
+      s.order = order;
+      s.error = error;
+      s.preview = null;
+      s.busy = false;
+    },
+
+    // 전송 응답을 받지 못한 주문을 정리한다. 상태 조회만으로 PREPARED를 버리면, 서버에서 뒤늦게
+    // 처리되는 원래 전송 요청과 새 주문이 겹칠 수 있다. 그래서 서버가 PREPARED를 원자적으로
+    // ABANDONED로 바꾼 것을 확인한 경우에만 입력 화면으로 돌려보낸다(order=null).
+    // 이미 선점·전송된 주문은 그 상태를 그대로 보여준다. 정리 요청까지 실패하면 주문 ID를 남긴다.
+    async _settleScanBuy(sent, error) {
+      try {
+        const order = await this._scanBuyFetch(`/api/scanner-orders/buy/${sent.id}/abandon`, {});
+        if (order.state === 'ABANDONED') {
+          return {order: null, error: (error ? error+' ' : '')+'이 미리보기는 폐기되어 전송되지 않습니다. 다시 미리보기하세요.'};
+        }
+        return {order, error};
+      } catch (_) {
+        return {order: {...sent, state: 'CHECK_REQUIRED', order_number: null, broker_state: null, details: {}},
+                error};
+      }
+    },
+
+    async recheckScanBuy() {
+      const s = this.scanBuy;
+      if (!s.order) return;
+      const session = s.session;
+      s.busy = true;
+      const {order, error} = await this._settleScanBuy(s.order, null);
+      if (session !== s.session) return;
+      if (order?.state === 'CHECK_REQUIRED') {
+        s.error = '아직 주문 상태를 확인하지 못했습니다. 잠시 후 다시 확인하세요.';
+      } else {
+        s.order = order;
+        s.error = error;
+      }
+      s.busy = false;
+    },
+
+    async refreshScanBuy() {
+      const s = this.scanBuy;
+      if (!s.order) return;
+      const session = s.session;
+      s.busy = true;
+      s.error = null;
+      try {
+        const order = await this._scanBuyFetch(`/api/scanner-orders/buy/${s.order.id}/refresh`, {});
+        if (session === s.session) s.order = order;
+      } catch (e) {
+        if (session === s.session) s.error = e.message || String(e);
+      } finally {
+        if (session === s.session) s.busy = false;
+      }
+    },
+
+    async resolveScanBuy(o) {
+      const typed = prompt(`키움 주문내역에서 ${o.ticker} 주문의 접수 여부를 확인했나요?\n확인했다면 종목코드를 입력하세요.`);
+      if (!typed) return;
+      const s = this.scanBuy;
+      const session = s.session;
+      try {
+        await this._scanBuyFetch(`/api/scanner-orders/buy/${o.id}/resolve`,
+          {confirmation_ticker: typed.trim().toUpperCase(), note: '웹 화면에서 수동 정리'});
+        await this._loadScanBuyRecent(session, o.market, o.ticker);
+      } catch (e) {
+        if (session === s.session) s.error = e.message || String(e);
       }
     },
 

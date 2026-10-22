@@ -1,4 +1,4 @@
-"""Strict domestic order, open-order and KRW cash evidence for mock tests."""
+"""Strict domestic order, open-order and KRW cash evidence (mock tests, scanner buys)."""
 from __future__ import annotations
 
 import time
@@ -117,10 +117,13 @@ class DomesticExecutionEvidence:
         }, list_key="acnt_ord_cntr_prps_dtl")
         return [self._normalize_history(row) for row in rows]
 
+    def orderable_cash(self):
+        """``kt00001.ord_alow_amt`` 원화 주문가능금액. 미체결 예약금이 이미 빠진 값이다."""
+        return amount(self._request("kt00001", {"qry_tp": "2"}).get("ord_alow_amt"))
+
     def snapshot(self):
         started = time.time()
-        deposit = self._request("kt00001", {"qry_tp": "2"})
-        cash = amount(deposit.get("ord_alow_amt"))
+        cash = self.orderable_cash()
         opens = self.open_orders()
         return {"account": self.account_profile, "currency": "KRW",
                 "broker_orderable_cash": str(cash), "cash_source": "kt00001.ord_alow_amt",

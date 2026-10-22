@@ -117,6 +117,24 @@ def test_overseas_orderbook_uses_timestamped_read_only_api():
     assert request["json"] == {"stex_tp": "ND", "stk_cd": "QQQ"}
 
 
+def test_domestic_quote_uses_fixed_read_only_api():
+    session = _Session([_Response({
+        "return_code": 0, "stk_cd": "005930", "cur_prc": "-70100",
+        "upl_pric": "+91100", "lst_pric": "-49100",
+    })])
+    client = KiwoomReadOnlyClient(KiwoomConfig("key", "secret"), session)
+
+    result = client.get_domestic_quote("token", ticker="005930")
+
+    assert result["quote"]["cur_prc"] == "-70100"
+    url, request = session.calls[0]
+    assert url == MOCK_BASE_URL + "/api/dostk/stkinfo"
+    assert request["headers"]["api-id"] == "ka10001"
+    assert request["json"] == {"stk_cd": "005930"}
+    with pytest.raises(KiwoomError):
+        client.get_domestic_quote("token", ticker="AAPL")
+
+
 def test_balance_uses_fixed_read_only_api_and_follows_continuation(monkeypatch):
     monkeypatch.setattr("trading.kiwoom_readonly.time.sleep", lambda _: None)
     session = _Session(
