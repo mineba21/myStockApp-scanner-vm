@@ -213,6 +213,8 @@ class Rebalance:
             result["payload"] = json.loads(result["payload"])
             result["orders"] = [dict(r) for r in db.execute(
                 "SELECT * FROM allocation_intents WHERE cycle_id=? ORDER BY created_at, id", (cycle_id,))]
+            if result["state"] == "BUY_PREVIEW" and result["payload"].get("remaining_sell_adjustments"):
+                result["blockers"] = ["가격·현금 변동으로 추가 매도가 필요해 매수를 중단했습니다. 남은 차액을 다시 계산하고 새 계획을 확인하세요."]
             return result
 
     def snapshot(self):
@@ -411,6 +413,8 @@ class Rebalance:
         if current["state"] != side + "_PREVIEW":
             return current  # duplicate confirm: no network submission
         payload = current["payload"]
+        if side == "BUY" and payload.get("remaining_sell_adjustments"):
+            raise RebalanceBlocked("추가 매도가 필요합니다. 남은 차액을 다시 계산하고 새 계획을 확인하세요.")
         # A user-authorized cycle re-quotes each unsent order at dispatch time,
         # so only a manual (unauthorized) confirm needs the whole plan fresh.
         if payload["expires_at"] < time.time() and not payload.get("execution_authorized"):
@@ -490,6 +494,8 @@ class Rebalance:
                     ]}
                 continue
             if current["state"] == "BUY_PREVIEW":
+                if current["payload"].get("remaining_sell_adjustments"):
+                    return current
                 result = self.confirm(cycle_id, "BUY")
                 stopped = []
                 for order in result["orders"]:
@@ -518,6 +524,21 @@ class Rebalance:
         """
         current = self.status(cycle_id)
         self._check_mode(current)
+        if current["state"] in {"SELL_CONFIRMED", "BUY_PREVIEW"}:
+            if any(o["side"] != "SELL" or o["state"] != "FILLED" for o in current["orders"]):
+                raise RebalanceBlocked("매수 전 주문 상태를 확정할 수 없습니다. 주문내역을 확인하세요.")
+            snapshot = self.snapshot()
+            if snapshot["open_orders"]:
+                return {**current, "blockers": ["증권사에 미체결 주문이 남아 있어 새 계획을 만들 수 없습니다."]}
+            payload = current["payload"]
+            successor = self._sell_payload(snapshot, payload["allocations"], payload["scope"], payload["reserve_bps"])
+            successor["replaces"] = cycle_id
+            # A concurrent buy claim changes state to BUY_PENDING. _supersede's
+            # transaction checks this state before releasing the active cycle.
+            result = self._supersede(cycle_id, current["state"], "BUY", successor)
+            if result is None:
+                raise RebalanceBlocked("정리 중 주문 상태가 바뀌었습니다. 최신 상태를 확인하세요.")
+            return result
         if current["state"] not in {"SELL_PENDING", "BUY_PENDING"}:
             raise RebalanceBlocked("체결 대기 중인 사이클에서만 미체결 주문을 정리할 수 있습니다.")
         side = current["state"].split("_")[0]

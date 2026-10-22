@@ -1,9 +1,11 @@
 import asyncio
 import json
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -883,3 +885,74 @@ def test_existing_journal_gains_send_and_closing_columns(tmp_path):
     assert flags == {'a': 1, 'b': 0}
     assert 'sent_at' in intent_columns
     Rebalance(path, Broker())  # idempotent on restart
+
+
+def test_additional_sales_stay_blocked_after_reload_and_repeated_advance(flow):
+    service, broker, cid = _authorized_buy_preview(flow, cash='10')
+    current = service.status(cid)
+    assert current['payload']['remaining_sell_adjustments']
+    sent = len(broker.sent)
+    assert current['blockers']
+    for _ in range(2):
+        result = service.advance_authorized_cycle(cid)
+        assert result['state'] == 'BUY_PREVIEW' and result['blockers']
+    with pytest.raises(RebalanceBlocked, match='추가 매도'):
+        service.confirm(cid, 'BUY')
+    assert len(broker.sent) == sent
+    assert not [o for o in service.status(cid)['orders'] if o['side'] == 'BUY']
+
+
+@pytest.mark.parametrize('state', ['BUY_PREVIEW', 'SELL_CONFIRMED'])
+def test_replan_after_completed_sales_requires_new_approval_without_transmission(flow, state):
+    service, broker, cid = _authorized_buy_preview(flow, cash='10')
+    with service.db() as db:
+        db.execute('UPDATE allocation_cycles SET state=? WHERE id=?', (state, cid))
+    sent = len(broker.sent)
+    result = service.close_out(cid)
+    assert result['state'] == 'SELL_PREVIEW' and result['replanned']
+    assert result['id'] != cid
+    assert result['payload']['original_quantities']['SPY'] == '2'
+    assert [(o['ticker'], o['quantity']) for o in result['payload']['preview']] == [('SPY', 1)]
+    assert not result['payload'].get('execution_authorized') and not result['orders']
+    assert service.status(cid)['state'] == 'SUPERSEDED'
+    assert len(broker.sent) == sent and broker.cancelled == []
+
+
+def test_buy_preview_replan_stops_for_external_open_orders(flow):
+    service, broker, cid = _authorized_buy_preview(flow)
+    broker.pending = [{'order_number': 'external'}]
+    assert service.close_out(cid)['blockers']
+    assert service.status(cid)['state'] == 'BUY_PREVIEW'
+
+
+def test_buy_preview_replan_cannot_pass_an_inflight_buy_claim(flow, monkeypatch):
+    service, broker, cid = _authorized_buy_preview(flow)
+    original = service._sell_payload
+    def race(*args):
+        payload = original(*args)
+        with service.db() as db:
+            db.execute("UPDATE allocation_cycles SET state='BUY_PENDING' WHERE id=?", (cid,))
+        return payload
+    monkeypatch.setattr(service, '_sell_payload', race)
+    with pytest.raises(RebalanceBlocked, match='다른 요청'):
+        service.close_out(cid)
+    assert service.active()['id'] == cid
+    assert service.status(cid)['state'] == 'BUY_PENDING'
+
+
+def test_buy_preview_replan_fails_closed_when_quote_refresh_fails(flow):
+    service, broker, cid = _authorized_buy_preview(flow)
+    def fail(_):
+        raise RebalanceBlocked('stale quote')
+    broker.quotes = fail
+    with pytest.raises(RebalanceBlocked, match='stale quote'):
+        service.close_out(cid)
+    assert service.status(cid)['state'] == 'BUY_PREVIEW'
+
+
+def test_web_panel_offers_recalculation_in_every_state_close_out_recovers():
+    """Blocked BUY_PREVIEW can only be recovered from the web panel through this button."""
+    html = (Path(__file__).parents[1] / 'web' / 'templates' / 'index.html').read_text(encoding='utf-8')
+    button = re.search(r'<button[^>]*@click="closeOutCycle\(\)"[^>]*>', html).group(0)
+    shown = set(re.findall(r"'([A-Z_]+)'", re.search(r'x-show="([^"]*)"', button).group(1)))
+    assert shown == {'SELL_PENDING', 'BUY_PENDING', 'SELL_CONFIRMED', 'BUY_PREVIEW'}
