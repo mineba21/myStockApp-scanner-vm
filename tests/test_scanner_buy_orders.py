@@ -24,6 +24,7 @@ class FakeBroker:
         self.as_of, self.exchange, self.upper = as_of, exchange, upper
         self.buys, self.capacity_calls, self.lookups = [], [], []
         self.match = None
+        self.on_capacity = None
 
     def quote(self, ticker):
         quote = {"exchange": self.exchange, "price": self.price}
@@ -35,9 +36,13 @@ class FakeBroker:
 
     def buy_capacity(self, ticker, exchange, price):
         self.capacity_calls.append((ticker, exchange, str(price)))
+        if self.on_capacity:
+            hook, self.on_capacity = self.on_capacity, None
+            hook()
         if isinstance(self.max_qty, Exception):
             raise self.max_qty
-        return {"max_quantity_with_reserve": self.max_qty, "broker_orderable_cash": "9999.00"}
+        return {"max_quantity_with_reserve": self.max_qty, "broker_orderable_cash": "9999.00",
+                "reserve_bps": "150"}
 
     def buy(self, ticker, exchange, quantity, price):
         self.buys.append((ticker, exchange, quantity, str(price)))
@@ -222,6 +227,57 @@ def test_refresh_records_broker_fill_state(setup):
     assert result["details"]["filled_quantity"] == 1
     assert broker.lookups[0]["order_number"] == "123456789"
     assert broker.lookups[0]["price"] == "100.00"
+
+
+def test_request_resolved_during_precheck_is_never_sent(setup):
+    service, broker, clock, _ = setup
+    first = service.prepare(candidate(), 1, 100)
+    second = service.prepare(candidate(), 1, 100)
+
+    def stall_then_resolve_and_reorder():
+        # 사전 확인이 지연되는 동안 사용자가 잠금을 풀고 새 주문을 보냈다.
+        clock.now += 121
+        service.resolve(first["id"], "NVDA")
+        with service.db() as db:
+            db.execute("UPDATE scanner_buy_orders SET expires_at=? WHERE id=?", (clock.now + 60, second["id"]))
+        assert service.execute(second["id"], "NVDA")["state"] == "SUBMITTED"
+
+    broker.on_capacity = stall_then_resolve_and_reorder
+    with pytest.raises(ScannerBuyBlocked, match="수동 정리"):
+        service.execute(first["id"], "NVDA")
+    assert len(broker.buys) == 1
+    assert service.status(first["id"])["state"] == "RESOLVED_MANUAL"
+
+
+def test_submitted_save_failure_reports_order_number_and_keeps_lock(setup, monkeypatch):
+    service, broker, _, _ = setup
+    row = service.prepare(candidate(), 1, 100)
+    original = service._set_state
+
+    def failing(order_id, state, **kwargs):
+        if state == "SUBMITTED":
+            raise OSError("disk full")
+        return original(order_id, state, **kwargs)
+
+    monkeypatch.setattr(service, "_set_state", failing)
+    with pytest.raises(ScannerBuyBlocked, match="123456789"):
+        service.execute(row["id"], "NVDA")
+    assert len(broker.buys) == 1 and service.status(row["id"])["state"] == "SENDING"
+    with pytest.raises(ScannerBuyBlocked, match="SENDING"):
+        service.prepare(candidate(), 1, 100)
+
+
+def test_preview_records_reserve_and_warns_about_recent_submission(setup):
+    service, _, clock, _ = setup
+    first = service.prepare(candidate(), 2, 100)
+    assert first["details"]["capacity_at_preview"]["reserve_bps"] == 150
+    service.execute(first["id"], "NVDA")
+
+    again = service.prepare(candidate(), 1, 100)
+    assert any("최근 24시간" in w and "2주" in w for w in again["details"]["warnings"])
+    clock.now += 86401
+    later = service.prepare(candidate(), 1, 100)
+    assert not any("최근 24시간" in w for w in later["details"]["warnings"])
 
 
 # ── 국내(account4) ─────────────────────────────────────────────
@@ -476,6 +532,37 @@ def test_api_market_switches_are_independent(api_env, monkeypatch):
     monkeypatch.setenv("ACCOUNT4_ORDER_ENABLED", "true")
     assert execute(order["id"], "005930")["state"] == "SUBMITTED"
     assert api.capabilities("kr")["account_name"] == "ISA"
+
+
+def test_api_failure_messages_do_not_claim_unsent_orders(api_env, monkeypatch):
+    import requests
+    monkeypatch.setenv("ACCOUNT1_ORDER_ENABLED", "true")
+    order = preview(scan_row())
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(api.ScannerBuyOrders, "execute", explode)
+    with pytest.raises(HTTPException) as exc:
+        execute(order["id"], "NVDA")
+    assert exc.value.detail == api.MAY_BE_SENT_DETAIL and "보내지 않았습니다" not in exc.value.detail
+
+    def timeout(*args, **kwargs):
+        raise requests.Timeout("slow")
+    monkeypatch.setattr(api.ScannerBuyOrders, "refresh", timeout)
+    with pytest.raises(HTTPException) as exc:
+        api.refresh_buy(order["id"])
+    assert exc.value.detail == api.LOOKUP_FAILED_DETAIL
+
+
+def test_api_status_returns_journal_row_for_lost_responses(api_env, monkeypatch):
+    monkeypatch.setenv("ACCOUNT1_ORDER_ENABLED", "true")
+    order = preview(scan_row())
+    execute(order["id"], "NVDA")
+    status = api.buy_status(order["id"])
+    assert status["state"] == "SUBMITTED" and status["order_number"] == "123456789"
+    with pytest.raises(HTTPException) as exc:
+        api.buy_status("missing")
+    assert exc.value.status_code == 409
 
 
 def test_api_hides_broker_errors(api_env, monkeypatch):

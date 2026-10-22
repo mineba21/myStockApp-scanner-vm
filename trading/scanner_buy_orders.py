@@ -320,6 +320,14 @@ class ScannerBuyOrders:
                 (account_profile, ticker, *IN_FLIGHT_STATES),
             ).fetchone()
 
+    def _recent_submitted(self, account_profile, ticker, now):
+        with self.db() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT id, quantity FROM scanner_buy_orders"
+                " WHERE account_profile=? AND ticker=? AND state='SUBMITTED' AND sent_at >= ?",
+                (account_profile, ticker, now - 86400),
+            )]
+
     def _set_state(self, order_id, state, *, expected, **fields):
         details = fields.pop("details", None)
         sets = ["state=?", "updated_at=?"]
@@ -404,12 +412,21 @@ class ScannerBuyOrders:
         if quantity > max_qty:
             raise ScannerBuyBlocked(f"키움 주문가능수량(여유금 적용) {max_qty}주보다 많습니다.")
 
+        recent = self._recent_submitted(account, ticker, now)
+        if recent:
+            warnings.append(
+                f"최근 24시간 안에 이 종목 매수 주문 {len(recent)}건이 접수됐습니다"
+                f"({', '.join(str(r['quantity']) + '주' for r in recent)}). 중복 주문인지 확인하세요."
+            )
+
         order_id = uuid.uuid4().hex
+        reserve = capacity.get("reserve_bps")
         details = {"current_price": str(current), "quote_as_of": quote.get("as_of"),
                    "upper_limit": str(quote["upper_limit"]) if quote.get("upper_limit") else None,
                    "risk": risk, "warnings": warnings,
                    "capacity_at_preview": {"max_quantity_with_reserve": max_qty,
-                                           "broker_orderable_cash": capacity.get("broker_orderable_cash")}}
+                                           "broker_orderable_cash": capacity.get("broker_orderable_cash"),
+                                           "reserve_bps": int(Decimal(str(reserve))) if reserve is not None else None}}
         with self.db() as db:
             db.execute(
                 "INSERT INTO scanner_buy_orders (id, account_profile, market, currency,"
@@ -458,8 +475,14 @@ class ScannerBuyOrders:
 
         sent_at = self.clock()
         with self.db() as db:
-            db.execute("UPDATE scanner_buy_orders SET sent_at=?, updated_at=? WHERE id=? AND state='SENDING'",
-                       (sent_at, sent_at, order_id))
+            still_sending = db.execute(
+                "UPDATE scanner_buy_orders SET sent_at=?, updated_at=? WHERE id=? AND state='SENDING'",
+                (sent_at, sent_at, order_id),
+            ).rowcount == 1
+        if not still_sending:
+            # 사전 확인이 지연되는 동안 사용자가 이 요청을 수동 정리했다. 그 뒤의 새 주문과
+            # 중복될 수 있으므로 여기서 전송하지 않는다.
+            raise ScannerBuyBlocked("이 주문 요청은 이미 수동 정리되어 전송하지 않았습니다.")
         try:
             result = broker.buy(row["ticker"], row["exchange"], row["quantity"], price)
         except OrderRejected as exc:
@@ -470,8 +493,15 @@ class ScannerBuyOrders:
             self._set_state(order_id, "UNKNOWN", expected="SENDING",
                             details={"error": "접수 여부 불명: 키움 주문내역 확인 전 재주문 금지"})
             return self.status(order_id)
-        self._set_state(order_id, "SUBMITTED", expected="SENDING",
-                        order_number=str(result["order_number"]))
+        number = str(result["order_number"])
+        try:
+            self._set_state(order_id, "SUBMITTED", expected="SENDING", order_number=number)
+        except Exception as exc:
+            # 접수는 됐다. 행은 SENDING으로 남아 종목 잠금이 유지된다.
+            raise ScannerBuyBlocked(
+                f"키움 접수(주문번호 {number})는 됐지만 기록 저장에 실패했습니다. "
+                "다시 주문하지 말고 키움 주문내역을 확인하세요."
+            ) from exc
         return self.status(order_id)
 
     def refresh(self, order_id):

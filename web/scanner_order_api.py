@@ -93,7 +93,15 @@ def _view(row: dict) -> dict:
             "execution_enabled": reason is None, "execution_block_reason": reason}
 
 
-def _run(action):
+# 예상하지 못한 실패의 안내 문구. 주문 전송 여부를 단정할 수 있는 단계에서만 "보내지 않았다"고 말한다.
+NOT_SENT_DETAIL = "키움 조회에 실패했습니다. 주문을 보내지 않았습니다."
+MAY_BE_SENT_DETAIL = ("처리 중 오류가 발생했습니다. 주문이 접수되었을 수 있습니다. "
+                      "다시 주문하지 말고 이 주문의 상태와 키움 주문내역을 먼저 확인하세요.")
+LOOKUP_FAILED_DETAIL = "키움 주문내역을 조회하지 못했습니다. 기존 주문 기록은 바뀌지 않았습니다."
+RESOLVE_FAILED_DETAIL = "주문 기록을 정리하지 못했습니다. 잠금은 그대로입니다. 다시 시도하세요."
+
+
+def _run(action, failure_detail=NOT_SENT_DETAIL):
     try:
         return action()
     except ScannerBuyBlocked as exc:
@@ -103,7 +111,7 @@ def _run(action):
     except Exception as exc:
         # 증권사 예외에는 계좌·토큰 정보가 섞일 수 있어 그대로 돌려주지 않는다.
         logger.warning("스캐너 매수 API 실패: %s", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="키움 조회에 실패했습니다. 주문을 보내지 않았습니다.") from exc
+        raise HTTPException(status_code=503, detail=failure_detail) from exc
 
 
 def _market(value: str) -> str:
@@ -143,19 +151,27 @@ def execute_buy(order_id: str, body: BuyConfirmRequest):
     reason = disabled_reason(row["market"])
     if reason:
         raise HTTPException(status_code=503, detail=reason)
-    return _view(_run(lambda: service.execute(order_id, body.confirmation_ticker)))
+    return _view(_run(lambda: service.execute(order_id, body.confirmation_ticker), MAY_BE_SENT_DETAIL))
+
+
+@router.get("/buy/{order_id}")
+def buy_status(order_id: str):
+    """저널에 기록된 주문 한 건. 전송 응답이 유실됐을 때 화면이 결과를 다시 확인한다."""
+    service = _service()
+    return _view(_run(lambda: service.status(order_id), MAY_BE_SENT_DETAIL))
 
 
 @router.post("/buy/{order_id}/refresh")
 def refresh_buy(order_id: str):
     service = _service()
-    return _view(_run(lambda: service.refresh(order_id)))
+    return _view(_run(lambda: service.refresh(order_id), LOOKUP_FAILED_DETAIL))
 
 
 @router.post("/buy/{order_id}/resolve")
 def resolve_buy(order_id: str, body: BuyResolveRequest):
     service = _service()
-    return _view(_run(lambda: service.resolve(order_id, body.confirmation_ticker, body.note)))
+    return _view(_run(lambda: service.resolve(order_id, body.confirmation_ticker, body.note),
+                      RESOLVE_FAILED_DETAIL))
 
 
 @router.get("/buy")
