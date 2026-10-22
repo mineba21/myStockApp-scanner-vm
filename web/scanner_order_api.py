@@ -9,8 +9,9 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -129,6 +130,47 @@ def capabilities(market: str):
             "account_name": spec["account_name"], "currency": spec["currency"],
             "order_type": "LIMIT", "execution_enabled": reason is None,
             "reason": reason or f"{spec['account_name']}({spec['account_profile']}) 실계좌 · 사용자 확인 후 1건씩 전송"}
+
+
+@router.get("/quote")
+def buy_quote(response: Response, result_id: int = Query(ge=1), db: Session = Depends(get_db)):
+    """Order-entry price from a fresh broker request; never a saved scan-price fallback.
+
+    No order journal or trading switch is required for this read-only operation.
+    observed_at is retrieval time; quote_as_of remains the broker's own price time.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    if not _flag("KIWOOM_WEB_ENABLED"):
+        raise HTTPException(status_code=503, detail="키움 실계좌 조회 연결이 꺼져 있습니다.")
+    row = db.query(ScanResult).filter(ScanResult.id == result_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="스캔 결과를 찾을 수 없습니다.")
+    if row.strict_filter_passed is False:
+        raise HTTPException(status_code=409, detail="Strict 거부 종목은 매수할 수 없습니다.")
+    market = _market(row.market)
+
+    def load():
+        quote = _broker(market).quote(row.ticker)
+        price = float(quote["price"])
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("Invalid broker price")
+        observed = time.time()
+        as_of = quote.get("as_of")
+        warnings = []
+        if as_of is None:
+            warnings.append("키움 시세의 원래 기준시각은 제공되지 않았습니다.")
+        elif not math.isfinite(float(as_of)) or float(as_of) > observed + 60:
+            raise ValueError("Invalid broker timestamp")
+        elif observed - float(as_of) > 120:
+            warnings.append("시세 기준시각이 2분 이상 지났습니다. 장 시간과 지정가를 확인하세요.")
+        return {"result_id": row.id, "ticker": row.ticker, "market": market,
+                "account_profile": MARKETS[market]["account_profile"],
+                "current_price": price, "exchange": quote["exchange"],
+                "quote_as_of": as_of, "observed_at": observed,
+                "source": "KIWOOM_USA20101" if market == "US" else "KIWOOM_KA10001",
+                "warnings": warnings}
+
+    return _run(load, "키움 현재가 조회에 실패했습니다. 이전 스캔 가격으로 대체하지 않습니다.")
 
 
 @router.post("/buy/preview")

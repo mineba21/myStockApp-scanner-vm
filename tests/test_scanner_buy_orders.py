@@ -619,3 +619,46 @@ def test_api_requires_journal_path(api_env, monkeypatch):
     assert api.capabilities("US")["execution_enabled"] is False
     with pytest.raises(HTTPException):
         api.capabilities("JP")
+
+
+@pytest.mark.parametrize('row,market,price', [(scan_row(), 'US', 100.0), (kr_scan_row(), 'KR', 70000.0)])
+def test_quote_reads_broker_without_order_journal_or_trading_permission(api_env, monkeypatch, row, market, price):
+    from fastapi import Response
+    monkeypatch.delenv('SCANNER_ORDER_JOURNAL_PATH', raising=False)
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'false')
+    monkeypatch.setattr(api, '_service', lambda: pytest.fail('quote must not open the order journal'))
+    response = Response()
+    result = api.buy_quote(response, row.id, FakeDb(row))
+    assert result['current_price'] == price
+    assert result['market'] == market and result['result_id'] == row.id
+    assert result['account_profile'] == ('account1' if market == 'US' else 'account4')
+    assert response.headers['cache-control'] == 'no-store'
+    assert api_env[market].buys == [] and api_env[market].capacity_calls == []
+
+
+def test_quote_rejects_missing_and_strict_rejected_candidate(api_env):
+    from fastapi import Response
+    for row, status in [(None, 404), (scan_row(strict_filter_passed=False), 409)]:
+        with pytest.raises(HTTPException) as exc:
+            api.buy_quote(Response(), 7, FakeDb(row))
+        assert exc.value.status_code == status
+    assert api_env['US'].buys == []
+
+
+@pytest.mark.parametrize('price', ['0', 'NaN', 'Infinity'])
+def test_quote_invalid_broker_price_has_no_scan_price_fallback(api_env, price):
+    from fastapi import Response
+    api_env['US'].price = Decimal(price)
+    with pytest.raises(HTTPException) as exc:
+        api.buy_quote(Response(), 7, FakeDb(scan_row(price=999)))
+    assert exc.value.status_code == 503
+    assert '대체하지 않습니다' in exc.value.detail
+
+
+def test_quote_requires_broker_read_connection(api_env, monkeypatch):
+    from fastapi import Response
+    monkeypatch.setenv('KIWOOM_WEB_ENABLED', 'false')
+    monkeypatch.setattr(api, '_broker', lambda market: pytest.fail('must not query disabled connection'))
+    with pytest.raises(HTTPException) as exc:
+        api.buy_quote(Response(), 7, FakeDb(scan_row()))
+    assert exc.value.status_code == 503
