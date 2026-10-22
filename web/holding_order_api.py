@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from database.models import Holding, get_db
 from trading.asset_allocation_universe import ETF_EXCHANGES
+from trading.scanner_buy_orders import kr_tick_size
 from web.kiwoom_holdings import get_kiwoom_holdings
 
 
@@ -39,15 +40,6 @@ class HoldingOrderPreviewRequest(BaseModel):
 
 def _kiwoom_enabled() -> bool:
     return os.getenv("KIWOOM_WEB_ENABLED", "false").lower() == "true"
-
-
-def kr_tick_size(price: float) -> int:
-    """KRX 주식 호가단위(2023-01 개편 기준). ETF/ETN은 별도 규칙이다."""
-    for upper, tick in ((2_000, 1), (5_000, 5), (20_000, 10), (50_000, 50),
-                        (200_000, 100), (500_000, 500)):
-        if price < upper:
-            return tick
-    return 1_000
 
 
 def _find_holding(holding_id: str, db: Session) -> dict[str, Any]:

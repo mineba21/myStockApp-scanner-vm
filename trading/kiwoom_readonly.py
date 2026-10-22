@@ -30,6 +30,8 @@ OVERSEAS_VALUATION_API_ID = "ust21121"
 OVERSEAS_QUOTE_PATH = "/api/us/mrkcond"
 OVERSEAS_QUOTE_API_ID = "usa20100"
 OVERSEAS_ORDERBOOK_API_ID = "usa20101"
+DOMESTIC_QUOTE_PATH = "/api/dostk/stkinfo"
+DOMESTIC_QUOTE_API_ID = "ka10001"
 REAL_BASE_URL = "https://api.kiwoom.com"
 MOCK_BASE_URL = "https://mockapi.kiwoom.com"
 DEFAULT_PROFILES_FILE = Path.home() / ".config" / "mystockapp" / "kiwoom_profiles.json"
@@ -355,6 +357,20 @@ class KiwoomReadOnlyClient:
             api_id=OVERSEAS_QUOTE_API_ID,
             payload={"stex_tp": exchange, "stk_cd": ticker},
             operation="미국주식 현재가 조회",
+        )
+        return {**report, "quote": report["summary"]}
+
+    def get_domestic_quote(self, token: str, *, ticker: str) -> dict[str, Any]:
+        """``ka10001`` 국내주식 기본정보(현재가·상한가·하한가)를 조회한다."""
+        ticker = ticker.strip()
+        if len(ticker) != 6 or not ticker.isascii() or not ticker.isdigit():
+            raise KiwoomError("국내주식 종목코드는 숫자 6자리여야 합니다.")
+        report = self._post_read_only_report(
+            token,
+            path=DOMESTIC_QUOTE_PATH,
+            api_id=DOMESTIC_QUOTE_API_ID,
+            payload={"stk_cd": ticker},
+            operation="국내주식 기본정보 조회",
         )
         return {**report, "quote": report["summary"]}
 

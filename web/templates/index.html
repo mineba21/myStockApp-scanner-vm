@@ -457,13 +457,13 @@
             👁 감시
           </button>
         </div>
-        <!-- 미국 후보는 자유투자(account1) 지정가 매수 티켓을 연다. 국내 계좌 주문은 아직 연결하지 않았다. -->
+        <!-- 지정가 매수 티켓: 미국 → 자유투자(account1), 국내 → ISA(account4) -->
         <button type="button" @click="openScanBuy(r)"
-          :disabled="r.strict_filter_passed === false || r.market !== 'US'"
-          :title="r.strict_filter_passed === false ? 'Strict 거부 행은 매수 동선 차단 (QA 인스펙트 전용)' : r.market !== 'US' ? '국내 계좌 주문은 아직 연결하지 않았습니다' : '자유투자(account1) 지정가 매수'"
+          :disabled="r.strict_filter_passed === false"
+          :title="r.strict_filter_passed === false ? 'Strict 거부 행은 매수 동선 차단 (QA 인스펙트 전용)' : scanBuyAccountLabel(r.market)+' 지정가 매수'"
           class="w-full mt-2 text-xs font-semibold rounded-lg py-1.5 bg-emerald-600 text-white hover:bg-emerald-700 transition"
-          :class="r.strict_filter_passed === false || r.market !== 'US' ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''"
-          x-text="r.market === 'US' ? '🛒 매수 · 자유투자' : '🛒 매수 (국내 준비 중)'">
+          :class="r.strict_filter_passed === false ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''"
+          x-text="'🛒 매수 · '+(r.market === 'US' ? '자유투자' : 'ISA')">
         </button>
       </div>
     </template>
@@ -1733,7 +1733,7 @@
   </div>
 </div>
 
-<!-- ══════════════════ 모달: 스캐너 후보 매수 (자유투자 account1, 미국 지정가) ══ -->
+<!-- ══════════════════ 모달: 스캐너 후보 매수 (미국 account1 / 국내 account4, 지정가) ══ -->
 <div x-show="scanBuy.open" x-cloak class="modal-bg" @click.self="closeScanBuy()"
   @keydown.escape.window="if (scanBuy.open) closeScanBuy()">
   <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[95vh] overflow-y-auto">
@@ -1745,7 +1745,7 @@
           <span class="text-xs text-slate-400" x-text="scanBuy.result?.ticker"></span>
         </div>
         <p class="text-xs text-slate-500 mt-1"
-          x-text="'자유투자(account1) · 미국 지정가 · 스캔가 '+fmtUsd(scanBuy.result?.price)+' · 손절 '+fmtUsd(scanBuy.result?.stop_loss)"></p>
+          x-text="scanBuyAccountLabel(scanBuy.result?.market)+' · '+(scanBuy.result?.market==='US'?'미국':'국내')+' 지정가 · 스캔가 '+fmtScanBuy(scanBuy.result?.price)+' · 손절 '+fmtScanBuy(scanBuy.result?.stop_loss)"></p>
       </div>
       <button @click="closeScanBuy()" class="text-slate-400 text-2xl leading-none">×</button>
     </div>
@@ -1757,7 +1757,7 @@
     <!-- 이 종목의 확인되지 않은 이전 주문: 키움에서 확인한 뒤에만 정리한다 -->
     <template x-for="o in scanBuy.recent.filter(o => o.state==='UNKNOWN' || o.state==='SENDING')" :key="o.id">
       <div class="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700 mb-3">
-        <div class="font-semibold" x-text="'확인되지 않은 주문 ('+o.state+') · '+o.quantity+'주 @ $'+o.price"></div>
+        <div class="font-semibold" x-text="'확인되지 않은 주문 ('+o.state+') · '+o.quantity+'주 @ '+fmtScanBuy(o.price)"></div>
         <div class="mt-0.5">키움 앱의 주문내역에서 접수 여부를 확인하기 전에는 이 종목을 다시 주문할 수 없습니다.</div>
         <button @click="resolveScanBuy(o)" class="mt-1.5 underline font-semibold">키움에서 확인함 · 잠금 해제</button>
       </div>
@@ -1774,16 +1774,16 @@
             <input type="number" min="1" step="1" class="input" x-model.number="scanBuy.quantity" @input="resetScanBuy()">
           </div>
           <div>
-            <label class="text-xs text-slate-500 mb-1 block">지정가 (USD)</label>
+            <label class="text-xs text-slate-500 mb-1 block" x-text="'지정가 ('+(scanBuy.result?.market==='US'?'USD':'KRW · 호가단위 확인')+')'"></label>
             <div class="flex gap-2">
-              <input type="number" min="0" step="0.01" class="input" x-model.number="scanBuy.limitPrice" @input="resetScanBuy()">
+              <input type="number" min="0" :step="scanBuy.result?.market==='US'?'0.01':'1'" class="input" x-model.number="scanBuy.limitPrice" @input="resetScanBuy()">
               <button x-show="scanBuy.preview" @click="scanBuy.limitPrice=Number(scanBuy.preview.details.current_price); resetScanBuy()"
                 class="btn btn-ghost text-xs whitespace-nowrap">현재가 적용</button>
             </div>
           </div>
           <div class="flex justify-between text-sm">
             <span class="text-slate-500">예상 주문금액</span>
-            <span class="font-bold text-slate-800" x-text="fmtUsd((Number(scanBuy.quantity)||0)*(Number(scanBuy.limitPrice)||0))"></span>
+            <span class="font-bold text-slate-800" x-text="fmtScanBuy((Number(scanBuy.quantity)||0)*(Number(scanBuy.limitPrice)||0))"></span>
           </div>
         </div>
 
@@ -1791,17 +1791,17 @@
           <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-1.5">
             <div class="font-bold text-slate-700 mb-1">주문 미리보기 (2분간 유효)</div>
             <div class="flex justify-between"><span class="text-slate-500">거래소 · 키움 현재가</span>
-              <span x-text="scanBuy.preview.exchange+' · $'+scanBuy.preview.details.current_price"></span></div>
+              <span x-text="scanBuy.preview.exchange+' · '+fmtScanBuy(scanBuy.preview.details.current_price)"></span></div>
             <div class="flex justify-between"><span class="text-slate-500">수량 × 지정가</span>
-              <span class="font-semibold" x-text="scanBuy.preview.quantity+'주 × $'+scanBuy.preview.price"></span></div>
+              <span class="font-semibold" x-text="scanBuy.preview.quantity+'주 × '+fmtScanBuy(scanBuy.preview.price)"></span></div>
             <div class="flex justify-between"><span class="text-slate-500">예상 주문금액</span>
-              <span class="font-semibold" x-text="fmtUsd(scanBuy.preview.quantity*Number(scanBuy.preview.price))"></span></div>
+              <span class="font-semibold" x-text="fmtScanBuy(scanBuy.preview.quantity*Number(scanBuy.preview.price))"></span></div>
             <div class="flex justify-between"><span class="text-slate-500">키움 주문가능수량 (여유금 1%)</span>
               <span x-text="scanBuy.preview.details.capacity_at_preview.max_quantity_with_reserve+'주'"></span></div>
             <template x-if="scanBuy.preview.details.risk">
               <div class="flex justify-between"><span class="text-slate-500">손절가 · 손절 시 손실</span>
                 <span class="text-red-600 font-semibold"
-                  x-text="'$'+scanBuy.preview.details.risk.stop_loss+' · -$'+scanBuy.preview.details.risk.total_risk+' ($'+scanBuy.preview.details.risk.risk_per_share+'/주)'"></span></div>
+                  x-text="fmtScanBuy(scanBuy.preview.details.risk.stop_loss)+' · -'+fmtScanBuy(scanBuy.preview.details.risk.total_risk)+' ('+fmtScanBuy(scanBuy.preview.details.risk.risk_per_share)+'/주)'"></span></div>
             </template>
             <template x-for="w in scanBuy.preview.details.warnings" :key="w">
               <div class="text-amber-700 font-semibold" x-text="'⚠ '+w"></div>
@@ -1824,7 +1824,7 @@
           :class="scanBuy.order.state==='SUBMITTED' ? 'text-emerald-700' : 'text-red-700'"
           x-text="{SUBMITTED:'키움 접수 완료 (체결 아님)', REJECTED:'키움이 주문을 거절했습니다', UNKNOWN:'접수 여부 불명 — 키움 주문내역 확인 전 재주문 금지', BLOCKED:'전송 직전 검증 실패 — 주문을 보내지 않았습니다'}[scanBuy.order.state] || scanBuy.order.state"></div>
         <div x-show="scanBuy.order.order_number" x-text="'주문번호 '+scanBuy.order.order_number"></div>
-        <div x-text="scanBuy.order.quantity+'주 × $'+scanBuy.order.price+' · '+scanBuy.order.exchange"></div>
+        <div x-text="scanBuy.order.quantity+'주 × '+fmtScanBuy(scanBuy.order.price)+' · '+scanBuy.order.account_name+' · '+scanBuy.order.exchange"></div>
         <div x-show="scanBuy.order.broker_state"
           x-text="'키움 상태: '+scanBuy.order.broker_state+' · 체결 '+(scanBuy.order.details.filled_quantity??0)+'주 · 잔량 '+(scanBuy.order.details.remaining_quantity??'-')+'주'"></div>
         <div x-show="scanBuy.order.details.error" class="text-red-700" x-text="scanBuy.order.details.error"></div>
@@ -1984,7 +1984,7 @@ function app() {
     orderModal: {open:false, side:'BUY', holding:null, quantity:1, limitPrice:null,
                  preview:null, error:null, busy:false, requestSeq:0},
 
-    // 스캐너 후보 매수 (자유투자 account1, 미국 지정가 1건씩 전송)
+    // 스캐너 후보 매수 (미국 → 자유투자 account1, 국내 → ISA account4. 지정가 1건씩 전송)
     scanBuy: {open:false, result:null, quantity:1, limitPrice:null, preview:null, order:null,
               confirm:'', error:null, busy:false, capabilities:null, recent:[], requestSeq:0},
     _chart: null, _chartCandles: null, _chartVolume: null, _chartMa: null,
@@ -2589,10 +2589,16 @@ function app() {
       }
     },
 
-    // ── 스캐너 후보 매수 (자유투자 account1) ──
-    fmtUsd(value) {
+    // ── 스캐너 후보 매수 (미국 account1 / 국내 account4) ──
+    scanBuyAccountLabel(market) {
+      return market === 'US' ? '자유투자(account1)' : 'ISA(account4)';
+    },
+
+    fmtScanBuy(value) {
       if (value == null || value === '' || isNaN(Number(value))) return '-';
-      return '$'+Number(value).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+      return this.scanBuy.result?.market === 'US'
+        ? '$'+Number(value).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})
+        : Math.round(Number(value)).toLocaleString()+'원';
     },
 
     async _scanBuyFetch(url, payload) {
@@ -2608,19 +2614,19 @@ function app() {
     },
 
     async openScanBuy(r) {
-      if (r.market !== 'US' || r.strict_filter_passed === false) return;
+      if (r.strict_filter_passed === false) return;
       const s = this.scanBuy;
       s.result = r;
       s.quantity = r.suggested_qty > 0 ? r.suggested_qty : 1;
-      s.limitPrice = r.price ? Math.round(r.price * 100) / 100 : null;
+      s.limitPrice = r.price ? (r.market === 'US' ? Math.round(r.price * 100) / 100 : Math.round(r.price)) : null;
       s.order = null;
       s.capabilities = null;
       s.recent = [];
       this.resetScanBuy();
       s.open = true;
       try {
-        s.capabilities = await this._scanBuyFetch('/api/scanner-orders/capabilities');
-        s.recent = await this._scanBuyFetch('/api/scanner-orders/buy?ticker='+encodeURIComponent(r.ticker)+'&limit=5');
+        s.capabilities = await this._scanBuyFetch('/api/scanner-orders/capabilities?market='+r.market);
+        s.recent = await this._scanBuyFetch(`/api/scanner-orders/buy?market=${r.market}&ticker=${encodeURIComponent(r.ticker)}&limit=5`);
       } catch (e) {
         if (s.result === r) s.error = e.message || String(e);
       }
@@ -2705,7 +2711,7 @@ function app() {
       try {
         await this._scanBuyFetch(`/api/scanner-orders/buy/${o.id}/resolve`,
           {confirmation_ticker: typed.trim().toUpperCase(), note: '웹 화면에서 수동 정리'});
-        s.recent = await this._scanBuyFetch('/api/scanner-orders/buy?ticker='+encodeURIComponent(o.ticker)+'&limit=5');
+        s.recent = await this._scanBuyFetch(`/api/scanner-orders/buy?market=${o.market}&ticker=${encodeURIComponent(o.ticker)}&limit=5`);
       } catch (e) {
         s.error = e.message || String(e);
       }
