@@ -1,9 +1,11 @@
 import asyncio
 import json
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -946,3 +948,11 @@ def test_buy_preview_replan_fails_closed_when_quote_refresh_fails(flow):
     with pytest.raises(RebalanceBlocked, match='stale quote'):
         service.close_out(cid)
     assert service.status(cid)['state'] == 'BUY_PREVIEW'
+
+
+def test_web_panel_offers_recalculation_in_every_state_close_out_recovers():
+    """Blocked BUY_PREVIEW can only be recovered from the web panel through this button."""
+    html = (Path(__file__).parents[1] / 'web' / 'templates' / 'index.html').read_text(encoding='utf-8')
+    button = re.search(r'<button[^>]*@click="closeOutCycle\(\)"[^>]*>', html).group(0)
+    shown = set(re.findall(r"'([A-Z_]+)'", re.search(r'x-show="([^"]*)"', button).group(1)))
+    assert shown == {'SELL_PENDING', 'BUY_PENDING', 'SELL_CONFIRMED', 'BUY_PREVIEW'}
