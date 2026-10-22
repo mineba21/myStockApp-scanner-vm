@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import math
-import os
-from trading.allocation_rebalance import LIVE_BLOCK_REASON, RebalanceBlocked, weights, number
+import time
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
+
+from trading.allocation_rebalance import RebalanceBlocked, weights, number
 
 
 def calculate_allocation_sizing(
@@ -105,23 +109,33 @@ def calculate_allocation_sizing(
         row["post_weight"] = round(post_value / total_assets, 8) if total_assets > 0 else 0
         row.pop("needed_quantity", None)
 
+    # Invalid account/price inputs invalidate all quantities: zero means no trade,
+    # not a failed calculation. Missing held prices also invalidate total assets.
+    if errors:
+        for row in rows:
+            for key in ("target_quantity", "required_buy_quantity", "buy_quantity",
+                        "additional_buy_quantity", "additional_sell_quantity",
+                        "retained_quantity", "adjustment_quantity", "target_value",
+                        "estimated_cost", "required_cost", "post_weight"):
+                row[key] = None
+
     return {
         "estimate_only": True,
         "plan_valid": not errors,
         "validation_errors": errors,
         "execution_enabled": False,
-        "execution_block_reason": LIVE_BLOCK_REASON,
+        "execution_block_reason": "참고용 예상 수량입니다. 주문 미리보기에서 최신 시세·잔고·현금을 다시 검증합니다.",
         "liquidation_scope": sorted(scope),
-        "planning_assets": round(total_assets, 2),
+        "planning_assets": round(total_assets, 2) if not errors else None,
         "account_profile": "account2",
         "currency": "USD",
         "orderable_cash": round(cash, 2),
-        "evaluation_amount": round(evaluation, 2),
-        "total_assets": round(total_assets, 2),
-        "recommended_cost": round(recommended_cost, 2),
-        "estimated_sale_proceeds": round(estimated_sales, 2),
-        "required_cost": round(sum(row["required_cost"] for row in rows), 2),
-        "remaining_cash": round(remaining, 2),
+        "evaluation_amount": round(evaluation, 2) if not errors else None,
+        "total_assets": round(total_assets, 2) if not errors else None,
+        "recommended_cost": round(recommended_cost, 2) if not errors else None,
+        "estimated_sale_proceeds": round(estimated_sales, 2) if not errors else None,
+        "required_cost": round(sum(row["required_cost"] for row in rows), 2) if not errors else None,
+        "remaining_cash": round(remaining, 2) if not errors else None,
         "liquidate_before_rebalance": False,
         "rebalance_mode": "DELTA_V1",
         "items": sorted(rows, key=lambda row: (-row["target_weight"], row["ticker"])),
@@ -129,60 +143,112 @@ def calculate_allocation_sizing(
     }
 
 
+# Reference prices are display-only. The execution broker retains its 60s limit.
+REFERENCE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+
+
+class SizingUnavailable(RuntimeError):
+    """Only controlled, credential-free messages may cross the HTTP boundary."""
+
+
+def _reference_quote(client, token, ticker, exchange, now):
+    from trading.kiwoom_allocation_live_broker import KiwoomAllocationLiveBroker
+
+    try:
+        raw = KiwoomAllocationLiveBroker._read_retry(
+            lambda: client.get_overseas_orderbook(token, exchange=exchange, ticker=ticker)
+        )["quote"]
+    except Exception as exc:
+        raise SizingUnavailable(f"{ticker}: 호가 조회 실패 — 잠시 후 다시 조회하세요.") from exc
+    if not isinstance(raw, dict):
+        raise SizingUnavailable(f"{ticker}: 호가 응답 형식 오류")
+    if (str(raw.get("stk_cd") or "").strip().upper() != ticker
+            or str(raw.get("stex_tp") or "").strip().upper() != exchange):
+        raise SizingUnavailable(f"{ticker}: 호가 응답 종목/거래소 불일치")
+    try:
+        observed = datetime.strptime(
+            f"{raw['dt']} {raw['bid_tm']}", "%Y%m%d %H:%M"
+        ).replace(tzinfo=ZoneInfo("America/New_York")).timestamp()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SizingUnavailable(f"{ticker}: 시세 기준시각 누락 또는 형식 오류") from exc
+    age = now - observed
+    if not 0 <= age <= REFERENCE_MAX_AGE_SECONDS:
+        raise SizingUnavailable(f"{ticker}: 시세 기준시각이 미래이거나 7일을 초과했습니다.")
+    try:
+        price = abs(Decimal(str(raw.get("cur_prc")).replace(",", "")))
+        if not price.is_finite() or price <= 0 or not math.isfinite(float(price)):
+            raise ValueError("invalid price")
+    except (ValueError, ArithmeticError) as exc:
+        raise SizingUnavailable(f"{ticker}: 유효한 가격 누락") from exc
+    return {
+        "price": float(price),
+        "price_as_of": datetime.fromtimestamp(observed, timezone.utc).isoformat(),
+        "price_age_seconds": int(age),
+        "price_status": "recent" if age <= 60 else "reference",
+        "price_source": "usa20101",
+    }
+
+
 def build_live_allocation_sizing(report: dict[str, Any]) -> dict[str, Any]:
     from trading.asset_allocation_universe import ETF_EXCHANGES, allocation_scope
-    from trading.kiwoom_allocation_live_broker import KiwoomAllocationLiveBroker
     from trading.kiwoom_readonly import KiwoomReadOnlyClient, load_profile_configs
-    from web.kiwoom_holdings import (
-        _get_token,
-        get_kiwoom_account_summaries,
-        get_kiwoom_holdings,
-    )
+    from web.kiwoom_holdings import _get_token, _load_kiwoom_portfolio
 
-    # Entering the allocation tab must refresh live account state, while the
-    # monthly strategy signal remains the cached report.
-    summaries = get_kiwoom_account_summaries(force=True)
-    summary = next(
-        (item for item in summaries if item.get("account_profile") == "account2"),
-        None,
-    )
+    try:
+        portfolio = _load_kiwoom_portfolio(force=True)
+    except Exception as exc:
+        raise SizingUnavailable("계좌 잔고·현금 조회 실패 — 계좌 연결 상태를 확인하세요.") from exc
+    summary = next((item for item in portfolio["accounts"]
+                    if item.get("account_profile") == "account2"), None)
     if summary is None:
-        raise RuntimeError("퀀트투자 계좌 요약을 확인하지 못했습니다.")
-
-    holdings = get_kiwoom_holdings()
+        raise SizingUnavailable("account2 계좌 요약을 확인하지 못했습니다.")
+    holdings = portfolio["rows"]
     scope = allocation_scope()
-    missing = sorted(set(str(t).upper() for t in report.get("combined_allocations", {})) | set(scope))
-
-    fetched: dict[str, float | None] = {}
-    quote_time_verified = False
-    if missing:
+    try:
+        targets = weights(report.get("combined_allocations"))
+    except RebalanceBlocked as exc:
+        raise SizingUnavailable("월별 목표 비중이 유효하지 않습니다. 배분 계산을 갱신하세요.") from exc
+    required = set(targets) | {
+        str(row.get("ticker") or "").upper() for row in holdings
+        if row.get("account_profile") == "account2" and row.get("market") == "US"
+        and str(row.get("ticker") or "").upper() in scope
+    }
+    try:
         config = load_profile_configs()["account2"]
         client = KiwoomReadOnlyClient(config)
         token = _get_token("account2", config, client)
-        if config.mode == "real":
-            # Use the same timestamped quote contract as the actual preview.
-            live = KiwoomAllocationLiveBroker(config, client=client, token=token)
-            quotes = live.quotes(missing)
-            fetched = {ticker: float(row["limit_price"])
-                       for ticker, row in quotes.items()}
-            quote_time_verified = True
-        else:
-            for ticker in missing:
-                quote = client.get_overseas_quote(
-                    token, exchange=ETF_EXCHANGES[ticker], ticker=ticker
-                )["quote"]
-                try:
-                    fetched[ticker] = abs(float(str(quote.get("cur_prc") or "0").replace(",", ""))) or None
-                except (TypeError, ValueError):
-                    fetched[ticker] = None
+    except Exception as exc:
+        raise SizingUnavailable("account2 시세 조회 인증 실패 — 계좌 연결 상태를 확인하세요.") from exc
+
+    quotes, quote_errors = {}, {}
+    for ticker in sorted(required):
+        if ticker not in ETF_EXCHANGES:
+            quote_errors[ticker] = f"{ticker}: 거래소 매핑이 없습니다."
+            continue
+        try:
+            quotes[ticker] = _reference_quote(client, token, ticker, ETF_EXCHANGES[ticker], time.time())
+        except SizingUnavailable as exc:
+            quote_errors[ticker] = str(exc)
 
     result = calculate_allocation_sizing(
-        {**report, "liquidation_scope": scope},
-        holdings, summary, lambda ticker: fetched.get(ticker)
+        {**report, "liquidation_scope": scope}, holdings, summary,
+        lambda ticker: quotes.get(ticker, {}).get("price"),
     )
-
-    result["quote_time_verified"] = quote_time_verified
-    if not quote_time_verified:
-        result["plan_valid"] = False
-        result["validation_errors"].append("증권사 시세 기준시각 미검증 — 계획용 참고값입니다.")
+    result["account_as_of"] = summary.get("updated_at")
+    result["quote_time_verified"] = not quote_errors
+    result["reference_max_age_seconds"] = REFERENCE_MAX_AGE_SECONDS
+    result["warnings"] = []
+    for row in result["items"]:
+        quote = quotes.get(row["ticker"])
+        if quote:
+            row.update({key: value for key, value in quote.items() if key != "price"})
+            if quote["price_status"] == "reference":
+                result["warnings"].append(f"{row['ticker']}: 60초가 지난 시세로 계산한 참고용 예상 수량입니다.")
+        else:
+            row.update(price_as_of=None, price_status="unavailable",
+                       price_error=quote_errors.get(row["ticker"]))
+    # Replace generic missing-price errors with safe, actionable diagnostics.
+    result["validation_errors"] = [message for message in result["validation_errors"]
+        if not any(message.startswith(ticker + ":") or message.startswith(ticker + " 가격:")
+                   for ticker in quote_errors)] + list(quote_errors.values())
     return result

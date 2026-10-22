@@ -5,6 +5,7 @@ never retried by this adapter; the durable rebalance journal reconciles them.
 """
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import datetime, timedelta
@@ -48,6 +49,10 @@ def orderbook_side_prices(quote, last):
     if bid <= 0 or ask < bid or (ask - bid) * 10000 > last * MAX_SPREAD_BPS:
         raise KiwoomError("1호가가 비정상(역전·누락·과대 스프레드)이라 주문가로 쓰지 않습니다.")
     return ask, bid
+
+
+class AllocationQuoteUnavailable(KiwoomError):
+    """Controlled quote-validation message safe to expose to the account owner."""
 
 
 class KiwoomAllocationLiveBroker:
@@ -96,7 +101,10 @@ class KiwoomAllocationLiveBroker:
             ticker = str(row.get("stk_cd") or "").strip().upper()
             if not ticker:
                 continue
-            held = quantity(row.get("qty", 0))
+            # ust21070.qty is settlement-based and can lag today's fills.
+            # poss_qty is the current holding; sell_alowq is only a sell cap.
+            # Missing current holdings must fail closed, not become zero.
+            held = quantity(row.get("poss_qty"))
             holdings[ticker] = holdings.get(ticker, 0) + held
         return {
             "account_profile": "account2", "currency": "USD", "complete": True,
@@ -115,13 +123,13 @@ class KiwoomAllocationLiveBroker:
             ticker = str(ticker).strip().upper()
             exchange = ETF_EXCHANGES.get(ticker)
             if not exchange:
-                raise KiwoomError(f"{ticker}: 거래소 매핑이 없습니다.")
+                raise AllocationQuoteUnavailable(f"{ticker}: 거래소 매핑이 없습니다.")
             quote = self._read_retry(lambda: self.client.get_overseas_orderbook(
                 self.token, exchange=exchange, ticker=ticker,
             ))["quote"]
             if (str(quote.get("stk_cd") or "").strip().upper() != ticker
                     or str(quote.get("stex_tp") or "").strip().upper() != exchange):
-                raise KiwoomError(f"{ticker}: 호가 응답 종목/거래소가 일치하지 않습니다.")
+                raise AllocationQuoteUnavailable(f"{ticker}: 호가 응답 종목/거래소가 일치하지 않습니다.")
             try:
                 observed = datetime.strptime(
                     f"{quote['dt']} {quote['bid_tm']}", "%Y%m%d %H:%M"
@@ -130,10 +138,17 @@ class KiwoomAllocationLiveBroker:
                     Decimal(".01"), rounding=ROUND_HALF_UP,
                 )
             except Exception as exc:
-                raise KiwoomError(f"{ticker}: 호가 가격/시각을 확인할 수 없습니다.") from exc
+                raise AllocationQuoteUnavailable(f"{ticker}: 주문용 호가 가격/시각을 확인할 수 없습니다.") from exc
             age = self.clock() - observed
-            if price <= 0 or not 0 <= age <= 60:
-                raise KiwoomError(f"{ticker}: 호가가 누락되었거나 60초를 초과했습니다.")
+            if not price.is_finite() or price <= 0 or not math.isfinite(age) or age < 0:
+                raise AllocationQuoteUnavailable(f"{ticker}: 주문용 호가 가격/시각이 유효하지 않습니다.")
+            if age > 60:
+                stamp = datetime.fromtimestamp(observed, KST).strftime("%m-%d %H:%M KST")
+                raise AllocationQuoteUnavailable(
+                    f"{ticker}: 주문용 호가가 60초를 초과해 리밸런싱을 중단했습니다. "
+                    f"시세 기준 {stamp}. 화면의 참고용 예상 수량으로는 주문하지 않습니다. "
+                    "최신 호가가 확인된 뒤 다시 시도하세요."
+                )
             buy_limit, sell_limit = orderbook_side_prices(quote, price)
             result[ticker] = {
                 "limit_price": str(price), "as_of": observed,

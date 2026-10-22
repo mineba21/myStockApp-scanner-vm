@@ -39,7 +39,7 @@ class Client:
 
     def get_overseas_account_balance(self, token, exchange="", ticker=""):
         self.balance_calls.append((exchange, ticker))
-        return {"holdings": [{"stk_cd": ticker or "QQQ", "qty": "6",
+        return {"holdings": [{"stk_cd": ticker or "QQQ", "qty": "6", "poss_qty": "6",
                               "sell_alowq": self.sellable}]}
 
     def get_overseas_orderbook(self, token, *, exchange, ticker):

@@ -235,3 +235,82 @@ def test_close_out_requires_confirmation_and_trading_flag(client, monkeypatch, t
     result = test_client.post(base + '/close-out', json={'confirmation': 'account2'}).json()
     assert result['orders'][0]['state'] == 'CANCEL_REQUESTED'
     assert len(broker.cancelled) == 1
+
+
+@pytest.mark.parametrize('known', [True, False])
+def test_sizing_error_exposes_only_controlled_diagnostics(client, monkeypatch, known):
+    from web.asset_allocation_sizing import SizingUnavailable
+    test_client, api = client
+    report = {'combined_allocations': {'SPY': 1}}
+    monkeypatch.setattr(api, '_run_asset_allocation', lambda *args: report)
+
+    def fail(*args):
+        if known:
+            raise SizingUnavailable('account2 시세 조회 인증 실패 — 계좌 연결 상태를 확인하세요.')
+        raise RuntimeError('secret-token-should-not-leak')
+
+    monkeypatch.setattr(api, 'build_live_allocation_sizing', fail)
+    assert test_client.post('/api/asset-allocation/refresh?as_of=2026-08-31').status_code == 202
+    cached = api._read_allocation_cache('easy', api.date(2026, 8, 31))
+    payload = test_client.get('/api/asset-allocation?as_of=2026-08-31').json()
+    for data in (cached, payload):
+        assert data['sizing'] is None
+        assert 'secret-token' not in data['sizing_error']
+        assert ('인증 실패' in data['sizing_error']) is known
+
+
+def test_stale_broker_quote_returns_actionable_409_without_order(client, monkeypatch, tmp_path):
+    from tests.test_allocation_rebalance import Broker
+    from tests.test_kiwoom_allocation_live_broker import broker as live_broker, Client
+    from trading.allocation_rebalance import Rebalance
+
+    test_client, api = client
+    broker = Broker()
+    broker.holdings = {}
+    broker.quotes = live_broker(client=Client(quote_time='10:27')).quotes
+    service = Rebalance(tmp_path / 'stale-quote.sqlite', broker)
+    monkeypatch.setattr(api, '_rebalance_service', lambda: service)
+    api.ASSET_ALLOCATION_CACHE_DIR.mkdir()
+    api._allocation_cache_path('easy', api.date(2026, 8, 31)).write_text(json.dumps({
+        'report': {'combined_allocations': {'BIL': 1}}}))
+
+    response = test_client.post('/api/asset-allocation/rebalance/preview?as_of=2026-08-31')
+
+    assert response.status_code == 409
+    detail = response.json()['detail']
+    assert 'BIL' in detail and '60초' in detail and 'KST' in detail
+    assert '참고용 예상 수량으로는 주문하지 않습니다' in detail
+    assert broker.sent == []
+    assert service.active() is None
+
+
+@pytest.mark.parametrize('method, path, body', [
+    ('post', '/preview?as_of=2026-08-31', {}),
+    ('get', '/current', None),
+    ('get', '/fake-cycle', None),
+    ('post', '/fake-cycle/confirm', {'side': 'SELL', 'confirmation': 'account2'}),
+    ('post', '/fake-cycle/execute', {'confirmation': 'account2'}),
+    ('post', '/fake-cycle/advance', {}),
+    ('post', '/fake-cycle/reconcile', {}),
+    ('post', '/fake-cycle/buy-preview', {}),
+    ('post', '/fake-cycle/sell-preview', {}),
+])
+def test_broker_errors_across_rebalance_routes_do_not_leak(client, monkeypatch, method, path, body):
+    from trading.kiwoom_readonly import KiwoomError
+
+    test_client, api = client
+    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
+    api.ASSET_ALLOCATION_CACHE_DIR.mkdir()
+    api._allocation_cache_path('easy', api.date(2026, 8, 31)).write_text(json.dumps({
+        'report': {'combined_allocations': {'BIL': 1}}}))
+
+    def fail():
+        raise KiwoomError('secret-account-and-token')
+
+    monkeypatch.setattr(api, '_rebalance_service', fail)
+    response = test_client.request(method, '/api/asset-allocation/rebalance' + path,
+                                   **({'json': body} if body is not None else {}))
+    assert response.status_code == 503
+    assert '증권사 조회·검증' in response.json()['detail']
+    assert 'secret' not in response.text
+    assert '기존 주문 상태' in response.json()['detail']
