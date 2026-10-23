@@ -13,6 +13,9 @@ build/
 
 # Local SQLite output — should not be tracked
 *.db
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 stock_scanner.db
 
 # Scan funnel 진단 스냅샷 (scanner/scan_engine.py _write_funnel_file)

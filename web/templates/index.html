@@ -1784,7 +1784,7 @@
       <div class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800 mb-3">
         <div class="font-semibold mb-0.5">이 종목의 최근 접수 주문 — 중복 주문인지 확인하세요</div>
         <template x-for="o in scanBuy.recent.filter(o => o.state==='SUBMITTED')" :key="o.id">
-          <div x-text="new Date((o.sent_at||o.created_at)*1000).toLocaleString()+' · '+o.quantity+'주 @ '+fmtScanBuy(o.price, o.market)+' · 주문번호 '+o.order_number+(o.broker_state?' · '+o.broker_state:'')"></div>
+          <div x-text="new Date((o.sent_at||o.created_at)*1000).toLocaleString()+' · '+o.quantity+'주 @ '+fmtScanBuy(o.price, o.market)+' · 주문번호 '+o.order_number+' · '+scanBuyOrderStatus(o)"></div>
         </template>
       </div>
     </template>
@@ -1850,7 +1850,7 @@
         :class="scanBuy.order.state==='SUBMITTED' ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'">
         <div class="font-bold"
           :class="scanBuy.order.state==='SUBMITTED' ? 'text-emerald-700' : 'text-red-700'"
-          x-text="{SUBMITTED:'키움 접수 완료 (체결 아님)', REJECTED:'키움이 주문을 거절했습니다', UNKNOWN:'접수 여부 불명 — 키움 주문내역 확인 전 재주문 금지', BLOCKED:'전송 직전 검증 실패 — 주문을 보내지 않았습니다', SENDING:'전송 처리 중이거나 중단됨 — 확인 전 재주문 금지', RESOLVED_MANUAL:'키움에서 확인 후 수동 정리된 주문', CHECK_REQUIRED:'서버 응답을 받지 못했습니다 — 주문이 접수됐을 수 있으니 상태를 다시 확인하세요'}[scanBuy.order.state] || scanBuy.order.state"></div>
+          x-text="scanBuyOrderStatus(scanBuy.order)"></div>
         <div x-show="scanBuy.order.order_number" x-text="'주문번호 '+scanBuy.order.order_number"></div>
         <div x-text="scanBuy.order.quantity+'주 × '+fmtScanBuy(scanBuy.order.price, scanBuy.order.market)+' · '+(scanBuy.order.account_name||'')+' · '+scanBuy.order.exchange"></div>
         <div x-show="scanBuy.order.broker_state"
@@ -2804,6 +2804,19 @@ function app() {
         s.error = error;
       }
       s.busy = false;
+    },
+
+    scanBuyOrderStatus(order) {
+      if (!order) return '';
+      if (order.state === 'SUBMITTED') {
+        return {FILLED:'매수 체결 완료', PARTIAL:'부분체결 · 잔량 확인 필요',
+          OPEN:'키움 접수 완료 · 미체결', CANCELLED:'주문 취소 확인'}[order.broker_state]
+          || '키움 접수 완료 · 체결 미확인';
+      }
+      return {REJECTED:'키움이 주문을 거절했습니다', UNKNOWN:'접수 여부 불명 — 키움 주문내역 확인 전 재주문 금지',
+        BLOCKED:'전송 직전 검증 실패 — 주문을 보내지 않았습니다', SENDING:'전송 처리 중이거나 중단됨 — 확인 전 재주문 금지',
+        RESOLVED_MANUAL:'키움에서 확인 후 수동 정리된 주문',
+        CHECK_REQUIRED:'서버 응답을 받지 못했습니다 — 주문이 접수됐을 수 있으니 상태를 다시 확인하세요'}[order.state] || order.state;
     },
 
     async refreshScanBuy() {
