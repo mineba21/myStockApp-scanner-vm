@@ -177,6 +177,7 @@ class KiwoomReadOnlyClient:
         holdings: list[dict[str, Any]] = []
         summary: dict[str, Any] = {}
         pages = 0
+        valid_rows = True
         cont_yn: str | None = None
         next_key: str | None = None
 
@@ -206,6 +207,8 @@ class KiwoomReadOnlyClient:
                     if key not in {"acnt_evlt_remn_indv_tot", "return_code", "return_msg"}
                 }
             page_holdings = data.get("acnt_evlt_remn_indv_tot", [])
+            valid_rows = valid_rows and isinstance(data.get("acnt_evlt_remn_indv_tot"), list) and all(
+                isinstance(item, dict) for item in page_holdings)
             if isinstance(page_holdings, list):
                 holdings.extend(item for item in page_holdings if isinstance(item, dict))
 
@@ -219,6 +222,7 @@ class KiwoomReadOnlyClient:
             "mode": self.config.mode,
             "api_id": BALANCE_API_ID,
             "pages": pages,
+            "complete": valid_rows and cont_yn != "Y",
             "summary": summary,
             "holdings": holdings,
         }
@@ -245,6 +249,7 @@ class KiwoomReadOnlyClient:
         holdings: list[dict[str, Any]] = []
         summary: dict[str, Any] = {}
         pages = 0
+        valid_rows = True
         cont_yn: str | None = None
         next_key: str | None = None
 
@@ -274,6 +279,8 @@ class KiwoomReadOnlyClient:
                     if key not in {"result_list", "return_code", "return_msg"}
                 }
             page_holdings = data.get("result_list", [])
+            valid_rows = valid_rows and isinstance(data.get("result_list"), list) and all(
+                isinstance(item, dict) for item in page_holdings)
             if isinstance(page_holdings, list):
                 holdings.extend(item for item in page_holdings if isinstance(item, dict))
 
@@ -287,6 +294,7 @@ class KiwoomReadOnlyClient:
             "mode": self.config.mode,
             "api_id": OVERSEAS_BALANCE_API_ID,
             "pages": pages,
+            "complete": valid_rows and cont_yn != "Y",
             "summary": summary,
             "holdings": holdings,
         }

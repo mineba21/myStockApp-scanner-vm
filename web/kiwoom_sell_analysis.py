@@ -98,6 +98,7 @@ def _analysis_fields(result: dict[str, Any] | None) -> dict[str, Any]:
 def _analyze_one(
     row: dict[str, Any],
     benchmark_close: Any,
+    *, observation_metadata: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     from config import MA_PERIOD
     from scanner.kr_stocks import get_kr_ohlcv
@@ -107,6 +108,7 @@ def _analyze_one(
     market = str(row.get("market") or "").upper()
     ticker = str(row.get("ticker") or "").upper()
     checked_at = datetime.now(timezone.utc).isoformat()
+    frame = weekly = None
     try:
         frame = get_kr_ohlcv(ticker) if market == "KR" else get_us_ohlcv(ticker)
         if frame is None or len(frame) < MA_PERIOD + 20:
@@ -131,6 +133,19 @@ def _analyze_one(
             "sell_severity": None,
             "sell_reason": "Weinstein 판정용 가격 데이터를 확인하지 못했습니다.",
         }
+    if observation_metadata:
+        stamp = None
+        failed = fields['sell_status'] == 'CHECK_FAILED'
+        if not failed:
+            import pandas as pd
+            raw = pd.Timestamp(frame.index.max())
+            if raw.tzinfo is None:
+                raw = raw.tz_localize('Asia/Seoul' if market == 'KR' else 'America/New_York')
+            stamp = raw.tz_convert('UTC').isoformat()
+        fields.update(data_as_of=stamp,
+                      observation_price=None if failed else float(frame['Close'].iloc[-1]),
+                      weekly_available=weekly is not None,
+                      benchmark_available=benchmark_close is not None and len(benchmark_close) > 0)
     fields.update(
         sell_checked_at=checked_at,
         sell_analysis="WEINSTEIN_READ_ONLY",

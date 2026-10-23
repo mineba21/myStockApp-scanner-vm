@@ -59,10 +59,13 @@ class ShadowStore(RuntimeStore):
         super().__init__(session_factory, replace(settings or RuntimeSettings.from_config(),
                                                 delivery_enabled=False))
 
-    def begin_capture(self, scan_id, expected, *, now):
+    def begin_capture(self, scan_id, expected, *, now, broker_snapshot=None):
         if not self.settings.enabled:
             return
-        body = canonical_json({'items': expected})
+        inventory = {'items': expected}
+        if broker_snapshot is not None:
+            inventory['broker_snapshot'] = broker_snapshot
+        body = canonical_json(inventory)
         with self._transaction() as session:
             existing = session.get(AgentScanCapture, scan_id)
             if existing:
@@ -122,6 +125,7 @@ class ShadowStore(RuntimeStore):
                                       source_status=scan.status if scan else 'UNKNOWN',
                                       reset=capture.reset_at is not None,
                                       expected=json.loads(capture.expected_json)['items'],
+                                      broker_snapshot=json.loads(capture.expected_json).get('broker_snapshot'),
                                       audit=json.loads(capture.audit_json)))
             return manifests
 
@@ -176,8 +180,10 @@ class ShadowStore(RuntimeStore):
             if row.id in manifest['audit']:
                 result['stale'] += 1
                 continue
-            relevant = [m for m in manifests if m['scan_id'] <= row.scan_sequence and
-                        any(e['episode_id'] == row.episode_id for e in m['expected'])]
+            is_broker = json.loads(row.payload_json).get('source') == 'kiwoom'
+            relevant = [m for m in manifests if m['scan_id'] <= row.scan_sequence and (
+                        any(e['episode_id'] == row.episode_id for e in m['expected']) or
+                        (is_broker and (m.get('broker_snapshot') or {}).get('status') == 'UNAVAILABLE'))]
             if any(m['status'] != 'COMPLETE' and not m['reset'] for m in relevant):
                 result['blocked'] += 1
                 continue
@@ -237,6 +243,8 @@ class ShadowStore(RuntimeStore):
                         pending=pending,
                         degraded=bool(pending or any(m['status'] != 'COMPLETE' and not m['reset'] for m in manifests)),
                         mismatches=sum(c.get('matches') is False for c in comparisons),
+                        broker_observations=sum(json.loads(r.payload_json).get('source') == 'kiwoom' for r in rows),
+                        comparison_unavailable=sum(c.get('eligible') is False for c in comparisons),
                         gaps=[dict(scan_id=m['scan_id'], status=m['status'], reset=m['reset'],
                                    source_status=m['source_status'], missing=missing[str(m['scan_id'])])
                               for m in manifests if m['status'] != 'COMPLETE'],

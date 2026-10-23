@@ -52,6 +52,8 @@ class HoldingCapture:
         self.results = {}
         self.observations = []
         self.ready = False
+        self.broker = None
+        self.broker_evaluated = False
         self.version = strategy_version()
 
     def safe(self, method, *args):
@@ -78,7 +80,7 @@ class HoldingCapture:
                 ).order_by(Transaction.trade_date, Transaction.id).all()
                 anchor = episode_anchor(transactions)
                 absent = max((number for number, items in inventories
-                              if not any(e['holding_id'] == holding.id for e in items)), default=0)
+                              if not any(e.get('source', 'manual') == 'manual' and e['holding_id'] == holding.id for e in items)), default=0)
                 identity = dict(account=holding.account_id, holding=holding.id,
                                 created=holding.created_at.isoformat() if holding.created_at else None,
                                 entry_transaction=anchor, last_observed_absence=absent)
@@ -99,7 +101,12 @@ class HoldingCapture:
                                      last_alert_at=holding.last_alert_at))
         expected = [{k: v[k] for k in ('id', 'episode_id', 'holding_id')}
                     for v in self.inputs.values()]
-        self.store.begin_capture(self.scan_id, expected, now=datetime.now(timezone.utc))
+        from .broker_capture import BrokerCapture
+        self.broker = BrokerCapture(self.scan_id, self.store, self.version)
+        broker_expected, snapshot = self.broker.prepare()
+        expected.extend(broker_expected)
+        self.store.begin_capture(self.scan_id, expected, now=datetime.now(timezone.utc),
+                                 broker_snapshot=snapshot)
         self.ready = True
 
     def group(self, holdings, df, weekly, benchmark, checked_at):
@@ -185,6 +192,9 @@ class HoldingCapture:
     def finish(self):
         if not self.ready:
             return
+        if self.broker is not None and not self.broker_evaluated:
+            self.observations.extend(self.broker.evaluate())
+            self.broker_evaluated = True
         for observation in self.observations:
             try:
                 self.store.record_observation(observation)
@@ -193,7 +203,7 @@ class HoldingCapture:
                                self.scan_id, observation.holding_id, type(exc).__name__)
         self.store.finish_capture(self.scan_id, now=datetime.now(timezone.utc))
         summary = self.store.replay()
-        summary['comparison_mismatches'] = sum(not o.payload['comparison']['matches'] for o in self.observations)
+        summary['comparison_mismatches'] = sum(o.payload['comparison'].get('matches') is False for o in self.observations)
         logger.info('Runtime shadow scan=%s summary=%s', self.scan_id, summary)
         if summary.get('degraded') or summary['comparison_mismatches']:
             logger.warning('Runtime DEGRADED scan=%s', self.scan_id)

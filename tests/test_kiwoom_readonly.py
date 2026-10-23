@@ -274,3 +274,21 @@ def test_profile_file_rejects_open_permissions(tmp_path):
 
     with pytest.raises(KiwoomError, match="600"):
         load_profile_configs(profiles_file)
+
+
+@pytest.mark.parametrize('method,key', [
+    ('get_account_balance', 'acnt_evlt_remn_indv_tot'),
+    ('get_overseas_account_balance', 'result_list'),
+])
+@pytest.mark.parametrize('headers,rows,complete', [
+    ({}, [], True),
+    ({'cont-yn': 'Y', 'next-key': 'next'}, [], False),
+    ({'cont-yn': 'Y'}, [], False),
+    ({}, None, False),
+    ({}, ['invalid'], False),
+])
+def test_balance_reports_snapshot_completeness(monkeypatch, method, key, headers, rows, complete):
+    monkeypatch.setattr('trading.kiwoom_readonly.time.sleep', lambda _: None)
+    session = _Session([_Response({'return_code': 0, key: rows}, headers=headers)])
+    client = KiwoomReadOnlyClient(KiwoomConfig('key', 'secret'), session)
+    assert getattr(client, method)('token', max_pages=1)['complete'] is complete
