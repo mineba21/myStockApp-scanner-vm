@@ -245,6 +245,7 @@ async def get_results(market: str = "ALL", signal_type: str = "ALL",
              # Strict Weinstein 메타데이터 (Phase 4 P2 + UI Phase)
              "strict_filter_passed": r.strict_filter_passed,
              "filter_reasons": _parse_filter_reasons(r.filter_reasons),
+             "sector_context": json.loads(r.sector_context) if r.sector_context else None,
              "sector_name": r.sector_name,
              "sector_stage": r.sector_stage,
              # 부가 메타데이터 (UI 카드 보강용 — 후방 호환 유지)

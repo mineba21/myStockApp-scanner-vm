@@ -863,6 +863,9 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
     import time
 
     tickers = get_all_kr_tickers(market_filter=kr_universe)
+    from scanner.sector_trends import kr_sector_snapshots
+    # Keep only Close series after analysis to bound memory; persist after aggregation.
+    prices, pending = {}, []
     signals, count = [], 0
 
     for i, info in enumerate(tickers):
@@ -874,13 +877,19 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
         res = analyze_stock(df, info["ticker"], info["name"], "KR",
                             benchmark_close, market_condition, diag=diag)
         count += 1
+        prices[info["ticker"]] = df[["Close"]].copy()
+        pending.append((res, diag))
+        time.sleep(0.05)
+
+    contexts = kr_sector_snapshots(tickers, prices)
+    for res, diag in pending:
+        if res is not None:
+            res["sector_context"] = contexts.get(res["ticker"])
         notified = bool(res and _process_signal(db, res, "KR",
                                                 market_condition, benchmark_close))
         if notified:
             signals.append(res)
         _funnel_record(funnel, res, diag, notified)
-        time.sleep(0.05)
-
     return signals, count
 
 
@@ -903,6 +912,8 @@ def _scan_us(db, universe, benchmark_close=None, market_condition=None,
             # Gate 2 입력. analyze_stock 은 순수 계산이라 유니버스 메타데이터를
             # 모르므로 여기서 실어 준다 (S&P500 목록에만 존재).
             res["_gics_sector"] = info.get("sector")
+            from scanner.sector_trends import us_sector_snapshot
+            res["sector_context"] = us_sector_snapshot(info)
         count += 1
         notified = bool(res and _process_signal(db, res, "US",
                                                 market_condition, benchmark_close))
@@ -1200,6 +1211,8 @@ def _save(db, signal: dict):
             existing.stop_loss            = signal.get("stop_loss")
             existing.sector_name          = signal.get("sector_name")
             existing.sector_stage         = signal.get("sector_stage")
+            existing.sector_context = (json.dumps(signal["sector_context"], ensure_ascii=False)
+                                       if signal.get("sector_context") else None)
             existing.rs_trend             = signal.get("rs_trend")
             existing.rs_zero_crossed      = signal.get("rs_zero_crossed")
             existing.strict_filter_passed = signal.get("strict_filter_passed")
@@ -1259,6 +1272,8 @@ def _save(db, signal: dict):
                 stop_loss            = signal.get("stop_loss"),
                 sector_name          = signal.get("sector_name"),
                 sector_stage         = signal.get("sector_stage"),
+                sector_context = (json.dumps(signal["sector_context"], ensure_ascii=False)
+                                  if signal.get("sector_context") else None),
                 rs_trend             = signal.get("rs_trend"),
                 rs_zero_crossed      = signal.get("rs_zero_crossed"),
                 strict_filter_passed = signal.get("strict_filter_passed"),

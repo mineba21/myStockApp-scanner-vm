@@ -18,6 +18,13 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_display_sector_providers(monkeypatch):
+    from scanner import sector_trends
+    monkeypatch.setattr(sector_trends, 'kr_sector_map', lambda: {})
+    monkeypatch.setattr(sector_trends, 'us_sector_snapshot', lambda info: None)
+
+
 def _make_daily(n=260, start_price=100.0, step=0.5):
     """Phase 2 단위 테스트용 합성 일봉 OHLCV."""
     dates  = [date(2022, 1, 1) + timedelta(days=i) for i in range(n)]

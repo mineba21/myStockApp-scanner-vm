@@ -85,6 +85,7 @@ class ScanResult(Base):
     # ── Strict Weinstein filter (Phase 1 scaffold) ──────────────
     stop_loss            = Column(Float,       nullable=True)              # Gate 8: BUY 시그널 손절가
     sector_name          = Column(String(50),  nullable=True)              # Gate 2: 종목 sector (후속 plan)
+    sector_context       = Column(Text, nullable=True)  # display-only versioned JSON snapshot
     sector_stage         = Column(String(10),  nullable=True)              # Gate 2: sector Stage1-4
     rs_trend             = Column(String(10),  nullable=True)              # Gate 6: RISING/FALLING/FLAT
     rs_zero_crossed      = Column(Boolean,     nullable=True)              # Gate 6: 최근 RS 0선 음→양 전환

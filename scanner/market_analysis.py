@@ -117,7 +117,10 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list)
         low52  = float(close.iloc[-252:].min()) if len(close) >= 252 else float(close.min())
         pos52  = round((cur_p - low52) / (high52 - low52) * 100, 1) if high52 != low52 else 50.0
 
+        from scanner.sector_trends import price_trend
+
         out_list.append({
+            "recent_trend": price_trend(df, market),
             "ticker": idx["ticker"],
             "name":   idx["name"],
             "market": market,

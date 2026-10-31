@@ -360,16 +360,22 @@
                 :title="'돌파 주 거래량: 직전 4주 평균 대비 '+r.weekly_volume_ratio_4w.toFixed(2)+'배 · 품질 기준 '+(r.weekly_volume_quality_threshold??1.2).toFixed(2)+'배 (soft flag) · 현행 hard 10주 '+(r.weekly_volume_ratio==null?'-':r.weekly_volume_ratio.toFixed(2)+'배')"
                 x-text="'주봉 '+r.weekly_volume_ratio_4w.toFixed(2)+'x '+(r.weekly_volume_quality_passed===true?'✓':'△')"></span>
             </template>
-            <!-- Sector 배지 (sector_name truthy 일 때만 — NULL 이면 미렌더) -->
-            <template x-if="r.sector_name">
-              <span class="text-xs px-2 py-0.5 rounded-full font-semibold bg-indigo-50 text-indigo-700"
-                x-text="r.sector_name"></span>
-            </template>
           </div>
           <span class="text-xs text-slate-400 flex-shrink-0">
             <span class="text-slate-300">시그널</span> <span x-text="r.signal_date||r.scan_time?.slice(0,10)"></span>
           </span>
         </div>
+        <div class="flex flex-wrap gap-1.5 mb-1">
+          <!-- Display snapshot is independent from the weekly Strict Stage. -->
+          <span class="text-xs px-2 py-0.5 rounded-full font-semibold bg-indigo-50 text-indigo-700"
+            x-text="r.sector_context?.name || r.sector_name || '섹터 미분류'"></span>
+          <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+            :class="sectorTrendClass(r.sector_context)"
+            :title="sectorTrendDetail(r.sector_context)"
+            x-text="sectorTrendLabel(r.sector_context)"></span>
+        </div>
+        <p class="text-xs text-slate-400 mb-2" x-show="r.sector_context?.as_of"
+          x-text="'섹터 기준 '+(r.sector_context?.as_of || '')+(r.sector_context?.total_members != null ? ' · 표본 '+r.sector_context.members+'/'+r.sector_context.total_members : '')"></p>
         <p class="font-bold text-slate-900" x-text="r.name"></p>
         <p class="text-xs text-slate-400 mb-3" x-text="r.ticker"></p>
         <template x-if="r.market === 'US'">
@@ -1935,6 +1941,25 @@ const REASON_LABELS_KO = {
   r_pct_too_wide:             '손절폭이 최대 R 범위를 초과',
 };
 function reasonLabel(key) { return REASON_LABELS_KO[key] || key; }
+
+const SECTOR_TREND_LABELS = {STRONG_UP:'강한 상승', UP:'상승', FLAT:'횡보', DOWN:'하락', STRONG_DOWN:'강한 하락'};
+function sectorTrendLabel(c) {
+  if (c?.status !== 'OK') return c?.status === 'STALE' ? '추세 미확인 · 오래된 시세' : '추세 미확인';
+  return (SECTOR_TREND_LABELS[c.trend] || '추세 미확인') + ' · 20일 ' + (c.return_20d_pct >= 0 ? '+' : '') + c.return_20d_pct.toFixed(2) + '%' +
+    (c.proxy === '스캔 업종 평균' ? ' · 스캔 업종 평균' : '');
+}
+function sectorTrendClass(c) {
+  if (c?.status !== 'OK') return 'bg-slate-100 text-slate-500';
+  return {STRONG_UP:'bg-emerald-200 text-emerald-900', UP:'bg-emerald-50 text-emerald-700',
+    FLAT:'bg-slate-100 text-slate-600', DOWN:'bg-red-50 text-red-700', STRONG_DOWN:'bg-red-200 text-red-900'}[c.trend] || 'bg-slate-100 text-slate-500';
+}
+function sectorTrendDetail(c) {
+  if (!c) return '이전 스캔: 다음 스캔에서 섹터 추세를 수집합니다.';
+  const status = {OK:'정상', UNMAPPED:'분류 없음', UNAVAILABLE:'가격 조회 불가', STALE:'오래된 시세', INSUFFICIENT_DATA:'이력 또는 표본 부족'};
+  return [c.classification_source, c.performance_source, c.proxy, c.as_of && ('기준일 ' + c.as_of),
+    c.total_members != null && ('표본 ' + c.members + '/' + c.total_members), status[c.status],
+    '20거래일 수익률: ±5% 강한 추세, ±1% 추세, 사이 횡보 · 스캔 시점 저장값 · 주봉 Stage와 별도'].filter(Boolean).join(' · ');
+}
 
 function app() {
   return {

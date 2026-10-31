@@ -9,6 +9,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 _cache: dict = {}   # universe_key → list
+_cache_expiry: dict = {}  # monotonic deadlines; refresh GICS classifications daily
 
 # SP500/NASDAQ100 중복 등록되는 대표 심볼 제외 (BRK-B=BRK-A 등)
 EXCLUDE_US: set = {"GOOGL"}   # GOOG 와 중복; 필요 시 추가
@@ -141,7 +142,7 @@ def get_nasdaq_tickers() -> list:
 def get_all_us_tickers(universe: str = "sp500+nasdaq100") -> list:
     global _cache
     key = universe.lower().strip()
-    if key in _cache:
+    if key in _cache and time.monotonic() < _cache_expiry.get(key, 0):
         return _cache[key]
 
     seen, tickers = set(), []
@@ -172,6 +173,7 @@ def get_all_us_tickers(universe: str = "sp500+nasdaq100") -> list:
 
     logger.info(f"US 유니버스 [{universe}]: {len(tickers)}개")
     _cache[key] = tickers
+    _cache_expiry[key] = time.monotonic() + (86400 if tickers else 3600)
     return tickers
 
 

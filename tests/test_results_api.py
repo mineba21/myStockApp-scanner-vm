@@ -358,3 +358,26 @@ class TestResultsBulkDelete:
 
         r2 = client.get("/api/results?include_rejected=true")
         assert r2.json() == []
+
+
+def test_sector_snapshot_save_update_and_api(client_with_db):
+    from scanner.scan_engine import _save
+    from database.models import ScanResult
+    client, factory = client_with_db
+    signal = dict(ticker='SECTOR', name='Sector test', market='KR', signal_type='BREAKOUT',
+                  signal_date=datetime.utcnow().strftime('%Y-%m-%d'), price=100, ma150=90,
+                  sector_context=dict(version=1, name='반도체', trend='UP', status='OK',
+                                      return_20d_pct=2, as_of='2026-10-30'))
+    with factory() as db:
+        _save(db, signal)
+        assert db.query(ScanResult).count() == 1
+        assert json.loads(db.query(ScanResult).one().sector_context)['trend'] == 'UP'
+        signal['sector_context']['trend'] = 'DOWN'
+        _save(db, signal)
+        assert db.query(ScanResult).count() == 1
+    row = client.get('/api/results', params={'prioritize_13f':False}).json()[0]
+    assert row['sector_context']['name'] == '반도체'
+    assert row['sector_context']['trend'] == 'DOWN'
+    _insert_result(factory, ticker='LEGACY-SECTOR', strict_filter_passed=None)
+    rows = client.get('/api/results', params={'prioritize_13f':False}).json()
+    assert next(r for r in rows if r['ticker']=='LEGACY-SECTOR')['sector_context'] is None
