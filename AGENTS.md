@@ -5,6 +5,7 @@
 
 - ETF/account2 작업: `docs/etf_asset_allocation.md`, `docs/etf_rebalance_review.md`를 먼저 읽는다.
 - 스캐너 작업: `docs/step1_review_checklist.md`, `docs/step2_review_checklist.md`를 먼저 읽는다.
+- 섹터 표시·최근 추세: `docs/sector_trends.md`를 먼저 읽는다. 표시 전용이며 Gate 2·매매 판정에 섞지 않는다.
 - 스캐너 MCP/조회 연결: `docs/scanner_read_mcp.md`를 먼저 읽는다. 조회키의 계좌·주문 권한을 확대하지 않는다.
 - 스캐너 후보 매수(account1 미국, account4 국내): `docs/scanner_buy_orders.md`를 먼저 읽는다. 미검증 항목과 시장별 전송 스위치를 유지한다.
 - 계좌 현황 MCP: `docs/portfolio_read_mcp.md`를 먼저 읽는다. `portfolio:read`는 스캐너·사이트·주문 자격 증명과 분리한다.

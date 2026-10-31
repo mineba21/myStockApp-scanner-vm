@@ -81,6 +81,15 @@ def get_market_stages(force: bool = False) -> Dict:
     return result
 
 
+def cached_market_stages() -> Dict:
+    """마지막으로 계산한 지수·섹터 분석을 네트워크 조회 없이 돌려준다 (없으면 빈 dict).
+
+    스캔은 시작할 때 ``get_market_stages()`` 를 한 번 부르므로, 스캔 중 종목별 표시
+    정보는 이 값을 읽어 같은 스냅샷을 쓰고 캐시 만료로 인한 재조회를 일으키지 않는다.
+    """
+    return _cache or {}
+
+
 def get_benchmark_close(market: str = "US") -> "pd.Series | None":
     """스캔 엔진에서 RS 계산용 벤치마크 종가 시리즈를 반환합니다."""
     try:
@@ -117,11 +126,18 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list)
         low52  = float(close.iloc[-252:].min()) if len(close) >= 252 else float(close.min())
         pos52  = round((cur_p - low52) / (high52 - low52) * 100, 1) if high52 != low52 else 50.0
 
+        # 섹터 최근 추세(표시 전용). 이미 받은 종가만 쓰며 추가 조회가 없다.
+        from scanner.sector_trends import trailing_return
+        recent = trailing_return(close)
+
         out_list.append({
             "ticker": idx["ticker"],
             "name":   idx["name"],
             "market": market,
             "stage":  stage,
+            "return_20d":    recent["return_pct"],
+            "return_asof":   recent["asof"],
+            "return_status": recent["status"],
             # 종목 판정(Gate 3)과 같은 주봉 30-SMA 기준. Gate 2 와 섹터 요약이
             # 이 값을 쓴다. 위의 일봉 ``stage`` 는 _condition() → market_condition
             # 이 계속 사용하므로 시장 필터 동작은 불변이다.
