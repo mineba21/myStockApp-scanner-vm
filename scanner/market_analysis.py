@@ -84,8 +84,8 @@ def get_market_stages(force: bool = False) -> Dict:
 def cached_market_stages() -> Dict:
     """마지막으로 계산한 지수·섹터 분석을 네트워크 조회 없이 돌려준다 (없으면 빈 dict).
 
-    스캔은 시작할 때 ``get_market_stages()`` 를 한 번 부르므로, 스캔 중 종목별 표시
-    정보는 이 값을 읽어 같은 스냅샷을 쓰고 캐시 만료로 인한 재조회를 일으키지 않는다.
+    이 dict 는 캐시 만료·수동 갱신 때 교체된다. 스캔 중 섹터 추세 표시는 이 값을 종목마다
+    다시 읽지 않고, 스캔 시작 때 고정한 행을 ``_scan_us`` → ``_process_signal`` 로 넘겨 쓴다.
     """
     return _cache or {}
 

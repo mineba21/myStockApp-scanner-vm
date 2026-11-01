@@ -426,3 +426,86 @@ def test_results_api_returns_sector_snapshot_and_rule(monkeypatch):
     assert "20거래일" in kr["sector_trend_rule"] and "±5%" in kr["sector_trend_rule"]
     legacy = rows["OLD"]
     assert legacy["sector_name"] is None and legacy["sector_trend"] is None and legacy["sector_source"] is None
+
+
+# ── 스캔 내 단일 스냅샷 (PR #6 리뷰) ─────────────────────────────
+
+def test_scan_us_pins_sector_rows_even_if_market_cache_is_replaced(monkeypatch):
+    """스캔 도중 시장 캐시가 만료·수동 갱신돼 교체돼도 같은 스캔은 시작 때 행을 쓴다."""
+    import scanner.us_stocks as us
+    import scanner.weinstein as weinstein
+    from scanner import market_analysis as ma, scan_engine
+
+    start_rows = [{"ticker": "XLK", "return_20d": 6.4, "return_asof": "2026-10-30", "return_status": "OK"}]
+    later_rows = [{"ticker": "XLK", "return_20d": -6.0, "return_asof": "2026-10-31", "return_status": "OK"}]
+    infos = [{"ticker": t, "name": t, "sector": "Information Technology"} for t in ("AAA", "BBB")]
+
+    def batch(tickers, progress_callback=None):
+        for i, info in enumerate(infos):
+            if i == 1:   # 두 번째 종목 처리 전 캐시가 교체된다
+                monkeypatch.setattr(ma, "_cache", {"US_SECTORS": later_rows})
+            yield info, object()
+
+    monkeypatch.setattr(us, "get_all_us_tickers", lambda universe: infos)
+    monkeypatch.setattr(us, "get_us_batch", batch)
+    monkeypatch.setattr(weinstein, "analyze_stock",
+                        lambda df, ticker, name, *a, **k: signal(ticker=ticker, name=name))
+    captured = []
+
+    def fake_process(db, res, label, condition, bench, sector_rows=None):
+        scan_engine._attach_sector_context(res, sector_rows)
+        captured.append((res["ticker"], res["sector_trend"], res["sector_return_20d"]))
+        return False
+
+    monkeypatch.setattr(scan_engine, "_process_signal", fake_process)
+    monkeypatch.setattr(ma, "_cache", {"US_SECTORS": later_rows})
+    scan_engine._scan_us(None, "sp500", sector_rows=start_rows)
+    assert captured == [("AAA", "STRONG_UP", 6.4), ("BBB", "STRONG_UP", 6.4)]
+
+
+def test_scan_us_without_rows_copies_the_cache_once(monkeypatch):
+    import scanner.us_stocks as us
+    import scanner.weinstein as weinstein
+    from scanner import market_analysis as ma, scan_engine
+
+    first = [{"ticker": "XLK", "return_20d": 2.0, "return_asof": "2026-10-30", "return_status": "OK"}]
+    infos = [{"ticker": t, "name": t, "sector": "Information Technology"} for t in ("AAA", "BBB")]
+
+    def batch(tickers, progress_callback=None):
+        for i, info in enumerate(infos):
+            if i == 1:
+                monkeypatch.setattr(ma, "_cache", {"US_SECTORS": []})
+            yield info, object()
+
+    monkeypatch.setattr(ma, "_cache", {"US_SECTORS": first})
+    monkeypatch.setattr(us, "get_all_us_tickers", lambda universe: infos)
+    monkeypatch.setattr(us, "get_us_batch", batch)
+    monkeypatch.setattr(weinstein, "analyze_stock",
+                        lambda df, ticker, name, *a, **k: signal(ticker=ticker, name=name))
+    seen = []
+    monkeypatch.setattr(scan_engine, "_process_signal",
+                        lambda db, res, label, cond, bench, sector_rows=None:
+                        seen.append(sector_rows) or False)
+    scan_engine._scan_us(None, "sp500")
+    assert seen == [first, first]
+
+
+def test_process_signal_threads_rows_into_saved_snapshot(monkeypatch):
+    from database.models import ScanResult
+    from scanner import market_analysis as ma, scan_engine
+
+    later = [{"ticker": "XLK", "return_20d": -6.0, "return_asof": "2026-10-31", "return_status": "OK"}]
+
+    def gate2_refreshes_cache(gics, market="US"):
+        # 리뷰 지적 경로: Gate 2 의 get_sector_stage 가 만료된 캐시를 새로 채운다.
+        monkeypatch.setattr(ma, "_cache", {"US_SECTORS": later})
+        return "기술", "STAGE2"
+
+    monkeypatch.setattr(ma, "get_sector_stage", gate2_refreshes_cache)
+    monkeypatch.setattr("scanner.strict_filter.apply_strict_filter", lambda sig, ctx: (True, []))
+    monkeypatch.setattr(scan_engine, "_sync_upthrust_cooldown", lambda db, res: None)
+    db = fresh_db()
+    assert scan_engine._process_signal(db, signal(_gics_sector="Information Technology"),
+                                       "US", "BULL", None, sector_rows=ETF_ROWS) is True
+    row = db.query(ScanResult).one()
+    assert (row.sector_trend, row.sector_return_20d) == ("STRONG_UP", 6.4)

@@ -489,7 +489,8 @@ def run_scan(market: str = "ALL", universe: str = None,
         if market in ("US", "ALL"):
             funnels["US"] = _new_funnel()
             sigs, cnt = _scan_us(db, us_universe, us_bench, us_condition,
-                                 funnel=funnels["US"])
+                                 funnel=funnels["US"],
+                                 sector_rows=market_stages.get("US_SECTORS", []))
             funnel_counts["US"] = cnt
             buy_signals.extend(sigs); total_scanned += cnt
 
@@ -787,20 +788,24 @@ def _sync_upthrust_cooldown(db, signal: dict) -> None:
     db.flush()
 
 
-def _attach_sector_context(res: dict) -> None:
+def _attach_sector_context(res: dict, sector_rows: Optional[list] = None) -> None:
     """표시용 섹터 분류·최근 추세를 signal 에 싣는다 (docs/sector_trends.md).
 
     Gate 2 입력(``sector_stage``)과 판정은 바꾸지 않는다. 실패해도 저장은 계속한다.
     국내는 분류만 싣고, 업종 추세는 스캔이 끝난 뒤 ``_apply_kr_sector_trends`` 가 채운다.
+
+    ``sector_rows`` 는 스캔 시작 때 고정한 미국 섹터 ETF 행이다. 스캔 도중 시장 캐시가
+    만료·수동 갱신돼도 같은 스캔의 종목들이 같은 스냅샷을 쓰도록 호출부가 넘긴다.
+    넘기지 않은 호출(스캔 밖)만 현재 캐시를 읽으며, 이때도 네트워크 조회는 하지 않는다.
     """
     from scanner import sector_trends
     try:
         if res.get("market") == "US":
-            # run_scan 시작 때 계산한 스냅샷만 읽는다(스캔 중 재조회 없음, 없으면 UNAVAILABLE).
-            from scanner.market_analysis import cached_market_stages
-            rows = cached_market_stages().get("US_SECTORS", [])
+            if sector_rows is None:
+                from scanner.market_analysis import cached_market_stages
+                sector_rows = cached_market_stages().get("US_SECTORS", [])
             res.update(sector_trends.us_sector_context(
-                res["ticker"], res.get("_gics_sector"), rows))
+                res["ticker"], res.get("_gics_sector"), sector_rows))
         elif res.get("market") == "KR":
             res.update(sector_trends.kr_sector_name(
                 res["ticker"], sector_trends.kr_industry_map()))
@@ -808,8 +813,8 @@ def _attach_sector_context(res: dict) -> None:
         logger.warning("섹터 표시 정보 산출 실패 %s: %s", res.get("ticker"), e)
 
 
-def _save_signal(db, res: dict) -> None:
-    _attach_sector_context(res)
+def _save_signal(db, res: dict, sector_rows: Optional[list] = None) -> None:
+    _attach_sector_context(res, sector_rows)
     _save(db, res)
 
 
@@ -840,7 +845,7 @@ def _apply_kr_sector_trends(db, universe: list, returns: dict, started_at: datet
 
 def _process_signal(db, res: dict, market_label: str,
                     market_condition: Optional[str],
-                    benchmark_close) -> bool:
+                    benchmark_close, sector_rows: Optional[list] = None) -> bool:
     """analyze_stock 결과를 받아 legacy 시장 필터 + strict 필터 + persist/notify
     분기를 한 곳에서 처리하고, 알림 대상이면 True 를 반환.
 
@@ -884,7 +889,7 @@ def _process_signal(db, res: dict, market_label: str,
 
     # 3) persist/notify 분기
     if passed:
-        _save_signal(db, res)
+        _save_signal(db, res, sector_rows)
         logger.info(f"[{market_label}] {ticker} {res['name']}: "
                     f"{res['signal_type']} Q={res.get('signal_quality','?')} "
                     f"strict=PASS")
@@ -897,19 +902,19 @@ def _process_signal(db, res: dict, market_label: str,
 
     # Entry gate는 legacy strict-mode 토글과 독립된 명시적 opt-in이다.
     if entry_rejected:
-        _save_signal(db, res)
+        _save_signal(db, res, sector_rows)
         logger.debug(f"[{market_label}] {ticker} entry-control reject: {reasons}")
         return False
 
     # 거부 — strict 모드 ON
     if STRICT_WEINSTEIN_MODE:
         if STRICT_PERSIST_REJECTED:
-            _save_signal(db, res)
+            _save_signal(db, res, sector_rows)
         logger.debug(f"[{market_label}] {ticker} strict reject: {reasons}")
         return False
 
     # STRICT_WEINSTEIN_MODE=False (legacy 호환) — 통과 처리
-    _save_signal(db, res)
+    _save_signal(db, res, sector_rows)
     return True
 
 
@@ -948,9 +953,16 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
 
 
 def _scan_us(db, universe, benchmark_close=None, market_condition=None,
-             funnel=None):
+             funnel=None, sector_rows: Optional[list] = None):
     from scanner.us_stocks import get_all_us_tickers, get_us_batch
     from scanner.weinstein import analyze_stock
+
+    # 섹터 추세 표시는 이 스캔 내내 한 스냅샷을 쓴다. run_scan 이 시작 때 받은 행을 넘기고,
+    # 넘기지 않으면 지금 캐시를 한 번만 복사해 고정한다(이후 캐시 교체와 무관).
+    if sector_rows is None:
+        from scanner.market_analysis import cached_market_stages
+        sector_rows = cached_market_stages().get("US_SECTORS", [])
+    sector_rows = list(sector_rows)
 
     tickers = get_all_us_tickers(universe)
     results = get_us_batch(tickers, progress_callback=_prog)
@@ -968,7 +980,8 @@ def _scan_us(db, universe, benchmark_close=None, market_condition=None,
             res["_gics_sector"] = info.get("sector")
         count += 1
         notified = bool(res and _process_signal(db, res, "US",
-                                                market_condition, benchmark_close))
+                                                market_condition, benchmark_close,
+                                                sector_rows))
         if notified:
             signals.append(res)
         _funnel_record(funnel, res, diag, notified)
