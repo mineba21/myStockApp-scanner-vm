@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import statistics
+from collections import Counter
 import threading
 import time
 from datetime import date, datetime
@@ -100,31 +101,40 @@ def _as_date(value) -> Optional[date]:
 def trailing_return(close, *, now=None, lookback: Optional[int] = None) -> Dict[str, Any]:
     """종가 시리즈의 최근 ``lookback`` 거래일 수익률.
 
-    결측·0 이하·비유한 값과 미래 날짜를 버리고, 같은 날짜가 여러 번이면 마지막 값을 쓴다.
-    값을 채워 넣지(forward-fill) 않는다.
+    날짜를 정리(같은 날짜는 마지막 값, 정렬, 미래 날짜 제외)한 뒤 **먼저 최근 lookback+1개
+    거래일 구간을 고정**한다. 그 구간 안에 결측·0 이하·비유한 값이 하나라도 있으면
+    INSUFFICIENT 로 둔다. 결측을 지우고 더 오래된 가격으로 시작일을 당기거나 값을 채워 넣지
+    않는다(구간이 실제 N거래일이 아니게 되기 때문).
 
-    Returns: ``{"status": "OK"|INSUFFICIENT|STALE|UNAVAILABLE, "return_pct", "asof"}``
+    Returns: ``{"status": "OK"|INSUFFICIENT|STALE|UNAVAILABLE, "return_pct", "asof", "start"}``
+    ``start`` 는 구간 시작 거래일(국내 업종 집계가 같은 구간끼리만 묶는 데 쓴다).
     """
     lookback = SECTOR_TREND_LOOKBACK_DAYS if lookback is None else lookback
+    missing = {"status": UNAVAILABLE, "return_pct": None, "asof": None, "start": None}
     if close is None:
-        return {"status": UNAVAILABLE, "return_pct": None, "asof": None}
+        return missing
     try:
         series = pd.to_numeric(pd.Series(close), errors="coerce")
-        series.index = pd.to_datetime(series.index)
+        series.index = pd.to_datetime(series.index, errors="coerce")
     except (TypeError, ValueError):
-        return {"status": UNAVAILABLE, "return_pct": None, "asof": None}
+        return missing
     if getattr(series.index, "tz", None) is not None:
         series.index = series.index.tz_localize(None)
-    series = series[series.apply(lambda v: math.isfinite(v) and v > 0)]
+    series = series[series.index.notna()]
     series = series[~series.index.duplicated(keep="last")].sort_index()
     today = _as_date(now) or date.today()
     series = series[[d.date() <= today for d in series.index]]
-    if len(series) < lookback + 1:
-        asof = series.index[-1].date().isoformat() if len(series) else None
-        return {"status": INSUFFICIENT, "return_pct": None, "asof": asof}
-    last, first = float(series.iloc[-1]), float(series.iloc[-(lookback + 1)])
-    asof_date = series.index[-1].date()
-    result = {"status": "OK", "return_pct": (last / first - 1) * 100, "asof": asof_date.isoformat()}
+    if len(series) == 0:
+        return missing
+    window = series.iloc[-(lookback + 1):]
+    asof_date = window.index[-1].date()
+    result = {"status": INSUFFICIENT, "return_pct": None, "asof": asof_date.isoformat(),
+              "start": window.index[0].date().isoformat()}
+    if len(window) < lookback + 1:
+        return result
+    if not all(math.isfinite(v) and v > 0 for v in window):
+        return result
+    result.update(status="OK", return_pct=(float(window.iloc[-1]) / float(window.iloc[0]) - 1) * 100)
     if (today - asof_date).days > SECTOR_TREND_STALE_DAYS:
         result["status"] = STALE
     return result
@@ -294,13 +304,17 @@ def aggregate_kr_sectors(industries: Dict[str, str], universe: Iterable[str],
     """국내 업종별 추세. 같은 업종 유니버스 종목의 N거래일 수익률 중앙값.
 
     - 분모(members): 이번 유니버스에서 그 업종으로 분류된 종목(가격 실패 포함).
-    - 유효 표본: 상태 OK 이고 기준일이 유니버스 최신 기준일과 같은 종목.
+    - 유효 표본: 상태 OK 이고 구간(시작일·종료일)이 유니버스 기준 구간과 같은 종목.
     - 유효 표본이 최소 개수 미만이거나 비율이 최소 커버리지 미만이면 INSUFFICIENT.
     - 유니버스 최신 기준일 자체가 오래됐으면 STALE, 가격이 하나도 없으면 UNAVAILABLE.
     """
     universe = [str(t) for t in universe]
     ok = {t: r for t, r in returns.items() if r.get("status") in ("OK", STALE) and r.get("asof")}
     latest = max((r["asof"] for r in ok.values()), default=None)
+    # 같은 종료일 종목들의 가장 흔한 시작일을 기준 구간으로 삼는다. 구간 중간에 행이 빠진
+    # 종목(거래정지 등)은 시작일이 달라 표본에서 빠진다.
+    starts = Counter(r.get("start") for r in ok.values() if r["asof"] == latest)
+    window_start = starts.most_common(1)[0][0] if starts else None
     latest_stale = bool(latest) and (
         ((_as_date(now) or date.today()) - date.fromisoformat(latest)).days > SECTOR_TREND_STALE_DAYS)
 
@@ -319,8 +333,8 @@ def aggregate_kr_sectors(industries: Dict[str, str], universe: Iterable[str],
                              "sector_trend_sample": 0}
             continue
         values = [ok[t]["return_pct"] for t in tickers
-                  if t in ok and ok[t]["asof"] == latest and ok[t].get("return_pct") is not None
-                  and math.isfinite(ok[t]["return_pct"])]
+                  if t in ok and ok[t]["asof"] == latest and ok[t].get("start") == window_start
+                  and ok[t].get("return_pct") is not None and math.isfinite(ok[t]["return_pct"])]
         base["sector_trend_sample"] = len(values)
         if latest_stale:
             out[industry] = {**base, "sector_trend": STALE, "sector_return_20d": None}

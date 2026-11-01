@@ -52,7 +52,8 @@ def test_trailing_return_uses_exactly_lookback_plus_one_closes():
     # 22개 중 맨 앞(50)은 20거래일 창 밖이라 쓰이지 않아야 한다. 창: 100 → 110.
     series = closes([50.0, 100.0] + [105.0] * 19 + [110.0])
     result = st.trailing_return(series, now=NOW)
-    assert result == {"status": "OK", "return_pct": pytest.approx(10.0), "asof": "2026-10-30"}
+    assert result == {"status": "OK", "return_pct": pytest.approx(10.0), "asof": "2026-10-30",
+                      "start": series.index[-21].date().isoformat()}
 
 
 def test_trailing_return_is_insufficient_below_lookback_plus_one():
@@ -61,14 +62,30 @@ def test_trailing_return_is_insufficient_below_lookback_plus_one():
     assert result["asof"] == "2026-10-30"
 
 
-def test_trailing_return_drops_bad_values_without_filling():
+def test_trailing_return_ignores_bad_values_outside_the_window():
     series = ramp(4.0, n=21)
     dirty = pd.concat([series, closes([np.nan, 0.0, -5.0, np.inf], end="2026-09-01")]).sort_index()
     assert st.trailing_return(dirty, now=NOW)["return_pct"] == pytest.approx(4.0)
-    # 유효 값이 20개가 되면 채우지 않고 부족으로 남긴다.
-    holed = series.copy()
-    holed.iloc[5] = np.nan
-    assert st.trailing_return(holed, now=NOW)["status"] == st.INSUFFICIENT
+
+
+def test_gap_inside_recent_window_does_not_stretch_it_back():
+    """PR #6 리뷰 재현: 21개보다 긴 이력에서 최근 구간 중간이 비면 시작일을 과거로 당기지 않는다."""
+    s = pd.Series([50.0] + [100.0] * 21, index=pd.bdate_range(end="2026-10-30", periods=22))
+    assert st.trailing_return(s, now=NOW)["return_pct"] == pytest.approx(0.0)   # FLAT
+    s.iloc[10] = np.nan
+    result = st.trailing_return(s, now=NOW)
+    assert result["status"] == st.INSUFFICIENT and result["return_pct"] is None   # +100% 아님
+    assert result["start"] == s.index[1].date().isoformat()                       # 구간은 그대로
+
+
+@pytest.mark.parametrize("bad", [np.nan, 0.0, -1.0, np.inf, "x"])
+def test_any_bad_value_inside_the_window_is_insufficient(bad):
+    s = pd.Series([100.0] * 30, index=pd.bdate_range(end="2026-10-30", periods=30), dtype=object)
+    s.iloc[-1 - 7] = bad
+    assert st.trailing_return(s, now=NOW)["status"] == st.INSUFFICIENT
+    s.iloc[-1 - 25] = bad          # 구간 밖의 결측만 남기면 정상 판정
+    s.iloc[-1 - 7] = 100.0
+    assert st.trailing_return(s, now=NOW)["status"] == "OK"
 
 
 def test_trailing_return_keeps_last_duplicate_and_ignores_future_rows():
@@ -199,8 +216,8 @@ def test_us_context_missing_data_states():
 
 # ── 국내 업종 집계 ───────────────────────────────────────────────
 
-def ok(pct, asof="2026-10-30"):
-    return {"status": "OK", "return_pct": pct, "asof": asof}
+def ok(pct, asof="2026-10-30", start="2026-10-02"):
+    return {"status": "OK", "return_pct": pct, "asof": asof, "start": start}
 
 
 def test_kr_aggregate_uses_median_so_one_outlier_does_not_flip_the_sector():
@@ -229,6 +246,16 @@ def test_kr_aggregate_excludes_members_not_on_the_latest_date():
     out = st.aggregate_kr_sectors(industries, "ABCD", returns, now=NOW)["화학"]
     assert out["sector_trend_sample"] == 3 and out["sector_trend"] == "UP"
     assert out["sector_trend_asof"] == "2026-10-30"
+
+
+def test_kr_aggregate_requires_the_same_window_start():
+    """종료일이 같아도 구간 중간 행이 빠져 시작일이 다른 종목은 다른 기간이라 제외한다."""
+    industries = {t: "화학" for t in "ABCDE"}
+    returns = {"A": ok(2.0), "B": ok(3.0), "C": ok(2.5), "D": ok(1.5),
+               "E": ok(40.0, start="2026-09-30")}
+    out = st.aggregate_kr_sectors(industries, "ABCDE", returns, now=NOW)["화학"]
+    assert out["sector_trend_sample"] == 4
+    assert out["sector_return_20d"] == pytest.approx(2.25)
 
 
 def test_kr_aggregate_stale_and_unavailable_states():
