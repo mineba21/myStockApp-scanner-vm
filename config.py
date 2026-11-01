@@ -179,9 +179,9 @@ STRICT_BLOCK_CAUTION_BREAKOUTS              = os.getenv("STRICT_BLOCK_CAUTION_BR
 STRICT_REQUIRE_SECTOR_STAGE2                = os.getenv("STRICT_REQUIRE_SECTOR_STAGE2", "false").lower() == "true"
 # Gate 2 를 적용하지 않을 시장 (쉼표 구분).
 #
-# 국내는 종목→섹터 매핑 소스가 아직 없다 — FinanceDataReader 의 KRX 목록에는
-# 섹터 컬럼이 없고, KRX-DESC 의 Industry 는 KSIC 158종이라 섹터 ETF 로 환원되지
-# 않는다. 그래서 KR 시그널은 sector_stage 가 항상 None 인데, _check_sector 는
+# 국내는 Gate 2 에 쓸 종목→섹터 ETF 매핑이 없다 — KRX-DESC 의 업종은 KSIC 158종이라
+# 섹터 ETF 로 환원되지 않는다(이 업종은 표시용 섹터·추세에만 쓴다, scanner/sector_trends.py).
+# 그래서 KR 시그널은 sector_stage 가 항상 None 인데, _check_sector 는
 # None 을 통과가 아니라 **실패**(sector_not_stage2)로 취급한다. 면제하지 않으면
 # 공통 플래그를 켜는 순간 KR 시그널이 전멸한다.
 SECTOR_GATE_EXEMPT_MARKETS = {
@@ -189,6 +189,15 @@ SECTOR_GATE_EXEMPT_MARKETS = {
     for _m in os.getenv("SECTOR_GATE_EXEMPT_MARKETS", "KR").split(",")
     if _m.strip()
 }
+
+# ── 섹터 최근 추세 (표시 전용, docs/sector_trends.md) ──────────────
+# 매수·매도·알림·Gate 2 판정에는 쓰지 않는다. N거래일 종가 수익률을 5단계로 나눈다.
+SECTOR_TREND_LOOKBACK_DAYS   = int(os.getenv("SECTOR_TREND_LOOKBACK_DAYS", "20"))
+SECTOR_TREND_STRONG_PCT      = float(os.getenv("SECTOR_TREND_STRONG_PCT", "5.0"))   # |수익률| ≥ 이 값 → 강한
+SECTOR_TREND_FLAT_PCT        = float(os.getenv("SECTOR_TREND_FLAT_PCT", "1.0"))     # |수익률| < 이 값 → 횡보
+SECTOR_TREND_STALE_DAYS      = int(os.getenv("SECTOR_TREND_STALE_DAYS", "7"))       # 마지막 봉이 이보다 오래되면 STALE
+SECTOR_TREND_KR_MIN_SAMPLE   = int(os.getenv("SECTOR_TREND_KR_MIN_SAMPLE", "3"))    # 국내 업종 최소 유효 종목 수
+SECTOR_TREND_KR_MIN_COVERAGE = float(os.getenv("SECTOR_TREND_KR_MIN_COVERAGE", "0.7"))  # 업종 내 유효 종목 비율
 
 # Gate 3 — Stock Weekly/Daily Stage
 STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA      = os.getenv("STRICT_REQUIRE_PRICE_ABOVE_WEEKLY_30MA", "true").lower() == "true"

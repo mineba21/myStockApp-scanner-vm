@@ -8,6 +8,12 @@ from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# 표시 전용 섹터 분류 출처·최근 추세 스냅샷 (scanner/sector_trends.py). 첫 항목은 분류 출처.
+SECTOR_TREND_FIELDS = (
+    "sector_source", "sector_trend", "sector_return_20d", "sector_trend_asof",
+    "sector_trend_basis", "sector_trend_sample", "sector_trend_members",
+)
+
 
 # ── Strict Weinstein 필터 통합 ────────────────────────────────────
 # Phase 4 — analyze_stock 결과 dict 에 ``apply_strict_filter`` 의
@@ -483,7 +489,8 @@ def run_scan(market: str = "ALL", universe: str = None,
         if market in ("US", "ALL"):
             funnels["US"] = _new_funnel()
             sigs, cnt = _scan_us(db, us_universe, us_bench, us_condition,
-                                 funnel=funnels["US"])
+                                 funnel=funnels["US"],
+                                 sector_rows=market_stages.get("US_SECTORS", []))
             funnel_counts["US"] = cnt
             buy_signals.extend(sigs); total_scanned += cnt
 
@@ -781,9 +788,64 @@ def _sync_upthrust_cooldown(db, signal: dict) -> None:
     db.flush()
 
 
+def _attach_sector_context(res: dict, sector_rows: Optional[list] = None) -> None:
+    """표시용 섹터 분류·최근 추세를 signal 에 싣는다 (docs/sector_trends.md).
+
+    Gate 2 입력(``sector_stage``)과 판정은 바꾸지 않는다. 실패해도 저장은 계속한다.
+    국내는 분류만 싣고, 업종 추세는 스캔이 끝난 뒤 ``_apply_kr_sector_trends`` 가 채운다.
+
+    ``sector_rows`` 는 스캔 시작 때 고정한 미국 섹터 ETF 행이다. 스캔 도중 시장 캐시가
+    만료·수동 갱신돼도 같은 스캔의 종목들이 같은 스냅샷을 쓰도록 호출부가 넘긴다.
+    넘기지 않은 호출(스캔 밖)만 현재 캐시를 읽으며, 이때도 네트워크 조회는 하지 않는다.
+    """
+    from scanner import sector_trends
+    try:
+        if res.get("market") == "US":
+            if sector_rows is None:
+                from scanner.market_analysis import cached_market_stages
+                sector_rows = cached_market_stages().get("US_SECTORS", [])
+            res.update(sector_trends.us_sector_context(
+                res["ticker"], res.get("_gics_sector"), sector_rows))
+        elif res.get("market") == "KR":
+            res.update(sector_trends.kr_sector_name(
+                res["ticker"], sector_trends.kr_industry_map()))
+    except Exception as e:
+        logger.warning("섹터 표시 정보 산출 실패 %s: %s", res.get("ticker"), e)
+
+
+def _save_signal(db, res: dict, sector_rows: Optional[list] = None) -> None:
+    _attach_sector_context(res, sector_rows)
+    _save(db, res)
+
+
+def _apply_kr_sector_trends(db, universe: list, returns: dict, started_at: datetime) -> None:
+    """이번 KR 스캔에서 저장·갱신된 행에 업종 추세를 채운다 (가격 재조회 없음)."""
+    from database.models import ScanResult
+    from scanner import sector_trends
+    try:
+        industries = sector_trends.kr_industry_map()
+        if not industries:
+            return
+        trends = sector_trends.aggregate_kr_sectors(industries, universe, returns)
+        rows = db.query(ScanResult).filter(
+            ScanResult.market == "KR", ScanResult.scan_time >= started_at,
+        ).all()
+        for row in rows:
+            context = trends.get(industries.get(row.ticker))
+            if context is None:
+                continue
+            for field in SECTOR_TREND_FIELDS:
+                setattr(row, field, context.get(field))
+        db.commit()
+        logger.info("KR 업종 추세: %d개 업종, 대상 행 %d개", len(trends), len(rows))
+    except Exception as e:
+        logger.warning("KR 업종 추세 반영 실패: %s", e)
+        db.rollback()
+
+
 def _process_signal(db, res: dict, market_label: str,
                     market_condition: Optional[str],
-                    benchmark_close) -> bool:
+                    benchmark_close, sector_rows: Optional[list] = None) -> bool:
     """analyze_stock 결과를 받아 legacy 시장 필터 + strict 필터 + persist/notify
     분기를 한 곳에서 처리하고, 알림 대상이면 True 를 반환.
 
@@ -827,7 +889,7 @@ def _process_signal(db, res: dict, market_label: str,
 
     # 3) persist/notify 분기
     if passed:
-        _save(db, res)
+        _save_signal(db, res, sector_rows)
         logger.info(f"[{market_label}] {ticker} {res['name']}: "
                     f"{res['signal_type']} Q={res.get('signal_quality','?')} "
                     f"strict=PASS")
@@ -840,19 +902,19 @@ def _process_signal(db, res: dict, market_label: str,
 
     # Entry gate는 legacy strict-mode 토글과 독립된 명시적 opt-in이다.
     if entry_rejected:
-        _save(db, res)
+        _save_signal(db, res, sector_rows)
         logger.debug(f"[{market_label}] {ticker} entry-control reject: {reasons}")
         return False
 
     # 거부 — strict 모드 ON
     if STRICT_WEINSTEIN_MODE:
         if STRICT_PERSIST_REJECTED:
-            _save(db, res)
+            _save_signal(db, res, sector_rows)
         logger.debug(f"[{market_label}] {ticker} strict reject: {reasons}")
         return False
 
     # STRICT_WEINSTEIN_MODE=False (legacy 호환) — 통과 처리
-    _save(db, res)
+    _save_signal(db, res, sector_rows)
     return True
 
 
@@ -862,14 +924,20 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
     from scanner.weinstein import analyze_stock
     import time
 
+    from scanner.sector_trends import trailing_return, trend_close
+
     tickers = get_all_kr_tickers(market_filter=kr_universe)
     signals, count = [], 0
+    started_at = datetime.utcnow()
+    recent_returns = {}   # 업종 추세용. 이미 받은 종가만 쓴다.
 
     for i, info in enumerate(tickers):
         _prog(i + 1, len(tickers), f"KR [{i+1}/{len(tickers)}] {info['name']}")
         df = get_kr_ohlcv(info["ticker"])
         if df is None:
             continue
+        # dropna 이전 종가로 판정한다. 날짜 행 자체가 빠진 종목은 업종 집계의 구간 정렬에서 빠진다.
+        recent_returns[info["ticker"]] = trailing_return(trend_close(df))
         diag: Optional[dict] = {} if funnel is not None else None
         res = analyze_stock(df, info["ticker"], info["name"], "KR",
                             benchmark_close, market_condition, diag=diag)
@@ -881,13 +949,21 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
         _funnel_record(funnel, res, diag, notified)
         time.sleep(0.05)
 
+    _apply_kr_sector_trends(db, [t["ticker"] for t in tickers], recent_returns, started_at)
     return signals, count
 
 
 def _scan_us(db, universe, benchmark_close=None, market_condition=None,
-             funnel=None):
+             funnel=None, sector_rows: Optional[list] = None):
     from scanner.us_stocks import get_all_us_tickers, get_us_batch
     from scanner.weinstein import analyze_stock
+
+    # 섹터 추세 표시는 이 스캔 내내 한 스냅샷을 쓴다. run_scan 이 시작 때 받은 행을 넘기고,
+    # 넘기지 않으면 지금 캐시를 한 번만 복사해 고정한다(이후 캐시 교체와 무관).
+    if sector_rows is None:
+        from scanner.market_analysis import cached_market_stages
+        sector_rows = cached_market_stages().get("US_SECTORS", [])
+    sector_rows = list(sector_rows)
 
     tickers = get_all_us_tickers(universe)
     results = get_us_batch(tickers, progress_callback=_prog)
@@ -905,7 +981,8 @@ def _scan_us(db, universe, benchmark_close=None, market_condition=None,
             res["_gics_sector"] = info.get("sector")
         count += 1
         notified = bool(res and _process_signal(db, res, "US",
-                                                market_condition, benchmark_close))
+                                                market_condition, benchmark_close,
+                                                sector_rows))
         if notified:
             signals.append(res)
         _funnel_record(funnel, res, diag, notified)
@@ -1200,6 +1277,11 @@ def _save(db, signal: dict):
             existing.stop_loss            = signal.get("stop_loss")
             existing.sector_name          = signal.get("sector_name")
             existing.sector_stage         = signal.get("sector_stage")
+            existing.sector_source        = signal.get("sector_source")
+            # 국내는 업종 추세를 스캔 후에 채우므로, 값이 없는 재저장이 이전 추세를 지우지 않게 한다.
+            if "sector_trend" in signal:
+                for field in SECTOR_TREND_FIELDS[1:]:
+                    setattr(existing, field, signal.get(field))
             existing.rs_trend             = signal.get("rs_trend")
             existing.rs_zero_crossed      = signal.get("rs_zero_crossed")
             existing.strict_filter_passed = signal.get("strict_filter_passed")
@@ -1259,6 +1341,7 @@ def _save(db, signal: dict):
                 stop_loss            = signal.get("stop_loss"),
                 sector_name          = signal.get("sector_name"),
                 sector_stage         = signal.get("sector_stage"),
+                **{field: signal.get(field) for field in SECTOR_TREND_FIELDS},
                 rs_trend             = signal.get("rs_trend"),
                 rs_zero_crossed      = signal.get("rs_zero_crossed"),
                 strict_filter_passed = signal.get("strict_filter_passed"),

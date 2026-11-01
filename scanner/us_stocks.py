@@ -177,11 +177,13 @@ def get_all_us_tickers(universe: str = "sp500+nasdaq100") -> list:
 
 def get_us_ohlcv(ticker: str, period: str = "2y") -> Optional[pd.DataFrame]:
     try:
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
-        if df is None or len(df) < 50: return None
-        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        from scanner.sector_trends import attach_raw_close
+        raw = yf.Ticker(ticker).history(period=period, auto_adjust=True)
+        if raw is None or len(raw) < 50: return None
+        df = raw[["Open", "High", "Low", "Close", "Volume"]].dropna()
         df.index = pd.to_datetime(df.index).tz_localize(None)
-        return df
+        # 섹터 추세(표시용)는 결측 행이 지워지지 않은 원본 종가로 구간을 판정한다.
+        return attach_raw_close(df, raw["Close"])
     except Exception as e:
         logger.debug(f"US {ticker} 실패: {e}"); return None
 

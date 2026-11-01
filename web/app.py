@@ -30,7 +30,9 @@ from notifications.telegram import test_telegram
 from web.form13f import enrich_results
 from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
                     MAX_PIVOT_EXT_PCT, ALERT_MAX_CUR_STOP_PCT,
-                    BREAKOUT_WEEKLY_VOL_QUALITY_RATIO)
+                    BREAKOUT_WEEKLY_VOL_QUALITY_RATIO,
+                    SECTOR_TREND_LOOKBACK_DAYS, SECTOR_TREND_STRONG_PCT,
+                    SECTOR_TREND_FLAT_PCT)
 from web.asset_allocation_api import router as asset_allocation_router
 from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holdings
 from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
@@ -229,6 +231,10 @@ async def get_results(market: str = "ALL", signal_type: str = "ALL",
             ScanResult.strict_filter_passed.is_(True),
         ))
     rows = q.order_by(ScanResult.signal_date.desc(), ScanResult.scan_time.desc()).limit(limit).all()
+    # 섹터 추세 판정 기준(설정값). 화면 tooltip 이 상수를 따로 갖지 않게 함께 보낸다.
+    sector_trend_rule = (f"최근 {SECTOR_TREND_LOOKBACK_DAYS}거래일 수익률 · "
+                         f"±{SECTOR_TREND_STRONG_PCT:g}% 이상 강한 상승/하락 · "
+                         f"±{SECTOR_TREND_FLAT_PCT:g}% 미만 횡보")
     payload = [{"id": r.id, "scan_time": r.scan_time.isoformat(),
              "market": r.market, "ticker": r.ticker, "name": r.name,
              "signal_type": r.signal_type, "stage": r.stage,
@@ -247,6 +253,15 @@ async def get_results(market: str = "ALL", signal_type: str = "ALL",
              "filter_reasons": _parse_filter_reasons(r.filter_reasons),
              "sector_name": r.sector_name,
              "sector_stage": r.sector_stage,
+             # 표시 전용 섹터 분류 출처·최근 추세 (스캔 시점 스냅샷, 기존 행은 NULL)
+             "sector_source": r.sector_source,
+             "sector_trend": r.sector_trend,
+             "sector_return_20d": r.sector_return_20d,
+             "sector_trend_asof": r.sector_trend_asof,
+             "sector_trend_basis": r.sector_trend_basis,
+             "sector_trend_sample": r.sector_trend_sample,
+             "sector_trend_members": r.sector_trend_members,
+             "sector_trend_rule": sector_trend_rule,
              # 부가 메타데이터 (UI 카드 보강용 — 후방 호환 유지)
              "grade": r.grade,
              "signal_quality": r.signal_quality,

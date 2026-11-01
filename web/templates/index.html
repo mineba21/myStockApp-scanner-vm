@@ -360,18 +360,26 @@
                 :title="'돌파 주 거래량: 직전 4주 평균 대비 '+r.weekly_volume_ratio_4w.toFixed(2)+'배 · 품질 기준 '+(r.weekly_volume_quality_threshold??1.2).toFixed(2)+'배 (soft flag) · 현행 hard 10주 '+(r.weekly_volume_ratio==null?'-':r.weekly_volume_ratio.toFixed(2)+'배')"
                 x-text="'주봉 '+r.weekly_volume_ratio_4w.toFixed(2)+'x '+(r.weekly_volume_quality_passed===true?'✓':'△')"></span>
             </template>
-            <!-- Sector 배지 (sector_name truthy 일 때만 — NULL 이면 미렌더) -->
-            <template x-if="r.sector_name">
-              <span class="text-xs px-2 py-0.5 rounded-full font-semibold bg-indigo-50 text-indigo-700"
-                x-text="r.sector_name"></span>
-            </template>
           </div>
           <span class="text-xs text-slate-400 flex-shrink-0">
             <span class="text-slate-300">시그널</span> <span x-text="r.signal_date||r.scan_time?.slice(0,10)"></span>
           </span>
         </div>
         <p class="font-bold text-slate-900" x-text="r.name"></p>
-        <p class="text-xs text-slate-400 mb-3" x-text="r.ticker"></p>
+        <p class="text-xs text-slate-400 mb-1.5" x-text="r.ticker"></p>
+        <!-- 섹터 · 최근 추세 (표시 전용, 스캔 시점 스냅샷). 판정 기준·출처는 tooltip -->
+        <div class="flex items-center gap-1.5 flex-wrap text-xs mb-3">
+          <span class="px-2 py-0.5 rounded-full font-semibold max-w-full truncate"
+            :class="r.sector_name ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-400'"
+            :title="sectorSourceTitle(r)"
+            x-text="r.sector_name || '섹터 미분류'"></span>
+          <template x-if="r.sector_name">
+            <span class="px-2 py-0.5 rounded-full font-semibold whitespace-nowrap"
+              :class="sectorTrendMeta(r.sector_trend).cls"
+              :title="sectorTrendTitle(r)"
+              x-text="sectorTrendLabel(r)"></span>
+          </template>
+        </div>
         <template x-if="r.market === 'US'">
           <div class="text-xs rounded-lg border border-indigo-100 bg-white/70 p-2 mb-3">
             <template x-if="r['13F_CHANGE_TYPE']">
@@ -1906,6 +1914,24 @@
 // 백엔드 enum 은 stable identifier 로 둠 → UI 라벨 변경 시 백엔드 재배포 불필요.
 // 신규 reason 추가 시 이 매핑도 함께 업데이트. 미매핑 키는 raw enum 그대로 fallback.
 // Source: scanner/strict_filter.py (23 reasons).
+// 섹터 최근 추세 5단계 + 미판정 상태. 색은 화면의 손익 표시(상승 녹색·하락 빨강)를 따른다.
+// 미판정 상태를 횡보로 보이지 않도록 점선 테두리로 구분한다.
+const SECTOR_TREND_META = {
+  STRONG_UP:    {trend:true, icon:'▲▲', label:'강한 상승', cls:'bg-green-600 text-white', hint:'섹터 최근 추세: 강한 상승'},
+  UP:           {trend:true, icon:'▲',  label:'상승',     cls:'bg-green-100 text-green-700', hint:'섹터 최근 추세: 상승'},
+  FLAT:         {trend:true, icon:'―',  label:'횡보',     cls:'bg-slate-100 text-slate-600', hint:'섹터 최근 추세: 횡보'},
+  DOWN:         {trend:true, icon:'▼',  label:'하락',     cls:'bg-red-100 text-red-700', hint:'섹터 최근 추세: 하락'},
+  STRONG_DOWN:  {trend:true, icon:'▼▼', label:'강한 하락', cls:'bg-red-600 text-white', hint:'섹터 최근 추세: 강한 하락'},
+  INSUFFICIENT: {icon:'', label:'추세 표본 부족', cls:'bg-white text-slate-400 border border-dashed border-slate-300',
+                 hint:'가격 이력 또는 같은 업종 종목 수가 판정 기준에 못 미쳐 추세를 정하지 않았습니다.'},
+  STALE:        {icon:'', label:'추세 지연', cls:'bg-white text-amber-600 border border-dashed border-amber-300',
+                 hint:'마지막 가격이 오래되어(휴장·데이터 지연) 추세를 정하지 않았습니다.'},
+  UNAVAILABLE:  {icon:'', label:'추세 미확인', cls:'bg-white text-slate-400 border border-dashed border-slate-300',
+                 hint:'섹터 성과 데이터를 받지 못했습니다.'},
+  _PENDING:     {icon:'', label:'추세 집계 전', cls:'bg-white text-slate-400 border border-dashed border-slate-300',
+                 hint:'아직 추세가 계산되지 않았습니다 (국내는 스캔이 끝난 뒤 채워지고, 이전 스캔 행은 다음 재검출 때 채워집니다).'},
+};
+
 const REASON_LABELS_KO = {
   market_bear:                '시장 BEAR — 신규 매수 차단',
   market_unknown:             '시장 데이터 부재',
@@ -2090,6 +2116,40 @@ function app() {
         this.stats.kr=buyable.filter(r=>r.market==='KR').length;
         this.stats.us=buyable.filter(r=>r.market==='US').length;
       } catch{}
+    },
+
+    // ── 섹터 최근 추세 표시 (docs/sector_trends.md) ──
+    sectorTrendMeta(trend) {
+      return SECTOR_TREND_META[trend] || SECTOR_TREND_META._PENDING;
+    },
+
+    sectorTrendLabel(r) {
+      const meta = this.sectorTrendMeta(r.sector_trend);
+      const pct = r.sector_return_20d;
+      const value = (meta.trend && pct != null) ? ' '+(pct >= 0 ? '+' : '')+pct.toFixed(1)+'%' : '';
+      return (meta.icon ? meta.icon+' ' : '')+meta.label+value;
+    },
+
+    sectorTrendTitle(r) {
+      const lines = [this.sectorTrendMeta(r.sector_trend).hint];
+      const basis = r.sector_trend_basis || '';
+      if (basis.startsWith('ETF:')) {
+        lines.push('성과: 섹터 ETF '+basis.slice(4)+' 종가 (섹터 전체 수익률의 대용치)');
+      } else if (basis === 'KR_SCAN_MEDIAN') {
+        lines.push('성과: 스캔 유니버스 같은 업종 '+(r.sector_trend_sample ?? '-')+'/'+(r.sector_trend_members ?? '-')
+                   +'종목 수익률의 중앙값 (공식 업종지수 아님)');
+      }
+      if (r.sector_trend_asof) lines.push('기준일 '+r.sector_trend_asof+' (스캔 시점 값)');
+      if (r.sector_trend_rule) lines.push('판정: '+r.sector_trend_rule);
+      return lines.join('\n');
+    },
+
+    sectorSourceTitle(r) {
+      return {
+        GICS: '분류: S&P500 GICS 섹터 (위키백과 목록)',
+        YAHOO: '분류: Yahoo sector 보완 (공식 GICS 아님 · Strict Gate 2 에는 쓰지 않음)',
+        KRX: '분류: KRX 상장사 업종 (KSIC)',
+      }[r.sector_source] || (r.sector_name ? '분류 출처 미기록' : '분류 정보 없음 — 분류 소스에 없거나, 섹터 표시 도입 전에 스캔된 행');
     },
 
     async deleteResult(id) {

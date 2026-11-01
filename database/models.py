@@ -86,6 +86,14 @@ class ScanResult(Base):
     stop_loss            = Column(Float,       nullable=True)              # Gate 8: BUY 시그널 손절가
     sector_name          = Column(String(50),  nullable=True)              # Gate 2: 종목 sector (후속 plan)
     sector_stage         = Column(String(10),  nullable=True)              # Gate 2: sector Stage1-4
+    # ── 섹터 표시·최근 추세 스냅샷 (표시 전용, docs/sector_trends.md) ──
+    sector_source        = Column(String(10),  nullable=True)  # GICS / YAHOO / KRX (분류 출처)
+    sector_trend         = Column(String(16),  nullable=True)  # STRONG_UP..STRONG_DOWN 또는 INSUFFICIENT/STALE/UNAVAILABLE
+    sector_return_20d    = Column(Float,       nullable=True)  # N거래일 섹터 수익률(%)
+    sector_trend_asof    = Column(String(10),  nullable=True)  # 성과 기준일 YYYY-MM-DD
+    sector_trend_basis   = Column(String(40),  nullable=True)  # ETF:XLK / KR_SCAN_MEDIAN
+    sector_trend_sample  = Column(Integer,     nullable=True)  # 국내: 유효 표본 종목 수
+    sector_trend_members = Column(Integer,     nullable=True)  # 국내: 업종 내 유니버스 종목 수
     rs_trend             = Column(String(10),  nullable=True)              # Gate 6: RISING/FALLING/FLAT
     rs_zero_crossed      = Column(Boolean,     nullable=True)              # Gate 6: 최근 RS 0선 음→양 전환
     strict_filter_passed = Column(Boolean,     nullable=True, index=True)  # 8 게이트 모두 통과

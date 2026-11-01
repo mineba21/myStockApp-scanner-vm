@@ -112,24 +112,27 @@ def get_kr_ohlcv(ticker: str, period_years: int = 2) -> Optional[pd.DataFrame]:
     # FinanceDataReader 먼저 시도
     try:
         import FinanceDataReader as fdr
-        df = fdr.DataReader(ticker, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-        if df is not None and len(df) > 50:
-            df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        from scanner.sector_trends import attach_raw_close
+        raw = fdr.DataReader(ticker, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        if raw is not None and len(raw) > 50:
+            df = raw[["Open", "High", "Low", "Close", "Volume"]].dropna()
             df.index = pd.to_datetime(df.index)
-            return df
+            # 섹터 추세(표시용)는 결측 행이 지워지지 않은 원본 종가로 구간을 판정한다.
+            return attach_raw_close(df, raw["Close"])
     except Exception:
         pass
 
     # pykrx fallback
     try:
         from pykrx import stock as px
-        df = px.get_market_ohlcv(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), ticker)
-        if df is not None and len(df) > 50:
-            df = df.rename(columns={"시가": "Open", "고가": "High", "저가": "Low",
-                                    "종가": "Close", "거래량": "Volume"})
-            df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        from scanner.sector_trends import attach_raw_close
+        raw = px.get_market_ohlcv(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), ticker)
+        if raw is not None and len(raw) > 50:
+            raw = raw.rename(columns={"시가": "Open", "고가": "High", "저가": "Low",
+                                      "종가": "Close", "거래량": "Volume"})
+            df = raw[["Open", "High", "Low", "Close", "Volume"]].dropna()
             df.index = pd.to_datetime(df.index)
-            return df
+            return attach_raw_close(df, raw["Close"])
     except Exception as e:
         logger.debug(f"KR {ticker} 조회 실패: {e}")
 

@@ -73,3 +73,26 @@ def _assert_not_bound_to_production():
         "config/database.models 가 conftest 보다 먼저 import 되지 않았는지 확인할 것."
     )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_sector_providers(request, monkeypatch):
+    """섹터 분류 공급자(KRX-DESC, Yahoo)를 테스트에서 실제로 호출하지 않는다.
+
+    스캔 경로 테스트가 저장 직전 섹터 표시 정보를 붙이면서 외부로 나가는 것을 막는다.
+    공급자 동작 자체를 검증하는 테스트는 ``@pytest.mark.sector_providers`` 로 주입 함수를
+    직접 넘겨 쓴다. 프로세스 캐시도 테스트마다 비운다.
+    """
+    from scanner import sector_trends
+
+    sector_trends._cache.clear()
+    if request.node.get_closest_marker("sector_providers") is None:
+        monkeypatch.setattr(sector_trends, "kr_industry_map", lambda loader=None: None)
+        monkeypatch.setattr(sector_trends, "yahoo_gics_sector", lambda ticker, fetcher=None: None)
+    yield
+    sector_trends._cache.clear()
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "sector_providers: 섹터 분류 공급자 함수를 막지 않는 테스트 (주입 함수 사용)")

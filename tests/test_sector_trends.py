@@ -1,0 +1,661 @@
+"""섹터 분류·최근 추세(표시 전용) 테스트. 외부 공급자는 주입 함수로만 흉내 낸다."""
+from datetime import date, datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from scanner import sector_trends as st
+
+
+def closes(values, end="2026-10-30"):
+    index = pd.bdate_range(end=end, periods=len(values))
+    return pd.Series(values, index=index, dtype=float)
+
+
+def ramp(total_pct, n=21, end="2026-10-30", start=100.0):
+    """n개 종가로 마지막/첫 값이 정확히 (1+total_pct%) 가 되게 만든다."""
+    values = list(np.linspace(start, start * (1 + total_pct / 100), n))
+    return closes(values, end=end)
+
+
+NOW = date(2026, 10, 31)
+
+
+# ── 5단계 판정 ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize("pct,trend", [
+    (12.0, "STRONG_UP"), (5.0, "STRONG_UP"), (4.999, "UP"), (1.0, "UP"),
+    (0.999, "FLAT"), (0.0, "FLAT"), (-0.999, "FLAT"), (-1.0, "DOWN"),
+    (-4.999, "DOWN"), (-5.0, "STRONG_DOWN"), (-20.0, "STRONG_DOWN"),
+])
+def test_classify_trend_boundaries(pct, trend):
+    assert st.classify_trend(pct) == trend
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf"), "x"])
+def test_classify_trend_rejects_missing_values(value):
+    assert st.classify_trend(value) is None
+
+
+def test_classify_trend_follows_configured_thresholds(monkeypatch):
+    monkeypatch.setattr(st, "SECTOR_TREND_STRONG_PCT", 8.0)
+    monkeypatch.setattr(st, "SECTOR_TREND_FLAT_PCT", 2.0)
+    assert st.classify_trend(5.0) == "UP"
+    assert st.classify_trend(1.5) == "FLAT"
+    assert st.classify_trend(-8.0) == "STRONG_DOWN"
+
+
+# ── N거래일 수익률 ───────────────────────────────────────────────
+
+def test_trailing_return_uses_exactly_lookback_plus_one_closes():
+    # 22개 중 맨 앞(50)은 20거래일 창 밖이라 쓰이지 않아야 한다. 창: 100 → 110.
+    series = closes([50.0, 100.0] + [105.0] * 19 + [110.0])
+    result = st.trailing_return(series, now=NOW)
+    assert result == {"status": "OK", "return_pct": pytest.approx(10.0), "asof": "2026-10-30",
+                      "start": series.index[-21].date().isoformat()}
+
+
+def test_trailing_return_is_insufficient_below_lookback_plus_one():
+    result = st.trailing_return(ramp(3.0, n=20), now=NOW)
+    assert result["status"] == st.INSUFFICIENT and result["return_pct"] is None
+    assert result["asof"] == "2026-10-30"
+
+
+def test_trailing_return_ignores_bad_values_outside_the_window():
+    series = ramp(4.0, n=21)
+    dirty = pd.concat([series, closes([np.nan, 0.0, -5.0, np.inf], end="2026-09-01")]).sort_index()
+    assert st.trailing_return(dirty, now=NOW)["return_pct"] == pytest.approx(4.0)
+
+
+def test_gap_inside_recent_window_does_not_stretch_it_back():
+    """PR #6 리뷰 재현: 21개보다 긴 이력에서 최근 구간 중간이 비면 시작일을 과거로 당기지 않는다."""
+    s = pd.Series([50.0] + [100.0] * 21, index=pd.bdate_range(end="2026-10-30", periods=22))
+    assert st.trailing_return(s, now=NOW)["return_pct"] == pytest.approx(0.0)   # FLAT
+    s.iloc[10] = np.nan
+    result = st.trailing_return(s, now=NOW)
+    assert result["status"] == st.INSUFFICIENT and result["return_pct"] is None   # +100% 아님
+    assert result["start"] == s.index[1].date().isoformat()                       # 구간은 그대로
+
+
+@pytest.mark.parametrize("bad", [np.nan, 0.0, -1.0, np.inf, "x"])
+def test_any_bad_value_inside_the_window_is_insufficient(bad):
+    s = pd.Series([100.0] * 30, index=pd.bdate_range(end="2026-10-30", periods=30), dtype=object)
+    s.iloc[-1 - 7] = bad
+    assert st.trailing_return(s, now=NOW)["status"] == st.INSUFFICIENT
+    s.iloc[-1 - 25] = bad          # 구간 밖의 결측만 남기면 정상 판정
+    s.iloc[-1 - 7] = 100.0
+    assert st.trailing_return(s, now=NOW)["status"] == "OK"
+
+
+def test_trailing_return_keeps_last_duplicate_and_ignores_future_rows():
+    series = ramp(2.0, n=21)
+    dup = pd.Series([999.0], index=[series.index[-1]])
+    future = pd.Series([500.0], index=[pd.Timestamp("2026-11-05")])
+    combined = pd.concat([dup, series, future])   # 중복 날짜는 마지막 값(정상 종가)이 남는다
+    result = st.trailing_return(combined, now=NOW)
+    assert result["asof"] == "2026-10-30"
+    assert result["return_pct"] == pytest.approx(2.0)
+
+
+def test_trailing_return_marks_old_data_stale(monkeypatch):
+    series = ramp(6.0, n=21, end="2026-10-20")
+    assert st.trailing_return(series, now=NOW)["status"] == st.STALE
+    assert st.trailing_return(series, now=date(2026, 10, 27))["status"] == "OK"
+
+
+def test_trailing_return_handles_missing_series():
+    assert st.trailing_return(None)["status"] == st.UNAVAILABLE
+
+
+def test_context_never_turns_missing_data_into_flat():
+    assert st.context_from_return({"status": st.INSUFFICIENT, "return_pct": None, "asof": None}) == {
+        "sector_trend": st.INSUFFICIENT, "sector_return_20d": None, "sector_trend_asof": None}
+    ok = st.context_from_return({"status": "OK", "return_pct": -6.2, "asof": "2026-10-30"})
+    assert ok == {"sector_trend": "STRONG_DOWN", "sector_return_20d": -6.2, "sector_trend_asof": "2026-10-30"}
+
+
+# ── 국내 KRX-DESC 업종 ───────────────────────────────────────────
+
+def cache_schema(rows):
+    # 실제 fdr_krx_data_cache CSV 컬럼 (2026-10-30 파일에서 확인)
+    return pd.DataFrame(rows, columns=["Code", "Name", "Market", "Sector", "Industry", "Products"])
+
+
+def test_parse_kr_industries_uses_industry_column_in_cache_schema():
+    df = cache_schema([
+        ["060310", "3S", "KOSDAQ", "벤처기업부", "측정, 시험, 항해, 제어 및 기타 정밀기기 제조업; 광학기기 제외", "웨이퍼 캐리어"],
+        ["5930", "삼성전자", "KOSPI", None, "통신 및 방송 장비 제조업", "휴대폰"],
+        ["000001", "빈업종", "KOSPI", None, None, "x"],
+        ["000002", "공백", "KOSPI", None, "  ", "x"],
+    ])
+    mapping = st.parse_kr_industries(df)
+    assert mapping["005930"] == "통신 및 방송 장비 제조업"
+    assert mapping["060310"].startswith("측정, 시험")     # 소속부(벤처기업부)가 아님
+    assert len(mapping["060310"]) <= 50
+    assert "000001" not in mapping and "000002" not in mapping
+
+
+def test_parse_kr_industries_uses_sector_column_in_kind_schema():
+    df = pd.DataFrame([["005930", "삼성전자", "통신 및 방송 장비 제조업", "휴대폰"]],
+                      columns=["Code", "Name", "Sector", "Industry"])
+    assert st.parse_kr_industries(df) == {"005930": "통신 및 방송 장비 제조업"}
+
+
+def test_parse_kr_industries_rejects_unknown_schema():
+    with pytest.raises(ValueError):
+        st.parse_kr_industries(pd.DataFrame({"Symbol": ["005930"]}))
+
+
+@pytest.mark.sector_providers
+def test_kr_industry_map_caches_success_and_retries_failure_after_ttl(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(st._cache, "clock", lambda: clock["t"])
+    calls = []
+
+    def failing():
+        calls.append("fail")
+        raise OSError("network")
+
+    assert st.kr_industry_map(failing) is None
+    assert st.kr_industry_map(failing) is None          # 실패도 1시간 기억
+    assert calls == ["fail"]
+
+    clock["t"] += st.FAILURE_TTL_SECONDS + 1
+    good = lambda: cache_schema([["005930", "삼성전자", "KOSPI", None, "반도체 제조업", "x"]])  # noqa: E731
+    assert st.kr_industry_map(good) == {"005930": "반도체 제조업"}
+    assert st.kr_industry_map(failing) == {"005930": "반도체 제조업"}   # 24시간 캐시
+    clock["t"] += st.CLASSIFICATION_TTL_SECONDS + 1
+    assert st.kr_industry_map(failing) is None
+
+
+@pytest.mark.sector_providers
+def test_yahoo_sector_maps_explicitly_and_caches():
+    calls = []
+
+    def fetch(ticker):
+        calls.append(ticker)
+        return {"sector": {"ASML": "Technology", "XYZ": "Conglomerates"}.get(ticker)}
+
+    assert st.yahoo_gics_sector("ASML", fetch) == "Information Technology"
+    assert st.yahoo_gics_sector("asml", fetch) == "Information Technology"
+    assert st.yahoo_gics_sector("XYZ", fetch) is None           # 대응표에 없는 이름은 버린다
+    assert st.yahoo_gics_sector("ERR", lambda t: 1 / 0) is None
+    assert calls == ["ASML", "XYZ"]
+
+
+# ── 미국 컨텍스트 ────────────────────────────────────────────────
+
+ETF_ROWS = [
+    {"ticker": "XLK", "return_20d": 6.4, "return_asof": "2026-10-30", "return_status": "OK"},
+    {"ticker": "XLE", "return_20d": None, "return_asof": "2026-10-30", "return_status": st.INSUFFICIENT},
+]
+
+
+def test_us_context_uses_gics_and_sector_etf():
+    ctx = st.us_sector_context("AAPL", "Information Technology", ETF_ROWS,
+                               yahoo_lookup=lambda t: pytest.fail("GICS 가 있으면 Yahoo 를 부르지 않는다"))
+    assert ctx["sector_name"] == "기술" and ctx["sector_source"] == "GICS"
+    assert ctx["sector_trend_basis"] == "ETF:XLK"
+    assert (ctx["sector_trend"], ctx["sector_return_20d"], ctx["sector_trend_asof"]) == ("STRONG_UP", 6.4, "2026-10-30")
+
+
+def test_us_context_falls_back_to_yahoo_only_for_display():
+    ctx = st.us_sector_context("ASML", None, ETF_ROWS, yahoo_lookup=lambda t: "Information Technology")
+    assert (ctx["sector_name"], ctx["sector_source"], ctx["sector_trend"]) == ("기술", "YAHOO", "STRONG_UP")
+    assert "sector_stage" not in ctx    # Gate 2 입력은 건드리지 않는다
+
+
+def test_us_context_missing_data_states():
+    assert st.us_sector_context("PDD", None, ETF_ROWS, yahoo_lookup=lambda t: None)["sector_name"] is None
+    energy = st.us_sector_context("XOM", "Energy", ETF_ROWS)
+    assert energy["sector_trend"] == st.INSUFFICIENT and energy["sector_return_20d"] is None
+    no_rows = st.us_sector_context("JPM", "Financials", [])
+    assert no_rows["sector_name"] == "금융" and no_rows["sector_trend"] == st.UNAVAILABLE
+
+
+# ── 국내 업종 집계 ───────────────────────────────────────────────
+
+def ok(pct, asof="2026-10-30", start="2026-10-02"):
+    return {"status": "OK", "return_pct": pct, "asof": asof, "start": start}
+
+
+def test_kr_aggregate_uses_median_so_one_outlier_does_not_flip_the_sector():
+    industries = {t: "반도체 제조업" for t in "ABCD"}
+    returns = {"A": ok(0.5), "B": ok(-0.4), "C": ok(0.2), "D": ok(80.0)}   # D: 테마 급등주
+    out = st.aggregate_kr_sectors(industries, "ABCD", returns, now=NOW)["반도체 제조업"]
+    assert out["sector_trend"] == "FLAT"
+    assert out["sector_return_20d"] == pytest.approx(0.35)
+    assert (out["sector_trend_sample"], out["sector_trend_members"]) == (4, 4)
+    assert out["sector_trend_basis"] == st.KR_BASIS and out["sector_source"] == "KRX"
+
+
+def test_kr_aggregate_requires_minimum_sample_and_coverage():
+    industries = {"A": "소형", "B": "소형", "C": "중형", "D": "중형", "E": "중형", "F": "중형", "G": "중형"}
+    returns = {"A": ok(3.0), "B": ok(4.0), "C": ok(2.0), "D": ok(2.5), "E": ok(1.5)}  # F, G 가격 없음
+    out = st.aggregate_kr_sectors(industries, "ABCDEFG", returns, now=NOW)
+    assert out["소형"]["sector_trend"] == st.INSUFFICIENT                     # 2 < 3
+    assert out["중형"]["sector_trend"] == st.INSUFFICIENT                     # 3/5 = 60% < 70%
+    assert (out["중형"]["sector_trend_sample"], out["중형"]["sector_trend_members"]) == (3, 5)
+    assert out["중형"]["sector_return_20d"] is None
+
+
+def test_kr_aggregate_excludes_members_not_on_the_latest_date():
+    industries = {t: "화학" for t in "ABCD"}
+    returns = {"A": ok(2.0), "B": ok(3.0), "C": ok(2.5), "D": ok(-30.0, asof="2026-10-23")}  # 거래정지 등
+    out = st.aggregate_kr_sectors(industries, "ABCD", returns, now=NOW)["화학"]
+    assert out["sector_trend_sample"] == 3 and out["sector_trend"] == "UP"
+    assert out["sector_trend_asof"] == "2026-10-30"
+
+
+def test_kr_aggregate_requires_the_same_window_start():
+    """종료일이 같아도 구간 중간 행이 빠져 시작일이 다른 종목은 다른 기간이라 제외한다."""
+    industries = {t: "화학" for t in "ABCDE"}
+    returns = {"A": ok(2.0), "B": ok(3.0), "C": ok(2.5), "D": ok(1.5),
+               "E": ok(40.0, start="2026-09-30")}
+    out = st.aggregate_kr_sectors(industries, "ABCDE", returns, now=NOW)["화학"]
+    assert out["sector_trend_sample"] == 4
+    assert out["sector_return_20d"] == pytest.approx(2.25)
+
+
+def test_kr_aggregate_stale_and_unavailable_states():
+    industries = {t: "화학" for t in "ABC"}
+    stale = {t: {"status": st.STALE, "return_pct": 2.0, "asof": "2026-10-10"} for t in "ABC"}
+    assert st.aggregate_kr_sectors(industries, "ABC", stale, now=NOW)["화학"]["sector_trend"] == st.STALE
+    none = st.aggregate_kr_sectors(industries, "ABC", {}, now=NOW)["화학"]
+    assert none["sector_trend"] == st.UNAVAILABLE and none["sector_trend_sample"] == 0
+    # 분류는 있지만 유니버스 밖이면 결과에 넣지 않는다.
+    assert st.aggregate_kr_sectors(industries, "XYZ", stale, now=NOW) == {}
+
+
+def test_kr_sector_name_only_sets_classification():
+    assert st.kr_sector_name("005930", {"005930": "반도체 제조업"}) == {
+        "sector_name": "반도체 제조업", "sector_source": "KRX"}
+    assert st.kr_sector_name("005930", None) == {"sector_name": None, "sector_source": None}
+
+
+# ── market_analysis: ETF 수익률 필드 ─────────────────────────────
+
+def test_analyze_index_adds_recent_return_fields():
+    from scanner import market_analysis as ma
+    from scanner.weinstein import stage_of, _slope
+
+    index = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=300)
+    close = pd.Series(np.linspace(100, 130, 300), index=index)
+    df = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                       "Close": close, "Volume": 1_000_000}, index=index)
+    out = []
+    ma._analyze_index({"ticker": "XLK", "name": "기술"}, "US", lambda t: df, 150, stage_of, _slope, out)
+    row = out[0]
+    expected = (close.iloc[-1] / close.iloc[-21] - 1) * 100
+    assert row["return_status"] == "OK"
+    assert row["return_20d"] == pytest.approx(expected)
+    assert row["return_asof"] == index[-1].date().isoformat()
+
+
+# ── 저장·스캔 연결 ───────────────────────────────────────────────
+
+def fresh_db():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from database.models import Base
+
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
+
+
+def signal(**overrides):
+    sig = {"ticker": "AAPL", "name": "Apple", "market": "US", "signal_type": "BREAKOUT",
+           "stage": "STAGE2", "price": 105.0, "ma150": 100.0, "volume_ratio": 3.0,
+           "signal_date": "2026-10-30", "sector_name": "기술", "sector_stage": "STAGE2"}
+    sig.update(overrides)
+    return sig
+
+
+def test_save_persists_us_sector_snapshot(monkeypatch):
+    from database.models import ScanResult
+    from scanner import market_analysis as ma
+    from scanner.scan_engine import _save_signal
+
+    monkeypatch.setattr(ma, "_cache", {"US_SECTORS": ETF_ROWS})
+    db = fresh_db()
+    _save_signal(db, signal(_gics_sector="Information Technology"))
+    row = db.query(ScanResult).one()
+    assert (row.sector_name, row.sector_stage, row.sector_source) == ("기술", "STAGE2", "GICS")
+    assert (row.sector_trend, row.sector_return_20d, row.sector_trend_asof, row.sector_trend_basis) == \
+        ("STRONG_UP", 6.4, "2026-10-30", "ETF:XLK")
+
+
+def test_attach_never_fetches_market_stages_during_a_scan(monkeypatch):
+    from scanner import market_analysis as ma
+    from scanner.scan_engine import _attach_sector_context
+
+    monkeypatch.setattr(ma, "_cache", {})
+    monkeypatch.setattr(ma, "get_market_stages", lambda force=False: pytest.fail("재조회 금지"))
+    res = signal(_gics_sector="Financials")
+    _attach_sector_context(res)
+    assert res["sector_name"] == "금융" and res["sector_trend"] == st.UNAVAILABLE
+
+
+def test_yahoo_fallback_does_not_change_gate2_input(monkeypatch):
+    """Yahoo 보완 분류는 표시만 한다. Gate 2 의 sector_stage 는 기존 GICS 경로 결과 그대로."""
+    from scanner import market_analysis as ma, scan_engine
+
+    monkeypatch.setattr(ma, "_cache", {"US_SECTORS": ETF_ROWS})
+    monkeypatch.setattr(st, "yahoo_gics_sector", lambda ticker, fetcher=None: "Information Technology")
+    seen = {}
+
+    def fake_gate(sig, ctx):
+        seen["sector_stage"] = ctx["sector_stage"]
+        return True, []
+
+    monkeypatch.setattr("scanner.strict_filter.apply_strict_filter", fake_gate)
+    res = signal(ticker="ASML", sector_name=None, sector_stage=None, _gics_sector=None)
+    scan_engine._evaluate_strict_filter(res, "BULL", None)
+    scan_engine._attach_sector_context(res)
+    assert seen["sector_stage"] is None and res["sector_stage"] is None
+    assert (res["sector_name"], res["sector_source"]) == ("기술", "YAHOO")
+
+
+def test_resave_without_trend_keeps_previous_kr_trend():
+    from database.models import ScanResult
+    from scanner.scan_engine import _save
+
+    db = fresh_db()
+    _save(db, signal(ticker="005930", market="KR", sector_name="반도체 제조업", sector_source="KRX",
+                     sector_trend="UP", sector_return_20d=2.0, sector_trend_asof="2026-10-29",
+                     sector_trend_basis=st.KR_BASIS, sector_trend_sample=5, sector_trend_members=6))
+    # 다음 스캔의 재검출: 분류만 있고 추세는 스캔이 끝난 뒤 채워진다.
+    _save(db, signal(ticker="005930", market="KR", sector_name="반도체 제조업", sector_source="KRX"))
+    row = db.query(ScanResult).one()
+    assert (row.sector_trend, row.sector_return_20d, row.sector_trend_sample) == ("UP", 2.0, 5)
+
+
+def test_apply_kr_sector_trends_updates_only_rows_from_this_scan(monkeypatch):
+    from database.models import ScanResult
+    from scanner.scan_engine import _apply_kr_sector_trends
+
+    industries = {"A00001": "화학", "A00002": "화학", "A00003": "화학", "B00001": "화학"}
+    monkeypatch.setattr(st, "kr_industry_map", lambda loader=None: industries)
+    db = fresh_db()
+    started = datetime.utcnow()
+    db.add(ScanResult(market="KR", ticker="A00001", name="새행", signal_type="BREAKOUT",
+                      signal_date="2026-10-30", scan_time=started + timedelta(seconds=5)))
+    db.add(ScanResult(market="KR", ticker="B00001", name="지난스캔", signal_type="BREAKOUT",
+                      signal_date="2026-10-20", scan_time=started - timedelta(days=3)))
+    db.commit()
+
+    returns = {"A00001": ok(6.0), "A00002": ok(5.5), "A00003": ok(7.0), "B00001": ok(5.2)}
+    _apply_kr_sector_trends(db, list(industries), returns, started)
+
+    fresh, old = (db.query(ScanResult).filter(ScanResult.ticker == t).one() for t in ("A00001", "B00001"))
+    assert (fresh.sector_trend, fresh.sector_trend_sample, fresh.sector_trend_members) == ("STRONG_UP", 4, 4)
+    assert fresh.sector_return_20d == pytest.approx(5.75) and fresh.sector_source == "KRX"
+    assert old.sector_trend is None
+
+
+def test_apply_kr_sector_trends_is_a_noop_without_classification(monkeypatch):
+    from scanner.scan_engine import _apply_kr_sector_trends
+
+    db = fresh_db()
+    _apply_kr_sector_trends(db, ["A00001"], {"A00001": ok(3.0)}, datetime.utcnow())   # 공급자 차단(None)
+
+
+# ── API ─────────────────────────────────────────────────────────
+
+def test_results_api_returns_sector_snapshot_and_rule(monkeypatch):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    import database.models as dbm
+    import scheduler as sched
+    import web.app as webapp
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Session = sessionmaker(bind=engine)
+    dbm.Base.metadata.create_all(engine)
+    monkeypatch.setattr(dbm, "init_db", lambda: None)
+    monkeypatch.setattr(sched, "start_scheduler", lambda: None)
+    monkeypatch.setattr(sched, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(webapp, "SITES_API_KEY", "test-key")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    db = Session()
+    db.add(dbm.ScanResult(market="KR", ticker="005930", name="삼성전자", signal_type="BREAKOUT",
+                          signal_date=today, scan_time=datetime.utcnow(), price=1.0, ma150=1.0,
+                          sector_name="통신 및 방송 장비 제조업", sector_source="KRX", sector_trend="DOWN",
+                          sector_return_20d=-2.5, sector_trend_asof="2026-10-30",
+                          sector_trend_basis=st.KR_BASIS, sector_trend_sample=8, sector_trend_members=10))
+    db.add(dbm.ScanResult(market="US", ticker="OLD", name="Legacy", signal_type="BREAKOUT",
+                          signal_date=today, scan_time=datetime.utcnow(), price=1.0, ma150=1.0))
+    db.commit()
+    db.close()
+
+    def override():
+        session = Session()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    webapp.app.dependency_overrides[dbm.get_db] = override
+    try:
+        with TestClient(webapp.app, headers={"Authorization": "Bearer test-key"}) as client:
+            rows = {r["ticker"]: r for r in client.get("/api/results?days=3&prioritize_13f=false").json()}
+    finally:
+        webapp.app.dependency_overrides.pop(dbm.get_db, None)
+
+    kr = rows["005930"]
+    assert (kr["sector_trend"], kr["sector_return_20d"], kr["sector_trend_sample"], kr["sector_trend_members"]) == \
+        ("DOWN", -2.5, 8, 10)
+    assert kr["sector_source"] == "KRX" and kr["sector_trend_basis"] == st.KR_BASIS
+    assert "20거래일" in kr["sector_trend_rule"] and "±5%" in kr["sector_trend_rule"]
+    legacy = rows["OLD"]
+    assert legacy["sector_name"] is None and legacy["sector_trend"] is None and legacy["sector_source"] is None
+
+
+# ── 스캔 내 단일 스냅샷 (PR #6 리뷰) ─────────────────────────────
+
+def test_scan_us_pins_sector_rows_even_if_market_cache_is_replaced(monkeypatch):
+    """스캔 도중 시장 캐시가 만료·수동 갱신돼 교체돼도 같은 스캔은 시작 때 행을 쓴다."""
+    import scanner.us_stocks as us
+    import scanner.weinstein as weinstein
+    from scanner import market_analysis as ma, scan_engine
+
+    start_rows = [{"ticker": "XLK", "return_20d": 6.4, "return_asof": "2026-10-30", "return_status": "OK"}]
+    later_rows = [{"ticker": "XLK", "return_20d": -6.0, "return_asof": "2026-10-31", "return_status": "OK"}]
+    infos = [{"ticker": t, "name": t, "sector": "Information Technology"} for t in ("AAA", "BBB")]
+
+    def batch(tickers, progress_callback=None):
+        for i, info in enumerate(infos):
+            if i == 1:   # 두 번째 종목 처리 전 캐시가 교체된다
+                monkeypatch.setattr(ma, "_cache", {"US_SECTORS": later_rows})
+            yield info, object()
+
+    monkeypatch.setattr(us, "get_all_us_tickers", lambda universe: infos)
+    monkeypatch.setattr(us, "get_us_batch", batch)
+    monkeypatch.setattr(weinstein, "analyze_stock",
+                        lambda df, ticker, name, *a, **k: signal(ticker=ticker, name=name))
+    captured = []
+
+    def fake_process(db, res, label, condition, bench, sector_rows=None):
+        scan_engine._attach_sector_context(res, sector_rows)
+        captured.append((res["ticker"], res["sector_trend"], res["sector_return_20d"]))
+        return False
+
+    monkeypatch.setattr(scan_engine, "_process_signal", fake_process)
+    monkeypatch.setattr(ma, "_cache", {"US_SECTORS": later_rows})
+    scan_engine._scan_us(None, "sp500", sector_rows=start_rows)
+    assert captured == [("AAA", "STRONG_UP", 6.4), ("BBB", "STRONG_UP", 6.4)]
+
+
+def test_scan_us_without_rows_copies_the_cache_once(monkeypatch):
+    import scanner.us_stocks as us
+    import scanner.weinstein as weinstein
+    from scanner import market_analysis as ma, scan_engine
+
+    first = [{"ticker": "XLK", "return_20d": 2.0, "return_asof": "2026-10-30", "return_status": "OK"}]
+    infos = [{"ticker": t, "name": t, "sector": "Information Technology"} for t in ("AAA", "BBB")]
+
+    def batch(tickers, progress_callback=None):
+        for i, info in enumerate(infos):
+            if i == 1:
+                monkeypatch.setattr(ma, "_cache", {"US_SECTORS": []})
+            yield info, object()
+
+    monkeypatch.setattr(ma, "_cache", {"US_SECTORS": first})
+    monkeypatch.setattr(us, "get_all_us_tickers", lambda universe: infos)
+    monkeypatch.setattr(us, "get_us_batch", batch)
+    monkeypatch.setattr(weinstein, "analyze_stock",
+                        lambda df, ticker, name, *a, **k: signal(ticker=ticker, name=name))
+    seen = []
+    monkeypatch.setattr(scan_engine, "_process_signal",
+                        lambda db, res, label, cond, bench, sector_rows=None:
+                        seen.append(sector_rows) or False)
+    scan_engine._scan_us(None, "sp500")
+    assert seen == [first, first]
+
+
+def test_process_signal_threads_rows_into_saved_snapshot(monkeypatch):
+    from database.models import ScanResult
+    from scanner import market_analysis as ma, scan_engine
+
+    later = [{"ticker": "XLK", "return_20d": -6.0, "return_asof": "2026-10-31", "return_status": "OK"}]
+
+    def gate2_refreshes_cache(gics, market="US"):
+        # 리뷰 지적 경로: Gate 2 의 get_sector_stage 가 만료된 캐시를 새로 채운다.
+        monkeypatch.setattr(ma, "_cache", {"US_SECTORS": later})
+        return "기술", "STAGE2"
+
+    monkeypatch.setattr(ma, "get_sector_stage", gate2_refreshes_cache)
+    monkeypatch.setattr("scanner.strict_filter.apply_strict_filter", lambda sig, ctx: (True, []))
+    monkeypatch.setattr(scan_engine, "_sync_upthrust_cooldown", lambda db, res: None)
+    db = fresh_db()
+    assert scan_engine._process_signal(db, signal(_gics_sector="Information Technology"),
+                                       "US", "BULL", None, sector_rows=ETF_ROWS) is True
+    row = db.query(ScanResult).one()
+    assert (row.sector_trend, row.sector_return_20d) == ("STRONG_UP", 6.4)
+
+
+# ── 공급자 응답 → 실제 어댑터 → 분석 → 표시 추세 (PR #6 리뷰) ─────────
+
+def _provider_frame(closes_list, *, end=None, nan_col=None, nan_at=None, drop_at=None):
+    """공급자 원본 응답 흉내. 실제 어댑터(get_us_ohlcv/get_kr_ohlcv)가 정제한다."""
+    end = end or pd.Timestamp.today().normalize()
+    idx = pd.bdate_range(end=end, periods=len(closes_list))
+    frame = pd.DataFrame({c: list(closes_list) for c in ("Open", "High", "Low", "Close")}, index=idx)
+    frame["Volume"] = 1000.0
+    if nan_at is not None:
+        frame.iloc[nan_at, frame.columns.get_loc(nan_col)] = np.nan
+    if drop_at is not None:      # 공급자가 날짜 행 자체를 빠뜨린 경우
+        frame = frame.drop(frame.index[drop_at])
+    return frame
+
+
+def _us_etf_row(monkeypatch, frame):
+    import scanner.us_stocks as us
+    from scanner import market_analysis as ma
+    from scanner.weinstein import stage_of, _slope
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def history(self, period=None, auto_adjust=None):
+            return frame.copy()
+
+    monkeypatch.setattr(us.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(ma, "_weekly_stage", lambda df: None)
+    rows = []
+    ma._analyze_index({"ticker": "XLK", "name": "기술"}, "US", us.get_us_ohlcv, 150, stage_of, _slope, rows)
+    return rows[0]
+
+
+def test_us_adapter_path_keeps_missing_close_inside_the_window(monkeypatch):
+    """리뷰 재현: 어댑터의 dropna 가 최근 구간 결측 행을 지워 구간 밖 50 을 시작가로 쓰던 문제."""
+    frame = _provider_frame([50.0] * 139 + [100.0] * 21, nan_col="Close", nan_at=-10)
+    row = _us_etf_row(monkeypatch, frame)
+    assert row["return_status"] == st.INSUFFICIENT and row["return_20d"] is None
+    context = st.us_sector_context("AAPL", "Information Technology", [row])
+    assert context["sector_trend"] == st.INSUFFICIENT                       # STRONG_UP 아님
+
+
+def test_us_adapter_path_ignores_nan_in_other_columns(monkeypatch):
+    """종가는 정상이고 거래량만 비어도 dropna 가 행을 지우지만, 추세는 원본 종가로 정상 판정한다."""
+    frame = _provider_frame([50.0] * 139 + [100.0] * 21, nan_col="Volume", nan_at=-10)
+    row = _us_etf_row(monkeypatch, frame)
+    assert row["return_status"] == "OK" and row["return_20d"] == pytest.approx(0.0)
+    assert st.us_sector_context("AAPL", "Information Technology", [row])["sector_trend"] == "FLAT"
+
+
+def test_adapter_keeps_its_cleaned_frame_contract(monkeypatch):
+    import scanner.us_stocks as us
+
+    frame = _provider_frame([100.0] * 160, nan_col="Close", nan_at=-10)
+    monkeypatch.setattr(us.yf, "Ticker", lambda t: type("T", (), {"history": lambda self, **k: frame.copy()})())
+    df = us.get_us_ohlcv("XLK")
+    assert len(df) == 159 and not df.isna().any().any()                      # 매매 판정용 표는 그대로
+    assert len(df.attrs[st.RAW_CLOSE_ATTR]) == st.RAW_CLOSE_TAIL
+    assert df.attrs[st.RAW_CLOSE_ATTR].isna().sum() == 1
+
+
+def test_us_etf_missing_a_whole_date_row_is_caught_by_window_consensus(monkeypatch):
+    """날짜 행 자체가 빠지면 원본 종가로도 모른다. 같은 달력의 다른 ETF·지수와 구간이 달라 제외."""
+    import scanner.kr_stocks as kr
+    import scanner.us_stocks as us
+    from scanner import market_analysis as ma
+
+    normal = _provider_frame([50.0] * 139 + [100.0] * 21)
+    gapped = _provider_frame([50.0] * 140 + [100.0] * 20, drop_at=-10)   # 최근 구간에서 하루가 사라짐
+
+    def fetch(ticker, period="2y"):
+        frame = gapped if ticker == "XLE" else normal
+        df = frame[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        return st.attach_raw_close(df, frame["Close"])
+
+    monkeypatch.setattr(us, "get_us_ohlcv", fetch)
+    monkeypatch.setattr(kr, "get_kr_ohlcv", lambda ticker, period_years=2: None)
+    monkeypatch.setattr(ma, "_weekly_stage", lambda df: None)
+    monkeypatch.setattr(ma, "_cache", {})
+    monkeypatch.setattr(ma, "_cache_time", None)
+    stages = ma.get_market_stages(force=True)
+    by_ticker = {r["ticker"]: r for r in stages["US_SECTORS"]}
+    assert by_ticker["XLE"]["return_status"] == st.INSUFFICIENT and by_ticker["XLE"]["return_20d"] is None
+    assert by_ticker["XLK"]["return_status"] == "OK" and by_ticker["XLK"]["return_20d"] == pytest.approx(0.0)
+    assert all(r["return_status"] == "OK" for r in stages["US"])             # 지수 행은 바꾸지 않음
+
+
+def test_align_windows_needs_enough_peers():
+    lonely = [{"status": "OK", "start": "2026-10-01", "asof": "2026-10-30", "return_pct": 1.0},
+              {"status": "OK", "start": "2026-09-30", "asof": "2026-10-30", "return_pct": 9.0}]
+    assert st.align_windows(lonely) == "" and all(r["status"] == "OK" for r in lonely)
+
+
+def test_kr_scan_path_uses_raw_closes_and_drops_shifted_windows(monkeypatch):
+    """공급자(FDR) → 실제 get_kr_ohlcv → _scan_kr 수익률 수집 → 업종 집계."""
+    import FinanceDataReader
+    import scanner.kr_stocks as kr
+    import scanner.weinstein as weinstein
+    from scanner import scan_engine
+
+    flat_up = [50.0] * 139 + list(np.linspace(100, 102, 21))        # 최근 20거래일 +2%
+    frames = {f"00000{i}": _provider_frame(flat_up) for i in range(1, 6)}
+    frames["000006"] = _provider_frame(flat_up, nan_col="Close", nan_at=-10)          # 구간 안 결측
+    frames["000007"] = _provider_frame([50.0] * 140 + [100.0] * 19 + [140.0], drop_at=-10)  # 행 누락 +40%
+    monkeypatch.setattr(FinanceDataReader, "DataReader", lambda code, start, end: frames[code].copy())
+    monkeypatch.setattr(kr, "get_all_kr_tickers", lambda market_filter=None: [
+        {"ticker": code, "name": code, "market_type": "KOSPI"} for code in frames])
+    monkeypatch.setattr(weinstein, "analyze_stock", lambda *a, **k: None)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    captured = {}
+    monkeypatch.setattr(scan_engine, "_apply_kr_sector_trends",
+                        lambda db, universe, returns, started: captured.update(returns=returns, universe=universe))
+
+    scan_engine._scan_kr(None)
+    returns = captured["returns"]
+    assert returns["000006"]["status"] == st.INSUFFICIENT
+    assert returns["000007"]["status"] == "OK"                    # 혼자 보면 정상처럼 보이지만
+    out = st.aggregate_kr_sectors({code: "화학" for code in frames}, captured["universe"], returns)["화학"]
+    assert (out["sector_trend_sample"], out["sector_trend_members"]) == (5, 7)   # 구간이 다른 000007 제외
+    assert out["sector_trend"] == "UP" and out["sector_return_20d"] == pytest.approx(2.0)
