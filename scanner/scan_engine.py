@@ -924,7 +924,7 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
     from scanner.weinstein import analyze_stock
     import time
 
-    from scanner.sector_trends import trailing_return
+    from scanner.sector_trends import trailing_return, trend_close
 
     tickers = get_all_kr_tickers(market_filter=kr_universe)
     signals, count = [], 0
@@ -936,7 +936,8 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
         df = get_kr_ohlcv(info["ticker"])
         if df is None:
             continue
-        recent_returns[info["ticker"]] = trailing_return(df["Close"])
+        # dropna 이전 종가로 판정한다. 날짜 행 자체가 빠진 종목은 업종 집계의 구간 정렬에서 빠진다.
+        recent_returns[info["ticker"]] = trailing_return(trend_close(df))
         diag: Optional[dict] = {} if funnel is not None else None
         res = analyze_stock(df, info["ticker"], info["name"], "KR",
                             benchmark_close, market_condition, diag=diag)

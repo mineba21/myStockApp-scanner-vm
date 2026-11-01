@@ -140,6 +140,47 @@ def trailing_return(close, *, now=None, lookback: Optional[int] = None) -> Dict[
     return result
 
 
+# 가격 어댑터(get_us_ohlcv/get_kr_ohlcv)는 매매 판정용으로 결측 행을 dropna 한 표를 돌려준다.
+# 행이 지워지면 최근 구간이 과거로 늘어나므로, 어댑터는 dropna 이전 종가의 끝부분을 이 attrs
+# 키에 함께 실어 준다. 길이를 짧게 두는 이유: pandas 2.x 는 연산마다 attrs 를 깊은 복사한다.
+RAW_CLOSE_ATTR = "raw_close_tail"
+RAW_CLOSE_TAIL = 64
+
+
+def attach_raw_close(cleaned: pd.DataFrame, raw_close: pd.Series) -> pd.DataFrame:
+    """어댑터용: dropna 이전 종가의 최근 부분을 ``cleaned.attrs`` 에 싣는다."""
+    tail = pd.to_numeric(raw_close, errors="coerce").iloc[-RAW_CLOSE_TAIL:].copy()
+    tail.index = pd.to_datetime(tail.index)
+    if getattr(tail.index, "tz", None) is not None:
+        tail.index = tail.index.tz_localize(None)
+    cleaned.attrs[RAW_CLOSE_ATTR] = tail
+    return cleaned
+
+
+def trend_close(df: pd.DataFrame):
+    """추세 계산용 종가. 어댑터가 실은 dropna 이전 종가가 있으면 그것을, 없으면 Close 를 쓴다."""
+    raw = df.attrs.get(RAW_CLOSE_ATTR) if hasattr(df, "attrs") else None
+    return raw if raw is not None else df["Close"]
+
+
+def align_windows(results: Iterable[Dict[str, Any]], *, min_peers: int = 3) -> str:
+    """같은 거래소 달력을 쓰는 시리즈들의 구간을 서로 맞춰 본다(제자리 수정).
+
+    어댑터가 날짜 행 자체를 빠뜨리면 원본 종가로도 결측을 알 수 없다. 가장 흔한
+    (시작일, 종료일) 구간과 다른 결과는 실제 N거래일이 아닐 수 있으므로 INSUFFICIENT 로 바꾼다.
+    판정 가능한 결과가 ``min_peers`` 개 미만이면 비교하지 않는다. 기준 구간 문자열을 돌려준다.
+    """
+    results = list(results)
+    usable = [r for r in results if r.get("status") in ("OK", STALE) and r.get("start")]
+    if len(usable) < min_peers:
+        return ""
+    reference = Counter((r["start"], r["asof"]) for r in usable).most_common(1)[0][0]
+    for r in usable:
+        if (r["start"], r["asof"]) != reference:
+            r.update(status=INSUFFICIENT, return_pct=None)
+    return f"{reference[0]}~{reference[1]}"
+
+
 def context_from_return(result: Dict[str, Any]) -> Dict[str, Any]:
     """``trailing_return`` 결과 → 저장용 추세 필드."""
     if result.get("status") == "OK":

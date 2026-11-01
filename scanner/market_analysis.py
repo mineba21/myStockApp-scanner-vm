@@ -73,6 +73,8 @@ def get_market_stages(force: bool = False) -> Dict:
     for idx in KR_SECTOR_ETFS:
         _analyze_index(idx, "KR", get_kr_ohlcv, MA_PERIOD, stage_of, _slope, result["KR_SECTORS"])
 
+    _align_us_sector_windows(result)
+
     result["US_condition"] = _condition(result["US"])
     result["KR_condition"] = _condition(result["KR"])
 
@@ -127,8 +129,9 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list)
         pos52  = round((cur_p - low52) / (high52 - low52) * 100, 1) if high52 != low52 else 50.0
 
         # 섹터 최근 추세(표시 전용). 이미 받은 종가만 쓰며 추가 조회가 없다.
-        from scanner.sector_trends import trailing_return
-        recent = trailing_return(close)
+        # dropna 이전 종가(어댑터가 실어 줌)로 판정해야 결측 행 때문에 구간이 늘어나지 않는다.
+        from scanner.sector_trends import trailing_return, trend_close
+        recent = trailing_return(trend_close(df))
 
         out_list.append({
             "ticker": idx["ticker"],
@@ -138,6 +141,7 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list)
             "return_20d":    recent["return_pct"],
             "return_asof":   recent["asof"],
             "return_status": recent["status"],
+            "return_start":  recent.get("start"),
             # 종목 판정(Gate 3)과 같은 주봉 30-SMA 기준. Gate 2 와 섹터 요약이
             # 이 값을 쓴다. 위의 일봉 ``stage`` 는 _condition() → market_condition
             # 이 계속 사용하므로 시장 필터 동작은 불변이다.
@@ -150,6 +154,25 @@ def _analyze_index(idx, market, fetch_fn, MA_PERIOD, stage_of, _slope, out_list)
         })
     except Exception as e:
         logger.error(f"지수 분석 실패 {idx['ticker']}: {e}")
+
+
+def _align_us_sector_windows(result: Dict) -> None:
+    """미국 섹터 ETF 추세 구간을 같은 달력의 지수·섹터 ETF끼리 맞춘다(표시 전용).
+
+    공급자가 날짜 행 자체를 빠뜨리면 원본 종가로도 알 수 없으므로, 가장 흔한 구간과 다른
+    ETF 는 INSUFFICIENT 로 둔다. 지수 행(SPY/QQQ)은 비교 기준으로만 쓰고 바꾸지 않는다.
+    """
+    from scanner.sector_trends import align_windows
+    peers = []
+    for row in result.get("US", []) + result.get("US_SECTORS", []):
+        peers.append({"row": row, "status": row.get("return_status"), "start": row.get("return_start"),
+                      "asof": row.get("return_asof"), "return_pct": row.get("return_20d")})
+    align_windows(peers)
+    sector_rows = {id(r) for r in result.get("US_SECTORS", [])}
+    for peer in peers:
+        row = peer["row"]
+        if id(row) in sector_rows and peer["status"] != row.get("return_status"):
+            row["return_status"], row["return_20d"] = peer["status"], peer["return_pct"]
 
 
 def _weekly_stage(df) -> "str | None":

@@ -536,3 +536,126 @@ def test_process_signal_threads_rows_into_saved_snapshot(monkeypatch):
                                        "US", "BULL", None, sector_rows=ETF_ROWS) is True
     row = db.query(ScanResult).one()
     assert (row.sector_trend, row.sector_return_20d) == ("STRONG_UP", 6.4)
+
+
+# ── 공급자 응답 → 실제 어댑터 → 분석 → 표시 추세 (PR #6 리뷰) ─────────
+
+def _provider_frame(closes_list, *, end=None, nan_col=None, nan_at=None, drop_at=None):
+    """공급자 원본 응답 흉내. 실제 어댑터(get_us_ohlcv/get_kr_ohlcv)가 정제한다."""
+    end = end or pd.Timestamp.today().normalize()
+    idx = pd.bdate_range(end=end, periods=len(closes_list))
+    frame = pd.DataFrame({c: list(closes_list) for c in ("Open", "High", "Low", "Close")}, index=idx)
+    frame["Volume"] = 1000.0
+    if nan_at is not None:
+        frame.iloc[nan_at, frame.columns.get_loc(nan_col)] = np.nan
+    if drop_at is not None:      # 공급자가 날짜 행 자체를 빠뜨린 경우
+        frame = frame.drop(frame.index[drop_at])
+    return frame
+
+
+def _us_etf_row(monkeypatch, frame):
+    import scanner.us_stocks as us
+    from scanner import market_analysis as ma
+    from scanner.weinstein import stage_of, _slope
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def history(self, period=None, auto_adjust=None):
+            return frame.copy()
+
+    monkeypatch.setattr(us.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(ma, "_weekly_stage", lambda df: None)
+    rows = []
+    ma._analyze_index({"ticker": "XLK", "name": "기술"}, "US", us.get_us_ohlcv, 150, stage_of, _slope, rows)
+    return rows[0]
+
+
+def test_us_adapter_path_keeps_missing_close_inside_the_window(monkeypatch):
+    """리뷰 재현: 어댑터의 dropna 가 최근 구간 결측 행을 지워 구간 밖 50 을 시작가로 쓰던 문제."""
+    frame = _provider_frame([50.0] * 139 + [100.0] * 21, nan_col="Close", nan_at=-10)
+    row = _us_etf_row(monkeypatch, frame)
+    assert row["return_status"] == st.INSUFFICIENT and row["return_20d"] is None
+    context = st.us_sector_context("AAPL", "Information Technology", [row])
+    assert context["sector_trend"] == st.INSUFFICIENT                       # STRONG_UP 아님
+
+
+def test_us_adapter_path_ignores_nan_in_other_columns(monkeypatch):
+    """종가는 정상이고 거래량만 비어도 dropna 가 행을 지우지만, 추세는 원본 종가로 정상 판정한다."""
+    frame = _provider_frame([50.0] * 139 + [100.0] * 21, nan_col="Volume", nan_at=-10)
+    row = _us_etf_row(monkeypatch, frame)
+    assert row["return_status"] == "OK" and row["return_20d"] == pytest.approx(0.0)
+    assert st.us_sector_context("AAPL", "Information Technology", [row])["sector_trend"] == "FLAT"
+
+
+def test_adapter_keeps_its_cleaned_frame_contract(monkeypatch):
+    import scanner.us_stocks as us
+
+    frame = _provider_frame([100.0] * 160, nan_col="Close", nan_at=-10)
+    monkeypatch.setattr(us.yf, "Ticker", lambda t: type("T", (), {"history": lambda self, **k: frame.copy()})())
+    df = us.get_us_ohlcv("XLK")
+    assert len(df) == 159 and not df.isna().any().any()                      # 매매 판정용 표는 그대로
+    assert len(df.attrs[st.RAW_CLOSE_ATTR]) == st.RAW_CLOSE_TAIL
+    assert df.attrs[st.RAW_CLOSE_ATTR].isna().sum() == 1
+
+
+def test_us_etf_missing_a_whole_date_row_is_caught_by_window_consensus(monkeypatch):
+    """날짜 행 자체가 빠지면 원본 종가로도 모른다. 같은 달력의 다른 ETF·지수와 구간이 달라 제외."""
+    import scanner.kr_stocks as kr
+    import scanner.us_stocks as us
+    from scanner import market_analysis as ma
+
+    normal = _provider_frame([50.0] * 139 + [100.0] * 21)
+    gapped = _provider_frame([50.0] * 140 + [100.0] * 20, drop_at=-10)   # 최근 구간에서 하루가 사라짐
+
+    def fetch(ticker, period="2y"):
+        frame = gapped if ticker == "XLE" else normal
+        df = frame[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        return st.attach_raw_close(df, frame["Close"])
+
+    monkeypatch.setattr(us, "get_us_ohlcv", fetch)
+    monkeypatch.setattr(kr, "get_kr_ohlcv", lambda ticker, period_years=2: None)
+    monkeypatch.setattr(ma, "_weekly_stage", lambda df: None)
+    monkeypatch.setattr(ma, "_cache", {})
+    monkeypatch.setattr(ma, "_cache_time", None)
+    stages = ma.get_market_stages(force=True)
+    by_ticker = {r["ticker"]: r for r in stages["US_SECTORS"]}
+    assert by_ticker["XLE"]["return_status"] == st.INSUFFICIENT and by_ticker["XLE"]["return_20d"] is None
+    assert by_ticker["XLK"]["return_status"] == "OK" and by_ticker["XLK"]["return_20d"] == pytest.approx(0.0)
+    assert all(r["return_status"] == "OK" for r in stages["US"])             # 지수 행은 바꾸지 않음
+
+
+def test_align_windows_needs_enough_peers():
+    lonely = [{"status": "OK", "start": "2026-10-01", "asof": "2026-10-30", "return_pct": 1.0},
+              {"status": "OK", "start": "2026-09-30", "asof": "2026-10-30", "return_pct": 9.0}]
+    assert st.align_windows(lonely) == "" and all(r["status"] == "OK" for r in lonely)
+
+
+def test_kr_scan_path_uses_raw_closes_and_drops_shifted_windows(monkeypatch):
+    """공급자(FDR) → 실제 get_kr_ohlcv → _scan_kr 수익률 수집 → 업종 집계."""
+    import FinanceDataReader
+    import scanner.kr_stocks as kr
+    import scanner.weinstein as weinstein
+    from scanner import scan_engine
+
+    flat_up = [50.0] * 139 + list(np.linspace(100, 102, 21))        # 최근 20거래일 +2%
+    frames = {f"00000{i}": _provider_frame(flat_up) for i in range(1, 6)}
+    frames["000006"] = _provider_frame(flat_up, nan_col="Close", nan_at=-10)          # 구간 안 결측
+    frames["000007"] = _provider_frame([50.0] * 140 + [100.0] * 19 + [140.0], drop_at=-10)  # 행 누락 +40%
+    monkeypatch.setattr(FinanceDataReader, "DataReader", lambda code, start, end: frames[code].copy())
+    monkeypatch.setattr(kr, "get_all_kr_tickers", lambda market_filter=None: [
+        {"ticker": code, "name": code, "market_type": "KOSPI"} for code in frames])
+    monkeypatch.setattr(weinstein, "analyze_stock", lambda *a, **k: None)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    captured = {}
+    monkeypatch.setattr(scan_engine, "_apply_kr_sector_trends",
+                        lambda db, universe, returns, started: captured.update(returns=returns, universe=universe))
+
+    scan_engine._scan_kr(None)
+    returns = captured["returns"]
+    assert returns["000006"]["status"] == st.INSUFFICIENT
+    assert returns["000007"]["status"] == "OK"                    # 혼자 보면 정상처럼 보이지만
+    out = st.aggregate_kr_sectors({code: "화학" for code in frames}, captured["universe"], returns)["화학"]
+    assert (out["sector_trend_sample"], out["sector_trend_members"]) == (5, 7)   # 구간이 다른 000007 제외
+    assert out["sector_trend"] == "UP" and out["sector_return_20d"] == pytest.approx(2.0)
