@@ -51,7 +51,7 @@ def test_portfolio_projection_and_filters(monkeypatch):
     monkeypatch.setattr(webapp, "PORTFOLIO_READ_TOKEN", TOKEN)
     monkeypatch.setattr(
         "web.portfolio_read_api.get_kiwoom_account_summaries",
-        lambda: [
+        lambda *, holdings_basis: [
             _summary("account1", "자유투자", "US"),
             _summary("account2", "퀀트투자", "US"),
             _summary("account4", "ISA", "KR"),
@@ -134,3 +134,26 @@ def test_portfolio_broker_failure_is_generic(monkeypatch):
     )
     assert response.status_code == 502
     assert "secret brokerage response" not in response.text
+
+
+def test_site_and_mcp_summary_request_holdings_basis(monkeypatch):
+    import web.app as webapp
+    import web.portfolio_read_api as portfolio_api
+
+    calls = []
+
+    def summaries(*, holdings_basis=False):
+        calls.append(holdings_basis)
+        return [_summary("account1", "자유투자", "US")]
+
+    monkeypatch.setattr(webapp, "KIWOOM_WEB_ENABLED", True)
+    monkeypatch.setattr(webapp, "SITES_API_KEY", "site-test-key")
+    monkeypatch.setattr(webapp, "PORTFOLIO_READ_TOKEN", TOKEN)
+    monkeypatch.setattr(webapp, "get_kiwoom_account_summaries", summaries)
+    monkeypatch.setattr(portfolio_api, "get_kiwoom_account_summaries", summaries)
+    client = TestClient(webapp.app)
+    assert client.get("/api/portfolio-summary", headers={
+        "Authorization": "Bearer site-test-key"}).status_code == 200
+    assert client.get("/api/portfolio-read/overview", headers={
+        "Authorization": "Bearer " + TOKEN}).status_code == 200
+    assert calls == [True, True]

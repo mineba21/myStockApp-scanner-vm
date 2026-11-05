@@ -202,3 +202,106 @@ def test_domestic_only_profile_does_not_hide_domestic_holdings(monkeypatch):
     assert [(row["account_profile"], row["market"]) for row in rows] == [
         ("account4", "KR")
     ]
+
+
+def test_reporting_uses_ledger_totals_without_changing_sizing_or_cash(monkeypatch):
+    """Currency valuation can disagree even when settlement quantities are equal."""
+    kiwoom_holdings.clear_kiwoom_cache()
+    monkeypatch.setattr(kiwoom_holdings, "load_profile_configs", lambda: {
+        "account1": KiwoomConfig("fake-key", "fake-secret", "mock"),
+    })
+
+    class Client:
+        def __init__(self, config):
+            pass
+
+        def issue_token(self):
+            return {"token": "fake-token"}
+
+        def get_account_balance(self, token):
+            return {"holdings": [], "summary": {}}
+
+        def get_overseas_account_balance(self, token):
+            return {"complete": True, "summary": {
+                "crnc_code": "USD", "tot_evlt_amt": "300", "tot_pl_amt": "-20",
+                "tot_pl_rt": "-6.25", "tot_evlt_amt_krw": "420000",
+                "tot_pl_amt_krw": "-28000",
+            }, "holdings": [
+                {"stk_cd": "AAA", "crnc_code": "USD", "poss_qty": "2",
+                 "qty": "2", "now_pric": "100", "evlt_amt": "200"},
+                {"stk_cd": "BBB", "crnc_code": "USD", "poss_qty": "1",
+                 "qty": "1", "now_pric": "100", "evlt_amt": "100"},
+            ]}
+
+        def get_overseas_currency_valuation(self, token):
+            return {"summary": {"aset_evlt_amt": "840000"}, "items": [{
+                "crnc_code": "USD", "evlt_amt": "500", "crnc_rt": "1400",
+                "chg_evlt_amt": "700000", "chg_entr": "140000",
+            }]}
+
+        def get_overseas_valuation(self, token):
+            return {"items": [{"crnc_code": "USD", "pl_amt": "50", "pl_rt": "10"}]}
+
+        def get_overseas_deposit(self, token):
+            return {"items": [{"crnc_code": "USD", "fc_entra": "100",
+                               "fc_ord_alowa": "90", "fc_pymn_alowa": "80"}]}
+
+    try:
+        legacy = kiwoom_holdings.get_kiwoom_account_summaries(client_factory=Client)
+        report = kiwoom_holdings.get_kiwoom_account_summaries(
+            client_factory=Client, holdings_basis=True)
+        rows = kiwoom_holdings.get_kiwoom_holdings(client_factory=Client)
+        usd = report[0]["overseas"]
+        assert usd["evaluation_amount"] == sum(row["eval_amount"] for row in rows) == 300
+        assert (usd["profit_loss"], usd["profit_loss_pct"]) == (-20, -6.25)
+        assert (usd["evaluation_amount_krw"], usd["profit_loss_krw"]) == (420000, -28000)
+        assert (usd["cash"], usd["orderable_cash"], usd["withdrawable_cash"]) == (100, 90, 80)
+        assert usd["estimated_assets_krw"] == 840000  # Separate broker report, not recomputed.
+        assert usd["valuation_source"] == "ust21070"
+        assert legacy[0]["overseas"]["evaluation_amount"] == 500
+        assert kiwoom_holdings.get_kiwoom_account_summaries(client_factory=Client) == legacy
+        assert "_holdings_valuation" not in report[0]
+    finally:
+        kiwoom_holdings.clear_kiwoom_cache()
+
+
+def test_reporting_rejects_missing_or_incomplete_ledger_instead_of_wrong_tr(monkeypatch):
+    import pytest
+
+    for ledger in ({}, {"complete": False, "summary": {}}, {
+        "complete": True, "summary": {"crnc_code": "USD", "tot_evlt_amt": "NaN"},
+    }):
+        assert kiwoom_holdings._holdings_valuation(ledger) is None
+    cached = {"account_profile": "account1", "overseas": {"evaluation_amount": 500},
+              "_holdings_valuation": None}
+    monkeypatch.setattr(kiwoom_holdings, "_load_kiwoom_portfolio",
+                        lambda **kwargs: {"accounts": [cached]})
+    with pytest.raises(KiwoomError, match="원장 평가 합계"):
+        kiwoom_holdings.get_kiwoom_account_summaries(holdings_basis=True)
+    assert kiwoom_holdings.get_kiwoom_account_summaries()[0]["overseas"]["evaluation_amount"] == 500
+
+
+def test_reporting_domestic_account_does_not_require_us_ledger(monkeypatch):
+    cached = {"account_profile": "account4", "domestic": {"evaluation_amount": 1200},
+              "overseas": {}, "_holdings_valuation": None}
+    monkeypatch.setattr(kiwoom_holdings, "_load_kiwoom_portfolio",
+                        lambda **kwargs: {"accounts": [cached]})
+    assert kiwoom_holdings.get_kiwoom_account_summaries(holdings_basis=True)[0]["domestic"] == {
+        "evaluation_amount": 1200}
+
+
+def test_ledger_valuation_distinguishes_zero_from_missing_and_invalid():
+    summary = {"crnc_code": "USD", "tot_evlt_amt": "0", "tot_pl_amt": "0",
+               "tot_pl_rt": "0", "tot_evlt_amt_krw": "0", "tot_pl_amt_krw": "0"}
+    assert kiwoom_holdings._holdings_valuation({
+        "complete": True, "summary": summary})["evaluation_amount"] == 0
+    for field in ("tot_evlt_amt", "tot_pl_amt", "tot_pl_rt", "tot_evlt_amt_krw", "tot_pl_amt_krw"):
+        missing = {k: v for k, v in summary.items() if k != field}
+        assert kiwoom_holdings._holdings_valuation({"complete": True, "summary": missing}) is None
+        for invalid in (None, "", "NaN", "Infinity", "bad"):
+            assert kiwoom_holdings._holdings_valuation({
+                "complete": True, "summary": {**summary, field: invalid}}) is None
+    assert kiwoom_holdings._holdings_valuation({"complete": False, "summary": summary}) is None
+    assert kiwoom_holdings._holdings_valuation({"complete": True, "summary": None}) is None
+    assert kiwoom_holdings._holdings_valuation({
+        "complete": True, "summary": {**summary, "crnc_code": "KRW"}}) is None

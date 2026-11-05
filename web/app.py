@@ -913,7 +913,7 @@ async def portfolio_summary():
     if not KIWOOM_WEB_ENABLED:
         return []
     try:
-        return get_kiwoom_account_summaries()
+        return get_kiwoom_account_summaries(holdings_basis=True)
     except Exception:
         logger.exception("키움 계좌 요약 조회 실패")
         raise HTTPException(status_code=502, detail="키움 계좌 요약을 불러오지 못했습니다.")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import threading
 import time
@@ -263,6 +264,37 @@ def _optional_report(client: Any, method: str, token: str) -> dict[str, Any]:
     return call(token) if callable(call) else _empty_report()
 
 
+def _holdings_valuation(report: dict[str, Any]) -> dict[str, Any] | None:
+    """Report the same ledger valuation as the holdings, never another TR fallback."""
+    summary = report.get("summary")
+    if (report.get("complete") is not True or not isinstance(summary, dict)
+            or str(summary.get("crnc_code") or "").strip() != "USD"):
+        return None
+    fields = {
+        "evaluation_amount": "tot_evlt_amt",
+        "profit_loss": "tot_pl_amt",
+        "profit_loss_pct": "tot_pl_rt",
+        "evaluation_amount_krw": "tot_evlt_amt_krw",
+        "profit_loss_krw": "tot_pl_amt_krw",
+    }
+    result: dict[str, Any] = {}
+    for target, source in fields.items():
+        try:
+            value = float(str(summary[source]).strip().replace(",", ""))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        if target.startswith("evaluation_amount") and value < 0:
+            return None
+        result[target] = value
+    result["valuation_source"] = "ust21070"
+    # Cash, FX and overall assets remain the broker's separate cash/asset reports.
+    result["exchange_rate_source"] = "ust21120.crnc_rt"
+    result["estimated_assets_source"] = "ust21120.aset_evlt_amt"
+    return result
+
+
 def _account_summary(
     profile: str,
     domestic_balance: dict[str, Any],
@@ -409,6 +441,7 @@ def _load_kiwoom_portfolio(
                     updated_at=updated_at,
                 )
             )
+            accounts[-1]["_holdings_valuation"] = _holdings_valuation(overseas_balance)
         rows.sort(
             key=lambda item: (
                 item["account_profile"],
@@ -436,10 +469,25 @@ def get_kiwoom_holdings(
 def get_kiwoom_account_summaries(
     *,
     force: bool = False,
+    holdings_basis: bool = False,
     client_factory: Callable[[KiwoomConfig], KiwoomReadOnlyClient] = KiwoomReadOnlyClient,
 ) -> list[dict[str, Any]]:
-    """계좌별 원화·달러 현금과 국내·해외 평가손익을 반환한다."""
-    return _load_kiwoom_portfolio(force=force, client_factory=client_factory)["accounts"]
+    """계좌 요약. 화면/MCP는 holdings_basis로 보유종목과 같은 원장 기준을 쓴다.
+
+    기본값은 기존 사이징 소비자의 자산 기준을 보존한다. 표시 수정으로 주문 예산이나
+    스캐너 전략을 바꾸지 않으며, 보고용 값으로 공유 캐시를 덮어쓰지 않는다.
+    """
+    accounts = _load_kiwoom_portfolio(force=force, client_factory=client_factory)["accounts"]
+    result = []
+    for cached in accounts:
+        account = {**cached, "overseas": dict(cached["overseas"])}
+        valuation = account.pop("_holdings_valuation", None)
+        if holdings_basis and "US" in ACCOUNT_MARKETS.get(account["account_profile"], ()):
+            if valuation is None:
+                raise KiwoomError("미국주식 원장 평가 합계를 확인하지 못했습니다.")
+            account["overseas"].update(valuation)
+        result.append(account)
+    return result
 
 
 def clear_kiwoom_cache() -> None:

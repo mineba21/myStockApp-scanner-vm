@@ -68,6 +68,9 @@ def _account_projection(row: dict[str, Any]) -> dict[str, Any]:
             "evaluation_amount_krw": _number(source.get("evaluation_amount_krw")),
             "profit_loss_krw": _number(source.get("profit_loss_krw")),
             "estimated_assets_krw": _number(source.get("estimated_assets_krw")),
+            "valuation_source": source.get("valuation_source"),
+            "exchange_rate_source": source.get("exchange_rate_source"),
+            "estimated_assets_source": source.get("estimated_assets_source"),
         })
     return result
 
@@ -102,7 +105,7 @@ def _matches(account: str, profile: str) -> bool:
 @router.get("/overview")
 def portfolio_overview():
     try:
-        rows = [_account_projection(row) for row in get_kiwoom_account_summaries()]
+        rows = [_account_projection(row) for row in get_kiwoom_account_summaries(holdings_basis=True)]
     except Exception:
         raise HTTPException(502, "실계좌 요약을 조회하지 못했습니다.") from None
     rows = [row for row in rows if row["account_profile"] in ACCOUNT_MARKETS]
