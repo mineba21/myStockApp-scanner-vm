@@ -114,33 +114,60 @@ class Account1LiveBroker:
     def quote(self, ticker):
         """세 거래소 중 종목·거래소가 정확히 일치하는 호가 응답 하나만 채택한다."""
         matches = []
+        failed_exchanges = []
         for exchange in US_EXCHANGES:
+            source = "KIWOOM_USA20101"
             try:
-                quote = KiwoomAllocationLiveBroker._read_retry(
-                    lambda: self.client.get_overseas_orderbook(
-                        self.token, exchange=exchange, ticker=ticker,
-                    )
-                )["quote"]
-            except KiwoomError:
+                try:
+                    quote = KiwoomAllocationLiveBroker._read_retry(
+                        lambda: self.client.get_overseas_orderbook(
+                            self.token, exchange=exchange, ticker=ticker,
+                        )
+                    )["quote"]
+                except KiwoomError as exc:
+                    # Observed usa20101 service failure. Do not substitute cached scan
+                    # prices or bypass broker identity checks. usa20100 has no price time.
+                    if "[1632]" not in str(exc):
+                        raise
+                    quote = KiwoomAllocationLiveBroker._read_retry(
+                        lambda: self.client.get_overseas_quote(
+                            self.token, exchange=exchange, ticker=ticker,
+                        )
+                    )["quote"]
+                    source = "KIWOOM_USA20100"
+            except KiwoomError as exc:
+                # Only the broker's explicit no-symbol response rules out an exchange.
+                # Authentication, throttling and service errors do not mean 'not listed'.
+                if "[1903:" not in str(exc):
+                    failed_exchanges.append(exchange)
                 continue
             if (str(quote.get("stk_cd") or "").strip().upper() != ticker
                     or str(quote.get("stex_tp") or "").strip().upper() != exchange):
                 continue
             try:
-                price = abs(Decimal(str(quote.get("cur_prc")).replace(",", ""))).quantize(
-                    Decimal(".01"), rounding=ROUND_HALF_UP,
-                )
+                price = abs(Decimal(str(quote.get("cur_prc")).replace(",", "")))
+                if not price.is_finite():
+                    continue
+                price = price.quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
             except (InvalidOperation, ValueError):
                 continue
             if price <= 0:
                 continue
-            try:
-                as_of = datetime.strptime(
-                    f"{quote['dt']} {quote['bid_tm']}", "%Y%m%d %H:%M"
-                ).replace(tzinfo=NEW_YORK).timestamp()
-            except (KeyError, TypeError, ValueError):
-                as_of = None
-            matches.append({"exchange": exchange, "price": price, "as_of": as_of})
+            as_of = None
+            if source == "KIWOOM_USA20101":
+                try:
+                    as_of = datetime.strptime(
+                        f"{quote['dt']} {quote['bid_tm']}", "%Y%m%d %H:%M"
+                    ).replace(tzinfo=NEW_YORK).timestamp()
+                except (KeyError, TypeError, ValueError):
+                    pass
+            matches.append({"exchange": exchange, "price": price, "as_of": as_of,
+                            "source": source})
+        if failed_exchanges:
+            raise ScannerBuyBlocked(
+                f"{ticker}: 키움 시세 조회에 실패해 거래소를 확인하지 못했습니다"
+                f"({', '.join(failed_exchanges)}). 잠시 후 현재가를 다시 조회해 주세요."
+            )
         if len(matches) != 1:
             raise ScannerBuyBlocked(
                 f"{ticker}: 키움에서 거래소를 하나로 확정하지 못했습니다(일치 {len(matches)}건)."
@@ -422,6 +449,7 @@ class ScannerBuyOrders:
         order_id = uuid.uuid4().hex
         reserve = capacity.get("reserve_bps")
         details = {"current_price": str(current), "quote_as_of": quote.get("as_of"),
+                   "quote_source": quote.get("source"),
                    "upper_limit": str(quote["upper_limit"]) if quote.get("upper_limit") else None,
                    "risk": risk, "warnings": warnings,
                    "capacity_at_preview": {"max_quantity_with_reserve": max_qty,

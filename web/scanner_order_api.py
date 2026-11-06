@@ -167,7 +167,8 @@ def buy_quote(response: Response, result_id: int = Query(ge=1), db: Session = De
                 "account_profile": MARKETS[market]["account_profile"],
                 "current_price": price, "exchange": quote["exchange"],
                 "quote_as_of": as_of, "observed_at": observed,
-                "source": "KIWOOM_USA20101" if market == "US" else "KIWOOM_KA10001",
+                "source": quote.get("source") or (
+                    "KIWOOM_USA20101" if market == "US" else "KIWOOM_KA10001"),
                 "warnings": warnings}
 
     return _run(load, "키움 현재가 조회에 실패했습니다. 이전 스캔 가격으로 대체하지 않습니다.")

@@ -440,26 +440,35 @@ def test_live_broker_requires_real_profile():
 
 
 class QuoteClient:
-    def __init__(self, responses):
+    def __init__(self, responses, fallback_responses=None):
         self.responses = responses
+        self.fallback_responses = fallback_responses or {}
+        self.fallback_calls = []
 
     def get_overseas_orderbook(self, token, *, exchange, ticker):
         value = self.responses.get(exchange)
         if isinstance(value, Exception) or value is None:
-            raise value or KiwoomError("no data")
+            raise value or KiwoomError("조회 실패 (7): [1903:종목 정보가 없습니다.]")
+        return {"quote": value}
+
+    def get_overseas_quote(self, token, *, exchange, ticker):
+        self.fallback_calls.append((exchange, ticker))
+        value = self.fallback_responses.get(exchange)
+        if isinstance(value, Exception) or value is None:
+            raise value or KiwoomError("조회 실패 (7): [1903:종목 정보가 없습니다.]")
         return {"quote": value}
 
 
-def live_broker(responses):
+def live_broker(responses, fallback_responses=None):
     return Account1LiveBroker(KiwoomConfig("key", "secret", "real"),
-                              client=QuoteClient(responses), token="t",
+                              client=QuoteClient(responses, fallback_responses), token="t",
                               evidence=object(), orders=object())
 
 
 def test_live_broker_resolves_single_matching_exchange():
     broker = live_broker({
         "ND": {"stk_cd": "NVDA", "stex_tp": "ND", "cur_prc": "+182.454", "dt": "20261020", "bid_tm": "15:59"},
-        "NY": KiwoomError("not listed"),
+        "NY": KiwoomError("조회 실패 (7): [1903:종목 정보가 없습니다.]"),
         "NA": {"stk_cd": "NVDA", "stex_tp": "NA", "cur_prc": "0"},
     })
     quote = broker.quote("NVDA")
@@ -662,3 +671,96 @@ def test_quote_requires_broker_read_connection(api_env, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         api.buy_quote(Response(), 7, FakeDb(scan_row()))
     assert exc.value.status_code == 503
+
+
+ORDERBOOK_1632 = KiwoomError("호가 조회 실패 (7): 서비스를 처리하는 중에 오류가 발생했습니다[1632]")
+
+
+def test_orderbook_1632_uses_fresh_quote_with_verified_exchange_and_no_timestamp():
+    broker = live_broker({"ND": ORDERBOOK_1632}, {"ND": {
+        "stk_cd": "NVDA", "stex_tp": "ND", "cur_prc": "-182.454",
+        "dt": "20261106", "bid_tm": "10:00",  # Not a documented timestamp for usa20100.
+    }})
+    quote = broker.quote("NVDA")
+    assert quote == {"exchange": "ND", "price": Decimal("182.45"),
+                     "as_of": None, "source": "KIWOOM_USA20100"}
+    assert broker.client.fallback_calls == [("ND", "NVDA")]
+
+
+@pytest.mark.parametrize("changes", [
+    {"stk_cd": "OTHER"}, {"stex_tp": "NY"}, {"cur_prc": "0"},
+    {"cur_prc": "NaN"}, {"cur_prc": "Infinity"}, {"cur_prc": "bad"},
+])
+def test_fallback_still_requires_symbol_exchange_and_valid_price(changes):
+    broker = live_broker({"ND": ORDERBOOK_1632}, {"ND": {
+        "stk_cd": "NVDA", "stex_tp": "ND", "cur_prc": "100", **changes,
+    }})
+    with pytest.raises(ScannerBuyBlocked, match="일치 0건"):
+        broker.quote("NVDA")
+
+
+def test_fallback_does_not_choose_between_multiple_matching_exchanges():
+    broker = live_broker({"ND": ORDERBOOK_1632, "NY": ORDERBOOK_1632}, {
+        exchange: {"stk_cd": "ABC", "stex_tp": exchange, "cur_prc": "100"}
+        for exchange in ("ND", "NY")
+    })
+    with pytest.raises(ScannerBuyBlocked, match="일치 2건"):
+        broker.quote("ABC")
+
+
+@pytest.mark.parametrize("error", ["인증 실패 (8005)", "HTTP 오류: 503", "호가 조회 실패 (7): [16320]"])
+def test_other_service_errors_do_not_fall_back_or_claim_symbol_absence(error):
+    broker = live_broker({"ND": KiwoomError(error)})
+    with pytest.raises(ScannerBuyBlocked, match="시세 조회에 실패"):
+        broker.quote("NVDA")
+    assert broker.client.fallback_calls == []
+
+
+def test_one_match_does_not_override_an_unresolved_exchange_query():
+    broker = live_broker({"ND": {"stk_cd": "ABC", "stex_tp": "ND", "cur_prc": "100"},
+                          "NY": KiwoomError("HTTP 오류: 503")})
+    with pytest.raises(ScannerBuyBlocked, match="시세 조회에 실패"):
+        broker.quote("ABC")
+
+
+def test_failed_fallback_reports_quote_failure_without_broker_error_details():
+    broker = live_broker({"ND": ORDERBOOK_1632}, {"ND": KiwoomError("secret response")})
+    with pytest.raises(ScannerBuyBlocked, match="시세 조회에 실패") as exc:
+        broker.quote("NVDA")
+    assert "secret" not in str(exc.value)
+
+
+def test_valid_orderbook_never_calls_fallback():
+    broker = live_broker({"ND": {"stk_cd": "NVDA", "stex_tp": "ND", "cur_prc": "100"}})
+    assert broker.quote("NVDA")["source"] == "KIWOOM_USA20101"
+    assert broker.client.fallback_calls == []
+
+
+def test_quote_api_preserves_fallback_source_and_missing_timestamp_warning(api_env, monkeypatch):
+    from fastapi import Response
+    broker = live_broker({"ND": ORDERBOOK_1632}, {"ND": {
+        "stk_cd": "NVDA", "stex_tp": "ND", "cur_prc": "100",
+    }})
+    monkeypatch.setattr(api, "_broker", lambda market: broker)
+    monkeypatch.setattr(api, "_service", lambda: pytest.fail("no journal for quote"))
+    result = api.buy_quote(Response(), 7, FakeDb(scan_row()))
+    assert result["source"] == "KIWOOM_USA20100"
+    assert result["current_price"] == 100 and result["exchange"] == "ND"
+    assert result["quote_as_of"] is None
+    assert any("기준시각" in warning for warning in result["warnings"])
+
+
+def test_preview_keeps_fallback_warning_and_source_without_submitting(tmp_path):
+    broker = live_broker({"ND": ORDERBOOK_1632}, {"ND": {
+        "stk_cd": "NVDA", "stex_tp": "ND", "cur_prc": "100",
+    }})
+    fake = FakeBroker()
+    broker.buy_capacity = fake.buy_capacity
+    # broker.orders is an inert object: sending a real order cannot succeed in this test.
+    service = ScannerBuyOrders(tmp_path / "fallback.sqlite", lambda market: broker, clock=Clock())
+    result = service.prepare(candidate(), 1, 100)
+    assert result["state"] == "PREPARED"
+    assert result["details"]["quote_source"] == "KIWOOM_USA20100"
+    assert result["details"]["quote_as_of"] is None
+    assert any("시세 시각" in warning for warning in result["details"]["warnings"])
+    assert fake.buys == []
