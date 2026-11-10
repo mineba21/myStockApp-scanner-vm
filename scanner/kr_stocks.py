@@ -40,30 +40,48 @@ def get_all_kr_tickers(market_filter: str = "kospi+kosdaq") -> list:
       "kospi"        — KOSPI 만
       "kosdaq"       — KOSDAQ 만
     """
-    # ① KRX finder_stkisu 엔드포인트 직접 호출 (날짜 무관, 세션 불필요)
-    try:
-        import requests
-        resp = requests.post(
-            "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd",
-            headers={"User-Agent": "Mozilla/5.0", "Referer": "http://data.krx.co.kr/"},
-            data={"bld": "dbms/comm/finder/finder_stkisu", "mktsel": "ALL", "searchText": ""},
-            timeout=15,
-        )
-        items = resp.json().get("block1", [])
-        mkt_map = {"STK": "KOSPI", "KSQ": "KOSDAQ", "KNX": "KONEX"}
-        tickers = [
-            {
-                "ticker": it["short_code"],
-                "name": it["codeName"],
-                "market_type": mkt_map.get(it["marketCode"], it["marketCode"]),
-            }
-            for it in items
-            if it.get("marketCode") in ("STK", "KSQ")
-        ]
-        logger.info(f"한국 전종목 (필터 전): {len(tickers)}개")
-    except Exception as e:
-        logger.error(f"한국 티커 조회 실패: {e}")
-        return []
+    # HTTP 301 changes POST to GET and drops the finder parameters.
+    import requests
+    from scanner.errors import DataFetchError
+    tickers = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd",
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://data.krx.co.kr/"},
+                data={"bld": "dbms/comm/finder/finder_stkisu", "mktsel": "ALL", "searchText": ""},
+                timeout=(5, 20), allow_redirects=False,
+            )
+            logger.info("KRX finder attempt=%s status=%s bytes=%s", attempt + 1,
+                        resp.status_code, len(resp.content))
+            if resp.status_code != 200:
+                raise ValueError("unexpected KRX status")
+            payload = resp.json()
+            items = payload.get("block1") if isinstance(payload, dict) else None
+            if not isinstance(items, list) or not items:
+                raise ValueError("missing KRX inventory")
+            mkt_map = {"STK": "KOSPI", "KSQ": "KOSDAQ"}
+            result = []
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError("invalid KRX row")
+                if item.get("marketCode") not in mkt_map:
+                    continue
+                code, name = item.get("short_code"), item.get("codeName")
+                if not isinstance(code, str) or len(code) != 6 or not code.isdigit() or not isinstance(name, str) or not name.strip():
+                    raise ValueError("invalid KRX ticker")
+                result.append(dict(ticker=code, name=name, market_type=mkt_map[item["marketCode"]]))
+            if not result or len({t['ticker'] for t in result}) != len(result):
+                raise ValueError("empty or duplicate KRX inventory")
+            tickers = result
+            break
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("KRX finder failed attempt=%s error=%s", attempt + 1, type(exc).__name__)
+            if attempt < 2:
+                time.sleep(attempt + 1)
+    if tickers is None:
+        raise DataFetchError("KRX ticker inventory unavailable after 3 attempts")
+    logger.info("한국 전종목 (필터 전): %s개", len(tickers))
 
     # ② 시장 유형 필터 (KOSPI / KOSDAQ 선택)
     key = market_filter.lower().strip()

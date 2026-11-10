@@ -927,6 +927,9 @@ def _scan_kr(db, benchmark_close=None, market_condition=None, kr_universe="kospi
     from scanner.sector_trends import trailing_return, trend_close
 
     tickers = get_all_kr_tickers(market_filter=kr_universe)
+    if not tickers:
+        from scanner.errors import DataFetchError
+        raise DataFetchError("KR ticker inventory is empty")
     signals, count = [], 0
     started_at = datetime.utcnow()
     recent_returns = {}   # 업종 추세용. 이미 받은 종가만 쓴다.
