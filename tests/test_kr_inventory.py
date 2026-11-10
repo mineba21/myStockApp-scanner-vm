@@ -3,7 +3,7 @@ import requests
 from scanner import kr_stocks, scan_engine
 from scanner.errors import DataFetchError
 
-GOOD={'block1':[{'short_code':'005930','codeName':'삼성전자','marketCode':'STK'}]}
+GOOD={'block1':[{'short_code':'00104K','codeName':'삼성전자','marketCode':'STK'}]}
 
 class Response:
     status_code=200
@@ -24,7 +24,7 @@ def test_https_post_preserves_parameters(monkeypatch, setup):
         assert kw['allow_redirects'] is False and kw['data']['bld'].endswith('finder_stkisu')
         return Response(GOOD)
     monkeypatch.setattr(requests,'post',post)
-    assert kr_stocks.get_all_kr_tickers()[0]['ticker']=='005930'
+    assert kr_stocks.get_all_kr_tickers()[0]['ticker']=='00104K'
 
 @pytest.mark.parametrize('body',[{}, {'block1':[]}, {'block1':[None]}, ValueError('html')])
 def test_invalid_response_exhausts_then_raises(monkeypatch,setup,body):

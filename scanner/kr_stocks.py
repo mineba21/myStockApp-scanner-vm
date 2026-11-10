@@ -68,7 +68,7 @@ def get_all_kr_tickers(market_filter: str = "kospi+kosdaq") -> list:
                 if item.get("marketCode") not in mkt_map:
                     continue
                 code, name = item.get("short_code"), item.get("codeName")
-                if not isinstance(code, str) or len(code) != 6 or not code.isdigit() or not isinstance(name, str) or not name.strip():
+                if not isinstance(code, str) or len(code) != 6 or not (code.isascii() and code.isalnum()) or not isinstance(name, str) or not name.strip():
                     raise ValueError("invalid KRX ticker")
                 result.append(dict(ticker=code, name=name, market_type=mkt_map[item["marketCode"]]))
             if not result or len({t['ticker'] for t in result}) != len(result):
