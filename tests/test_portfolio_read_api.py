@@ -80,10 +80,35 @@ def test_portfolio_projection_and_filters(monkeypatch):
 
     all_rows = client.get("/api/portfolio-read/holdings").json()["items"]
     assert [row["ticker"] for row in all_rows] == ["AAPL", "SPY", "005930"]
+    assert all_rows[0]["profit_loss_to_assets_pct"] == 20 / 1100 * 100
+    assert all_rows[2]["profit_loss_to_assets_pct"] == 20 / 1100000 * 100
     selected = client.get("/api/portfolio-read/holdings?account=account2").json()["items"]
     assert [row["ticker"] for row in selected] == ["SPY"]
     assert not {"id", "memo", "account_number", "sell_status"} & selected[0].keys()
     assert "must-not-leak" not in str(selected)
+
+
+def test_asset_share_negative_zero_and_summary_failure(monkeypatch):
+    import web.app as webapp
+    import web.portfolio_read_api as api
+
+    monkeypatch.setattr(webapp, "PORTFOLIO_READ_TOKEN", TOKEN)
+    loss = _holding("account1", "자유투자", "US", "LOSS")
+    loss["profit_loss"] = -55
+    monkeypatch.setattr(api, "get_kiwoom_holdings", lambda: [loss])
+    monkeypatch.setattr(api, "get_kiwoom_account_summaries", lambda *, holdings_basis: [
+        _summary("account1", "자유투자", "US")])
+    client = TestClient(webapp.app, headers={"Authorization": "Bearer " + TOKEN})
+    assert client.get("/api/portfolio-read/holdings").json()["items"][0]["profit_loss_to_assets_pct"] == -5
+
+    empty = _summary("account1", "자유투자", "US")
+    empty["overseas"].update(cash=0, evaluation_amount=0)
+    monkeypatch.setattr(api, "get_kiwoom_account_summaries", lambda *, holdings_basis: [empty])
+    assert client.get("/api/portfolio-read/holdings").json()["items"][0]["profit_loss_to_assets_pct"] is None
+    monkeypatch.setattr(api, "get_kiwoom_account_summaries", lambda *, holdings_basis: (_ for _ in ()).throw(RuntimeError("secret")))
+    response = client.get("/api/portfolio-read/holdings")
+    assert response.json()["items"][0]["profit_loss_to_assets_pct"] is None
+    assert "secret" not in response.text
 
 
 def test_portfolio_credential_is_isolated(monkeypatch):

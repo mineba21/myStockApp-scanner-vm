@@ -34,7 +34,8 @@ from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
                     SECTOR_TREND_LOOKBACK_DAYS, SECTOR_TREND_STRONG_PCT,
                     SECTOR_TREND_FLAT_PCT)
 from web.asset_allocation_api import router as asset_allocation_router
-from web.kiwoom_holdings import get_kiwoom_account_summaries, get_kiwoom_holdings
+from web.kiwoom_holdings import (get_kiwoom_account_summaries, get_kiwoom_holdings,
+                                 add_profit_loss_to_assets_pct)
 from web.kiwoom_sell_analysis import apply_kiwoom_sell_analysis
 from web.kiwoom_sizing import apply_live_position_sizing
 from web.kiwoom_order_api import router as kiwoom_order_router
@@ -900,7 +901,14 @@ async def list_holdings(account_id: Optional[int] = None, db: Session = Depends(
     rows = [_holding_to_dict(h, db) for h in holdings]
     if KIWOOM_WEB_ENABLED and account_id is None:
         try:
-            rows.extend(apply_kiwoom_sell_analysis(get_kiwoom_holdings()))
+            broker_rows = apply_kiwoom_sell_analysis(get_kiwoom_holdings())
+            try:
+                broker_rows = add_profit_loss_to_assets_pct(
+                    broker_rows, get_kiwoom_account_summaries(holdings_basis=True)
+                )
+            except Exception:
+                broker_rows = add_profit_loss_to_assets_pct(broker_rows, [])
+            rows.extend(broker_rows)
         except Exception as exc:
             # 키움 장애가 기존 수동 보유현황까지 막지 않게 한다. 비밀값은 로깅하지 않는다.
             logger.warning("키움 실계좌 보유현황 조회 실패: %s", type(exc).__name__)

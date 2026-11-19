@@ -490,6 +490,35 @@ def get_kiwoom_account_summaries(
     return result
 
 
+def add_profit_loss_to_assets_pct(
+    rows: list[dict[str, Any]], accounts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Attach each broker holding's P/L as a share of its account's assets."""
+    rows = [dict(row) for row in rows]
+    totals = {}
+    for account in accounts:
+        profile = account.get("account_profile")
+        market = "US" if "US" in ACCOUNT_MARKETS.get(profile, ()) else "KR"
+        summary = account.get("overseas" if market == "US" else "domestic") or {}
+        cash = summary.get("cash")
+        evaluation = summary.get("evaluation_amount")
+        try:
+            cash, evaluation = float(cash), float(evaluation)
+            total = cash + evaluation
+            if math.isfinite(cash) and math.isfinite(evaluation) and total > 0:
+                totals[(profile, market)] = total
+        except (TypeError, ValueError):
+            pass
+    for row in rows:
+        if row.get("source") != "kiwoom":
+            continue
+        total = totals.get((row.get("account_profile"), row.get("market")))
+        row["profit_loss_to_assets_pct"] = (
+            _number(row.get("profit_loss")) / total * 100 if total else None
+        )
+    return rows
+
+
 def clear_kiwoom_cache() -> None:
     """테스트 및 강제 새로고침용 캐시 초기화."""
     with _LOCK:

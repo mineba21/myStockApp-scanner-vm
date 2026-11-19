@@ -952,6 +952,7 @@
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('avg_price')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">평단가 <span x-text="holdingSortIndicator('avg_price')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('current_price')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">현재가 <span x-text="holdingSortIndicator('current_price')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss_pct')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">수익률 <span x-text="holdingSortIndicator('profit_loss_pct')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss_to_assets_pct')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">총자산 대비 손익 <span x-text="holdingSortIndicator('profit_loss_to_assets_pct')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('eval_amount')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">평가금액 <span x-text="holdingSortIndicator('eval_amount')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">손익 <span x-text="holdingSortIndicator('profit_loss')"></span></button></th>
                 <th class="px-4 py-3 text-center"><button @click="setHoldingSort('unrealized_r')" class="inline-flex items-center gap-1 hover:text-indigo-600">R / 손절 <span x-text="holdingSortIndicator('unrealized_r')"></span></button></th>
@@ -981,6 +982,9 @@
                   <td class="px-4 py-3 text-right font-bold text-base"
                     :class="h.profit_loss_pct>0?'pct-pos':h.profit_loss_pct<0?'pct-neg':'pct-zero'"
                     x-text="h.current_price ? (h.profit_loss_pct>=0?'+':'')+h.profit_loss_pct?.toFixed(2)+'%' : '-'"></td>
+                  <td class="px-4 py-3 text-right font-semibold"
+                    :class="h.profit_loss_to_assets_pct>0?'pct-pos':h.profit_loss_to_assets_pct<0?'pct-neg':'pct-zero'"
+                    x-text="h.profit_loss_to_assets_pct==null?'-':(h.profit_loss_to_assets_pct>=0?'+':'')+h.profit_loss_to_assets_pct.toFixed(2)+'%'"></td>
                   <td class="px-4 py-3 text-right text-slate-700" x-text="'₩'+h.eval_amount?.toLocaleString()"></td>
                   <td class="px-4 py-3 text-right font-semibold"
                     :class="h.profit_loss>0?'text-emerald-600':h.profit_loss<0?'text-red-600':'text-slate-400'"
@@ -1072,6 +1076,7 @@
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('avg_price')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">평단가(USD) <span x-text="holdingSortIndicator('avg_price')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('current_price')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">현재가(USD) <span x-text="holdingSortIndicator('current_price')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss_pct')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">수익률 <span x-text="holdingSortIndicator('profit_loss_pct')"></span></button></th>
+                <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss_to_assets_pct')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">총자산 대비 손익 <span x-text="holdingSortIndicator('profit_loss_to_assets_pct')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('eval_amount')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">평가금액 <span x-text="holdingSortIndicator('eval_amount')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('eval_amount_krw')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">원화 평가 <span x-text="holdingSortIndicator('eval_amount_krw')"></span></button></th>
                 <th class="px-4 py-3 text-right"><button @click="setHoldingSort('profit_loss')" class="inline-flex items-center justify-end gap-1 w-full hover:text-indigo-600">손익(USD) <span x-text="holdingSortIndicator('profit_loss')"></span></button></th>
@@ -1102,6 +1107,9 @@
                   <td class="px-4 py-3 text-right font-bold text-base"
                     :class="h.profit_loss_pct>0?'pct-pos':h.profit_loss_pct<0?'pct-neg':'pct-zero'"
                     x-text="h.current_price ? (h.profit_loss_pct>=0?'+':'')+h.profit_loss_pct?.toFixed(2)+'%' : '-'"></td>
+                  <td class="px-4 py-3 text-right font-semibold"
+                    :class="h.profit_loss_to_assets_pct>0?'pct-pos':h.profit_loss_to_assets_pct<0?'pct-neg':'pct-zero'"
+                    x-text="h.profit_loss_to_assets_pct==null?'-':(h.profit_loss_to_assets_pct>=0?'+':'')+h.profit_loss_to_assets_pct.toFixed(2)+'%'"></td>
                   <td class="px-4 py-3 text-right text-slate-700" x-text="'$'+(h.eval_amount||0).toFixed(2)"></td>
                   <td class="px-4 py-3 text-right text-slate-500"
                     x-text="h.eval_amount ? '₩'+((h.eval_amount||0)*usdKrw).toLocaleString(undefined,{maximumFractionDigits:0}) : '-'"></td>

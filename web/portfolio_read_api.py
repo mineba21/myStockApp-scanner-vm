@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 
 from web.kiwoom_holdings import (
     ACCOUNT_MARKETS,
+    add_profit_loss_to_assets_pct,
     get_kiwoom_account_summaries,
     get_kiwoom_holdings,
 )
@@ -91,6 +92,7 @@ def _holding_projection(row: dict[str, Any]) -> dict[str, Any]:
         "evaluation_amount": _number(row.get("eval_amount")),
         "profit_loss": _number(row.get("profit_loss")),
         "profit_loss_pct": _number(row.get("profit_loss_pct")),
+        "profit_loss_to_assets_pct": row.get("profit_loss_to_assets_pct"),
         "evaluation_amount_krw": _number(row.get("eval_amount_krw")),
         "profit_loss_krw": _number(row.get("profit_loss_krw")),
         "price_updated_at": row.get("price_updated_at"),
@@ -130,6 +132,12 @@ def portfolio_holdings(account: Account = "ALL"):
         source = get_kiwoom_holdings()
     except Exception:
         raise HTTPException(502, "실계좌 보유종목을 조회하지 못했습니다.") from None
+    try:
+        source = add_profit_loss_to_assets_pct(
+            source, get_kiwoom_account_summaries(holdings_basis=True)
+        )
+    except Exception:
+        source = add_profit_loss_to_assets_pct(source, [])
     rows = [
         _holding_projection(row)
         for row in source
