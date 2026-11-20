@@ -102,3 +102,15 @@ def test_limits_status_and_empty_results(setup):
     for params in ({'limit':101},{'limit':0},{'market':'BAD'},{'after':'bad'},{'after':'2026-01-01'}, {'after_id':-1}):
         assert client.get('/api/scanner-read/signals',params=params).status_code==422
     assert client.get('/api/scanner-read/signals?market=KR&signal_type=BREAKOUT').json()['items']==[]
+
+
+def test_non_ascii_bearer_token_is_401_not_500(monkeypatch):
+    import web.app as webapp
+
+    monkeypatch.setattr(webapp, 'SCANNER_READ_TOKEN', TOKEN)
+    monkeypatch.setattr(webapp, 'PORTFOLIO_READ_TOKEN', 'p' * 40)
+    monkeypatch.setattr(webapp, 'SITES_API_KEY', 'site-key-' + 'k' * 32)
+    client = TestClient(webapp.app, raise_server_exceptions=False)
+    for path in ('/api/scanner-read/status', '/api/portfolio-read/overview', '/api/results'):
+        response = client.get(path, headers={'Authorization': b'Bearer \xed\x95\x9c\xea\xb8\x80'})
+        assert response.status_code == 401, (path, response.status_code)

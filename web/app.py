@@ -76,6 +76,11 @@ os.makedirs(static_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
+def _same_secret(a: str, b: str) -> bool:
+    """Constant-time compare that also accepts non-ASCII input (compare_digest raises on it)."""
+    return secrets.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
+
+
 @app.middleware("http")
 async def require_api_auth(request: Request, call_next):
     """Protect every API endpoint except the minimal health check."""
@@ -85,16 +90,16 @@ async def require_api_auth(request: Request, call_next):
 
     # Dedicated scanner credential must never become a trading credential.
     dedicated_tokens = [token for token in (SCANNER_READ_TOKEN, PORTFOLIO_READ_TOKEN) if token]
-    if (any(secrets.compare_digest(token, SITES_API_KEY) for token in dedicated_tokens)
+    if (any(_same_secret(token, SITES_API_KEY) for token in dedicated_tokens)
             or (len(dedicated_tokens) == 2
-                and secrets.compare_digest(dedicated_tokens[0], dedicated_tokens[1]))):
+                and _same_secret(dedicated_tokens[0], dedicated_tokens[1]))):
         return JSONResponse(status_code=503, content={"detail": "Dedicated read credentials must be unique"})
     if path.startswith('/api/scanner-read'):
         if len(SCANNER_READ_TOKEN) < 32:
             return JSONResponse(status_code=503, content={"detail": "Scanner read authentication is not configured"})
         scheme, _, token = request.headers.get('Authorization', '').partition(' ')
         if (scheme.lower() != 'bearer' or not token or
-                not secrets.compare_digest(token, SCANNER_READ_TOKEN)):
+                not _same_secret(token, SCANNER_READ_TOKEN)):
             return JSONResponse(status_code=401, content={"detail": "Invalid scanner read credentials"},
                                 headers={"WWW-Authenticate": "Bearer"})
         if request.method != 'GET' or not re.fullmatch(r'/api/scanner-read/(status|signals|signals/[1-9][0-9]*)', path):
@@ -110,7 +115,7 @@ async def require_api_auth(request: Request, call_next):
             return JSONResponse(status_code=503, content={"detail": "Portfolio read authentication is not configured"})
         scheme, _, token = request.headers.get('Authorization', '').partition(' ')
         if (scheme.lower() != 'bearer' or not token or
-                not secrets.compare_digest(token, PORTFOLIO_READ_TOKEN)):
+                not _same_secret(token, PORTFOLIO_READ_TOKEN)):
             return JSONResponse(status_code=401, content={"detail": "Invalid portfolio read credentials"},
                                 headers={"WWW-Authenticate": "Bearer"})
         if request.method != 'GET' or not re.fullmatch(r'/api/portfolio-read/(overview|holdings)', path):
@@ -127,7 +132,7 @@ async def require_api_auth(request: Request, call_next):
         )
 
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not token or not secrets.compare_digest(token, SITES_API_KEY):
+    if scheme.lower() != "bearer" or not token or not _same_secret(token, SITES_API_KEY):
         return JSONResponse(
             status_code=401,
             content={"detail": "Invalid or missing API credentials"},
