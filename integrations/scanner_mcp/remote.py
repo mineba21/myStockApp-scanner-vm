@@ -11,6 +11,7 @@ from pathlib import Path
 import secrets
 import sqlite3
 import time
+from collections import deque
 from contextlib import contextmanager
 from urllib.parse import urlsplit, parse_qs
 
@@ -42,6 +43,9 @@ class OwnerProvider:
             raise ValueError('Unsupported read-only scope')
         self.origin, self.resource, self.owner_hash = origin, origin+'/mcp', owner_hash
         self.scope = scope
+        # Global password-failure budget. Per-flow limits alone are bypassed by
+        # creating new flows, so failures are counted across all of them.
+        self._failures = deque()
         self.consent_title = consent_title
         self.consent_description = consent_description
         self.path=Path(db_path)
@@ -95,6 +99,18 @@ class OwnerProvider:
             self.put(db,'pending',flow,{'client_id':client.client_id,'params':params.model_dump(mode='json')},time.time()+600)
         return self.origin+'/consent?flow='+flow
 
+    MAX_FAILURES = 10
+    FAILURE_WINDOW = 900
+
+    def _lockout_seconds(self):
+        """Seconds until the global password budget frees up, or 0 if not locked."""
+        now = time.time()
+        while self._failures and now - self._failures[0] > self.FAILURE_WINDOW:
+            self._failures.popleft()
+        if len(self._failures) < self.MAX_FAILURES:
+            return 0
+        return max(1, int(self.FAILURE_WINDOW - (now - self._failures[0])))
+
     async def consent(self, request):
         headers={'Cache-Control':'no-store','Referrer-Policy':'same-origin',
                  'Content-Security-Policy':"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -137,7 +153,12 @@ class OwnerProvider:
                 self.delete(db,'pending',flow)
                 destination=construct_redirect_uri(str(params.redirect_uri),error='access_denied',state=params.state)
             else:
+                retry=self._lockout_seconds()
+                if retry:
+                    headers['Retry-After']=str(retry)
+                    return HTMLResponse('시도 횟수를 초과했습니다. 잠시 후 다시 시도하세요.',429,headers=headers)
                 if not secrets.compare_digest(digest(str(form.get('password',''))),self.owner_hash):
+                    self._failures.append(time.time())
                     pending['failures']=pending.get('failures',0)+1
                     if pending['failures']>=5: self.delete(db,'pending',flow)
                     else: self.put(db,'pending',flow,pending,time.time()+300)

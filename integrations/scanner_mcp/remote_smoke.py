@@ -123,4 +123,25 @@ class OAuthTests(unittest.TestCase):
             db.execute("UPDATE objects SET expires=0 WHERE kind='access'")
         self.assertEqual(self.client.post('/mcp',json={},headers={'Authorization':'Bearer '+token}).status_code,401)
 
+    def start_flow(self):
+        a=self.authorize(); page=self.client.get(a.headers['location'])
+        return {k:re.search('name="'+k+'" value="([^"]+)"',page.text).group(1) for k in ('flow','csrf')}
+    def post_password(self,fields,password):
+        return self.client.post('/consent',data={**fields,'password':password,'decision':'approve'},headers={'Origin':self.origin})
+    def test_password_failures_are_throttled_across_flows(self):
+        # Each flow allows 5 guesses; new flows must not reset a global budget.
+        for _ in range(2):
+            fields=self.start_flow()
+            for _ in range(5): self.assertEqual(self.post_password(fields,'wrong').status_code,403)
+        fields=self.start_flow()
+        # Locked: even the correct password is refused until the window passes.
+        r=self.post_password(fields,'owner-test-password')
+        self.assertEqual(r.status_code,429); self.assertIn('retry-after',r.headers)
+    def test_throttle_window_expires(self):
+        for _ in range(2):
+            fields=self.start_flow()
+            for _ in range(5): self.post_password(fields,'wrong')
+        self.provider._failures.clear()
+        self.assertEqual(self.post_password(self.start_flow(),'owner-test-password').status_code,303)
+
 if __name__=='__main__': unittest.main()
