@@ -1008,3 +1008,41 @@ def test_scan_setup_failure_does_not_leave_scan_marked_running(monkeypatch):
         assert result != {"status": "already_running"}
     finally:
         scan_engine.scan_status["is_running"] = False
+
+
+def test_running_flag_is_released_once_after_db_cleanup_even_if_error_commit_fails(monkeypatch):
+    """The flag must stay set until DB cleanup is done and be cleared by one outer owner.
+
+    Otherwise a failing commit in the error handler lets the inner finally clear the
+    flag early; a new scan can start and the outer handler then clears *its* flag.
+    """
+    import database.models as models
+    from scanner import scan_engine
+    import scanner.market_analysis as market_analysis
+
+    seen_at_close = []
+
+    class FakeDb:
+        def __init__(self):
+            self.commits = 0
+
+        def add(self, row): pass
+        def refresh(self, row): pass
+        def commit(self):
+            self.commits += 1
+            if self.commits >= 2:  # the error handler's commit
+                raise RuntimeError("commit failed")
+        def close(self):
+            seen_at_close.append(scan_engine.scan_status["is_running"])
+
+    monkeypatch.setattr(models, "SessionLocal", FakeDb)
+    monkeypatch.setattr(market_analysis, "get_market_stages",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("market data down")))
+    scan_engine.scan_status["is_running"] = False
+    try:
+        with pytest.raises(RuntimeError, match="commit failed"):
+            scan_engine.run_scan(market="US")
+        assert seen_at_close == [True], "flag was cleared before DB cleanup finished"
+        assert scan_engine.scan_status["is_running"] is False
+    finally:
+        scan_engine.scan_status["is_running"] = False

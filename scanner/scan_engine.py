@@ -439,11 +439,11 @@ def run_scan(market: str = "ALL", universe: str = None,
 
     try:
         return _run_scan_locked(market, universe, triggered_by)
-    except BaseException:
-        # Anything raised before the scan body's own try/finally (imports,
-        # session creation, ScanLog insert) must not leave the flag stuck.
+    finally:
+        # Single release point, reached only after _run_scan_locked has finished
+        # its own DB cleanup. Releasing earlier lets a new scan start and then be
+        # marked idle by this (older) scan's handler.
         scan_status["is_running"] = False
-        raise
 
 
 def _run_scan_locked(market, universe, triggered_by):
@@ -583,8 +583,7 @@ def _run_scan_locked(market, universe, triggered_by):
         return {"status": "error", "message": str(e), "funnel": funnels}
 
     finally:
-        scan_status["is_running"] = False
-        db.close()
+        db.close()  # running flag is released by run_scan() once this returns/raises
 
 
 def _append_entry_warning(signal: dict, message: str) -> None:
