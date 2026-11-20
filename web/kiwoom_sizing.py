@@ -91,6 +91,19 @@ def apply_live_position_sizing(
             row["live_sizing"] = None
             decorated.append(row)
             continue
+        unknown = (context["heat"].get("missing_stop_count", 0)
+                   + context["heat"].get("missing_price_count", 0))
+        if unknown:
+            # Broker holdings carry no stop, so the total-heat limit cannot be
+            # evaluated. Hide the quantity instead of suggesting a size that
+            # silently ignores existing risk.
+            row["live_sizing"] = None
+            row["live_sizing_blocked_reason"] = (
+                f"기존 보유 {unknown}건의 손절가 또는 현재가를 알 수 없어 "
+                "전체 위험(heat) 한도를 계산할 수 없습니다. 직접 판단하세요."
+            )
+            decorated.append(row)
+            continue
         result = calculate_position(
             entry=entry,
             stop=stop,
