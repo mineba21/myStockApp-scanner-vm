@@ -487,8 +487,12 @@ def get_kiwoom_account_summaries(
         valuation = account.pop("_holdings_valuation", None)
         if holdings_basis and "US" in ACCOUNT_MARKETS.get(account["account_profile"], ()):
             if valuation is None:
-                raise KiwoomError("미국주식 원장 평가 합계를 확인하지 못했습니다.")
-            account["overseas"].update(valuation)
+                # Fail closed for this account only: no other TR or zero is
+                # substituted, and the other accounts stay available.
+                account["overseas"] = {}
+                account["error"] = "미국주식 원장 평가 합계를 확인하지 못했습니다."
+            else:
+                account["overseas"].update(valuation)
         result.append(account)
     return result
 

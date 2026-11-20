@@ -182,3 +182,21 @@ def test_site_and_mcp_summary_request_holdings_basis(monkeypatch):
     assert client.get("/api/portfolio-read/overview", headers={
         "Authorization": "Bearer " + TOKEN}).status_code == 200
     assert calls == [True, True]
+
+
+def test_overview_reports_failed_ledger_account_without_zero_values(monkeypatch):
+    import web.app as webapp
+
+    monkeypatch.setattr(webapp, "PORTFOLIO_READ_TOKEN", TOKEN)
+    failed = {**_summary("account1", "자유투자", "US"), "error": "미국주식 원장 평가 합계를 확인하지 못했습니다."}
+    monkeypatch.setattr(
+        "web.portfolio_read_api.get_kiwoom_account_summaries",
+        lambda *, holdings_basis: [failed, _summary("account4", "ISA", "KR")],
+    )
+    client = TestClient(webapp.app, headers={"Authorization": "Bearer " + TOKEN})
+    response = client.get("/api/portfolio-read/overview")
+    assert response.status_code == 200
+    accounts = {a["account_profile"]: a for a in response.json()["accounts"]}
+    assert accounts["account1"]["markets"] == [] and accounts["account1"]["error"]
+    assert accounts["account4"]["markets"]
+    assert any("account1" in w and "원장" in w for w in response.json()["warnings"])

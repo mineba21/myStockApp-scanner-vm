@@ -276,9 +276,28 @@ def test_reporting_rejects_missing_or_incomplete_ledger_instead_of_wrong_tr(monk
               "_holdings_valuation": None}
     monkeypatch.setattr(kiwoom_holdings, "_load_kiwoom_portfolio",
                         lambda **kwargs: {"accounts": [cached]})
-    with pytest.raises(KiwoomError, match="원장 평가 합계"):
-        kiwoom_holdings.get_kiwoom_account_summaries(holdings_basis=True)
+    # The bad account is reported as unavailable; no other TR / zero is substituted.
+    report = kiwoom_holdings.get_kiwoom_account_summaries(holdings_basis=True)[0]
+    assert "원장 평가 합계" in report["error"]
+    assert report["overseas"] == {}
     assert kiwoom_holdings.get_kiwoom_account_summaries()[0]["overseas"]["evaluation_amount"] == 500
+
+
+def test_one_bad_us_ledger_does_not_hide_other_accounts(monkeypatch):
+    bad = {"account_profile": "account1", "overseas": {"evaluation_amount": 500},
+           "_holdings_valuation": None}
+    good = {"account_profile": "account2", "overseas": {"evaluation_amount": 7},
+            "_holdings_valuation": {"evaluation_amount": 300.0}}
+    domestic = {"account_profile": "account4", "domestic": {"evaluation_amount": 1200},
+                "overseas": {}, "_holdings_valuation": None}
+    monkeypatch.setattr(kiwoom_holdings, "_load_kiwoom_portfolio",
+                        lambda **kwargs: {"accounts": [bad, good, domestic]})
+    report = {r["account_profile"]: r
+              for r in kiwoom_holdings.get_kiwoom_account_summaries(holdings_basis=True)}
+    assert "error" in report["account1"]
+    assert report["account2"]["overseas"]["evaluation_amount"] == 300.0
+    assert "error" not in report["account2"] and "error" not in report["account4"]
+    assert report["account4"]["domestic"] == {"evaluation_amount": 1200}
 
 
 def test_reporting_domestic_account_does_not_require_us_ledger(monkeypatch):

@@ -38,6 +38,10 @@ def _account_projection(row: dict[str, Any]) -> dict[str, Any]:
         "read_only": True,
         "markets": [],
     }
+    if row.get("error"):
+        # Report the account as unavailable instead of fabricating zero balances.
+        result["error"] = str(row["error"])
+        return result
     if "KR" in allowed:
         source = row.get("domestic") or {}
         result["markets"].append({
@@ -113,6 +117,9 @@ def portfolio_overview():
     rows = [row for row in rows if row["account_profile"] in ACCOUNT_MARKETS]
     warnings = []
     for row in rows:
+        if row.get("error"):
+            warnings.append(f'{row["account_profile"]}: 원장 평가 합계를 확인하지 못해 값을 제공하지 않습니다. {row["error"]}')
+            continue
         values = row["markets"][0] if row["markets"] else {}
         fields = ("cash", "evaluation_amount", "estimated_assets", "estimated_assets_krw")
         if values and not any(_number(values.get(field)) for field in fields):
