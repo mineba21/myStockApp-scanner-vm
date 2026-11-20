@@ -982,3 +982,29 @@ class TestStrictFilterFlow:
 
         assert len(telegram_messages) == 1
         assert slack_messages == []
+
+
+def test_scan_setup_failure_does_not_leave_scan_marked_running(monkeypatch):
+    import database.models as models
+    from scanner import scan_engine
+
+    def boom():
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(models, "SessionLocal", boom)
+    scan_engine.scan_status["is_running"] = False
+    try:
+        try:
+            scan_engine.run_scan(market="US")
+        except RuntimeError:
+            pass
+        assert scan_engine.scan_status["is_running"] is False
+        # A later scan must not be refused with "already_running".
+        monkeypatch.setattr(models, "SessionLocal", boom)
+        try:
+            result = scan_engine.run_scan(market="US")
+        except RuntimeError:
+            result = None
+        assert result != {"status": "already_running"}
+    finally:
+        scan_engine.scan_status["is_running"] = False

@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
@@ -345,6 +346,7 @@ def _finalize_funnel(market: str, funnel: Optional[dict], count: int) -> None:
         logger.info(f"[{market}] funnel JSON: {path}")
 
 
+_scan_start_lock = threading.Lock()
 scan_status = {
     "is_running": False, "market": "",
     "progress": 0, "total": 0,
@@ -429,12 +431,22 @@ def _grade(signal: dict) -> str:
 
 def run_scan(market: str = "ALL", universe: str = None,
              triggered_by: str = "manual") -> dict:
-    if scan_status["is_running"]:
-        return {"status": "already_running"}
+    with _scan_start_lock:  # check-and-set must be atomic across scheduler/API threads
+        if scan_status["is_running"]:
+            return {"status": "already_running"}
+        scan_status.update(is_running=True, market=market,
+                           progress=0, total=0, started_at=datetime.now().isoformat())
 
-    scan_status.update(is_running=True, market=market,
-                       progress=0, total=0, started_at=datetime.now().isoformat())
+    try:
+        return _run_scan_locked(market, universe, triggered_by)
+    except BaseException:
+        # Anything raised before the scan body's own try/finally (imports,
+        # session creation, ScanLog insert) must not leave the flag stuck.
+        scan_status["is_running"] = False
+        raise
 
+
+def _run_scan_locked(market, universe, triggered_by):
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -455,7 +467,11 @@ def run_scan(market: str = "ALL", universe: str = None,
 
     db  = SessionLocal()
     log = ScanLog(market=market, triggered_by=triggered_by, status="RUNNING")
-    db.add(log); db.commit(); db.refresh(log)
+    try:
+        db.add(log); db.commit(); db.refresh(log)
+    except BaseException:
+        db.close()
+        raise
 
     buy_signals, total_scanned = [], 0
     funnels: dict = {}
