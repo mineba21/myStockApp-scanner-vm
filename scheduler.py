@@ -25,9 +25,14 @@ def _run(market: str):
 
 def _run_monthly_allocation():
     """Prior month close data, once before the first US session of the month."""
-    from web.asset_allocation_api import _latest_completed_month_end, _refresh_asset_allocation
+    from web.asset_allocation_api import (
+        _claim_allocation, _latest_completed_month_end, _refresh_asset_allocation,
+    )
     requested = _latest_completed_month_end(datetime.now(NEW_YORK).date())
     for profile in ("easy", "original"):
+        if not _claim_allocation(profile, requested):
+            logger.info("[스케줄러] 자산배분 계산이 이미 진행 중이라 건너뜀: %s %s", profile, requested)
+            continue
         logger.info("[스케줄러] 자산배분 자동 계산 시작: %s %s", profile, requested)
         _refresh_asset_allocation(profile, requested)
 

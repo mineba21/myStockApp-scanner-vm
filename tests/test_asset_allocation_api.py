@@ -314,3 +314,34 @@ def test_broker_errors_across_rebalance_routes_do_not_leak(client, monkeypatch, 
     assert '증권사 조회·검증' in response.json()['detail']
     assert 'secret' not in response.text
     assert '기존 주문 상태' in response.json()['detail']
+
+
+def test_unexpected_error_in_refresh_clears_running_flag(client, monkeypatch):
+    from datetime import date
+
+    test_client, api = client
+    requested = date(2026, 8, 31)
+    key = api._allocation_key("easy", requested)
+    api._allocation_runtime[key] = {"is_running": True, "error": None, "updated_at": None}
+    # A set is not JSON serializable -> TypeError, which is not OSError/RuntimeError.
+    monkeypatch.setattr(api, "_run_asset_allocation",
+                        lambda profile, as_of: {"combined_allocations": {"X"}})
+    monkeypatch.setattr(api, "build_live_allocation_sizing", lambda report: None)
+    api._refresh_asset_allocation("easy", requested)
+    state = api._allocation_runtime[key]
+    assert state["is_running"] is False and state["error"]
+
+
+def test_monthly_scheduler_does_not_race_a_running_manual_refresh(client, monkeypatch):
+    import scheduler as sched
+    from datetime import date
+
+    _, api = client
+    requested = date(2026, 8, 31)
+    monkeypatch.setattr(api, "_latest_completed_month_end", lambda today: requested)
+    key = api._allocation_key("easy", requested)
+    api._allocation_runtime[key] = {"is_running": True, "error": None, "updated_at": None}
+    calls = []
+    monkeypatch.setattr(api, "_refresh_asset_allocation", lambda p, r: calls.append(p))
+    sched._run_monthly_allocation()
+    assert calls == ["original"]  # "easy" is already running and is skipped

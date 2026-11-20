@@ -124,6 +124,16 @@ def _run_asset_allocation(profile: str, requested: date):
     return report
 
 
+def _claim_allocation(profile: str, requested: date) -> bool:
+    """Atomically mark a calculation as running. False if one is already running."""
+    key = _allocation_key(profile, requested)
+    with _allocation_lock:
+        if _allocation_runtime.get(key, {}).get("is_running"):
+            return False
+        _allocation_runtime[key] = {"is_running": True, "error": None, "updated_at": None}
+    return True
+
+
 def _refresh_asset_allocation(profile: str, requested: date):
     key = _allocation_key(profile, requested)
     try:
@@ -152,7 +162,9 @@ def _refresh_asset_allocation(profile: str, requested: date):
             _allocation_runtime[key] = {
                 "is_running": False, "error": None, "updated_at": updated_at,
             }
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+    except Exception as exc:
+        # Any failure must clear is_running; otherwise refreshes return
+        # "already_running" and live sizing stays hidden until restart.
         logger.exception("자산배분 계산 실패: %s", key)
         with _allocation_lock:
             _allocation_runtime[key] = {
@@ -202,11 +214,8 @@ async def refresh_asset_allocation(
     as_of: Optional[str] = None,
 ):
     profile, requested = _allocation_params(profile, as_of)
-    key = _allocation_key(profile, requested)
-    with _allocation_lock:
-        if _allocation_runtime.get(key, {}).get("is_running"):
-            return {"status": "already_running", "profile": profile, "as_of": requested.isoformat()}
-        _allocation_runtime[key] = {"is_running": True, "error": None, "updated_at": None}
+    if not _claim_allocation(profile, requested):
+        return {"status": "already_running", "profile": profile, "as_of": requested.isoformat()}
     background_tasks.add_task(_refresh_asset_allocation, profile, requested)
     return {"status": "started", "profile": profile, "as_of": requested.isoformat()}
 
