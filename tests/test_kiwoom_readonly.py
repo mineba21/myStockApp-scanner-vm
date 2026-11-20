@@ -292,3 +292,10 @@ def test_balance_reports_snapshot_completeness(monkeypatch, method, key, headers
     session = _Session([_Response({'return_code': 0, key: rows}, headers=headers)])
     client = KiwoomReadOnlyClient(KiwoomConfig('key', 'secret'), session)
     assert getattr(client, method)('token', max_pages=1)['complete'] is complete
+
+
+def test_domestic_quote_accepts_krx_alphanumeric_code():
+    session = _Session([_Response({"return_code": 0, "stk_cd": "0000D0", "cur_prc": "+1000"})])
+    client = KiwoomReadOnlyClient(KiwoomConfig("key", "secret"), session)
+    client.get_domestic_quote("token", ticker="0000D0")
+    assert session.calls[0][1]["json"] == {"stk_cd": "0000D0"}

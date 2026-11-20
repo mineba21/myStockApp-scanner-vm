@@ -138,11 +138,11 @@ class KiwoomOrderClient:
 
     @staticmethod
     def _kr_symbol(exchange, ticker):
-        exchange, ticker = str(exchange).strip().upper(), str(ticker).strip()
+        exchange, ticker = str(exchange).strip().upper(), str(ticker).strip().upper()
         if exchange not in {"KRX", "NXT", "SOR"}:
             raise KiwoomError("국내 거래소 코드는 KRX, NXT, SOR 중 하나여야 합니다.")
-        if len(ticker) != 6 or not ticker.isascii() or not ticker.isdigit():
-            raise KiwoomError("국내주식 종목코드는 숫자 6자리여야 합니다.")
+        if len(ticker) != 6 or not ticker.isascii() or not ticker.isalnum():
+            raise KiwoomError("국내주식 종목코드는 영문 대문자·숫자 6자리여야 합니다.")
         return exchange, ticker
 
     def _post(self, token, api_id, payload, *, action, path, market):

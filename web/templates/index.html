@@ -467,10 +467,10 @@
         </div>
         <!-- 지정가 매수 티켓: 미국 → 자유투자(account1), 국내 → ISA(account4) -->
         <button type="button" @click="openScanBuy(r)"
-          :disabled="r.strict_filter_passed === false"
-          :title="r.strict_filter_passed === false ? 'Strict 거부 행은 매수 동선 차단 (QA 인스펙트 전용)' : scanBuyAccountLabel(r.market)+' 지정가 매수'"
+          :disabled="r.strict_filter_passed !== true"
+          :title="r.strict_filter_passed !== true ? 'Strict 필터 통과가 확인되지 않은 종목(거부 또는 미평가)은 매수할 수 없습니다.' : scanBuyAccountLabel(r.market)+' 지정가 매수'"
           class="w-full mt-2 text-xs font-semibold rounded-lg py-1.5 bg-emerald-600 text-white hover:bg-emerald-700 transition"
-          :class="r.strict_filter_passed === false ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''"
+          :class="r.strict_filter_passed !== true ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''"
           x-text="'🛒 매수 · '+(r.market === 'US' ? '자유투자' : 'ISA')">
         </button>
       </div>
@@ -2714,7 +2714,7 @@ function app() {
     },
 
     async openScanBuy(r) {
-      if (r.strict_filter_passed === false) return;
+      if (r.strict_filter_passed !== true) return;
       const s = this.scanBuy;
       const session = ++s.session;
       s.result = r;

@@ -16,13 +16,16 @@ account2 ETF 차액 재분배 흐름과는 코드·저널·설정 스위치가 �
 - `ExecutionEvidence(account="account1")` 허용(기본값은 계속 account2),
   `DomesticExecutionEvidence.orderable_cash()` 추가, `KiwoomReadOnlyClient.get_domestic_quote()`(ka10001) 추가.
 - 화면: 스캔 카드의 `🛒 매수 · 자유투자` / `🛒 매수 · ISA` → 주문 티켓.
+  기본 화면은 Strict 통과(`strict_filter_passed=true`)인 행만 매수 버튼을 활성화하고
+  주문창 진입을 허용한다. 거부(`false`)·미평가(`null` 또는 필드 누락)는 차단한다.
 
 ## 흐름과 안전장치 (두 시장 공통)
 
 1. **미리보기** `POST /api/scanner-orders/buy/preview {result_id, quantity, limit_price}`
    - 종목·시장·손절가·Strict 결과는 브라우저 값이 아니라 DB의 스캔 결과에서 읽는다.
      시장이 계좌를 정한다. 브라우저가 계좌를 고를 수 없다.
-   - Strict 거부(`strict_filter_passed=false`)면 차단한다.
+   - Strict 통과(`strict_filter_passed=true`)가 확인된 경우만 허용한다.
+     거부(`false`)뿐 아니라 과거 결과 등 미평가(`null` 또는 필드 누락)도 차단한다.
    - 지정가가 키움 현재가보다 10% 넘게 높으면 오입력으로 보고 차단, 10% 넘게 낮으면 경고.
    - 지정가 ≤ 손절가면 차단. 손절가가 있으면 주당·총 손절 손실을 보여준다.
    - 주문가능수량을 넘으면 차단(아래 시장별). 여유금 `SCANNER_ORDER_RESERVE_BPS`(기본 100bps)는
@@ -124,6 +127,7 @@ ETF·ETN 호가단위(2,000원 미만 1원, 이상 5원)는 같은 가격대 주
 매수 버튼을 누를 때 `GET /api/scanner-orders/quote?result_id=...`가 저장된 후보의
 시장·종목으로 키움 시세를 새로 조회한다. 미국은 account1 `usa20101`(아래 1632 보완 경로 포함), 국내는
 account4 `ka10001`을 사용한다. 주문 저널이나 전송 스위치 없이 조회만 가능하다.
+이 조회도 DB의 Strict 통과(`true`)를 확인하며, 거부·미평가 행은 시세를 요청하기 전에 차단한다.
 시세 조회 실패 때 스캔 당시 가격으로 대체하지 않고 지정가를 비운다. 화면은 조회한
 현재가를 지정가에 채우고 가격 기준시각과 조회시각을 구분해 표시한다. 시각 미제공·지연
 경고를 유지한다. 현재가 재조회는 기존 미리보기와 종목코드 확인을 무효화한다.
@@ -163,3 +167,12 @@ account4 `ka10001`을 사용한다. 주문 저널이나 전송 스위치 없이 
   실제 API 출처를 기록한다. account2 ETF의 시세 유효성 규칙은 수정하지 않는다.
 - 시장별 전송 스위치, 주문가능수량 확인, 최종 사용자 확인, 접수·체결 구분은 유지한다.
   가짜 응답·임시 저널 테스트 93개 통과. 실계좌 조사는 시세 읽기만 했으며 실주문·체결은 검증하지 않았다.
+
+## 실계좌 기준 제안 수량(live_sizing)과 열(heat) 한도
+
+`/api/results`의 `live_sizing`은 account1(미국)·account4(국내) 실시간 현금 기준 참고 수량이다.
+증권사 보유 행에는 손절가가 없어 기존 포지션의 위험을 계산할 수 없으므로, 해당 계좌에 손절가 또는
+현재가를 알 수 없는 보유가 하나라도 있으면 `live_sizing`을 숨기고(`null`)
+`live_sizing_blocked_reason`에 사유를 담는다. 위험을 0으로 보고 전체 한도(`MAX_TOTAL_HEAT_PCT`)를
+그대로 쓰는 방식은 쓰지 않는다. 계좌·시장별로 판단하며 account2 ETF 보유는 영향을 주지 않는다.
+스캔 시점에 저장된 `suggested_qty`는 수동 보유 기준으로 별도 계산한 값이며 이 변경 대상이 아니다.

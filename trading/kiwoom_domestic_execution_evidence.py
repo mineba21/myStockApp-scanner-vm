@@ -39,7 +39,7 @@ def ticker(value):
     result = str(value or "").strip().upper()
     if len(result) == 7 and result[0] in {"A", "J", "Q"}:
         result = result[1:]
-    if len(result) != 6 or not result.isascii() or not result.isdigit():
+    if len(result) != 6 or not result.isascii() or not result.isalnum():
         raise KiwoomError("유효한 국내 종목코드가 없습니다.")
     return result
 

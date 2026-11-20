@@ -141,6 +141,13 @@ def test_order_client_sends_domestic_cancel_shape():
     assert result["original_order_number"] == "0000123"
 
 
+def test_domestic_buy_accepts_krx_alphanumeric_code():
+    session = Session("0000123")
+    client = KiwoomOrderClient(KiwoomConfig("key", "secret", "mock"), session)
+    client.buy_kr_limit("token", exchange="KRX", ticker="0000D0", quantity=1, price=70000)
+    assert session.calls[0][1]["json"]["stk_cd"] == "0000D0"
+
+
 @pytest.mark.parametrize("ticker,price", [("5930", 70000), ("005930", 70000.0), ("005930", 0)])
 def test_domestic_limit_validates_ticker_and_integer_price(ticker, price):
     client = KiwoomOrderClient(KiwoomConfig("key", "secret", "mock"), Session())
@@ -247,7 +254,7 @@ def test_sell_quote_uses_account2_kiwoom_current_price(monkeypatch):
     monkeypatch.setattr(kiwoom_order_api, "KiwoomReadOnlyClient", Client)
     monkeypatch.setattr(kiwoom_order_api, "_get_token", lambda *args: "token")
 
-    result = asyncio.run(kiwoom_order_api.quote_sell("QQQ"))
+    result = kiwoom_order_api.quote_sell("QQQ")
 
     assert result["current_price"] == 512.34
     assert result["source"] == "KIWOOM_USA20100"

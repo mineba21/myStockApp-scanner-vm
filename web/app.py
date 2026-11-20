@@ -76,6 +76,11 @@ os.makedirs(static_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
+def _same_secret(a: str, b: str) -> bool:
+    """Constant-time compare that also accepts non-ASCII input (compare_digest raises on it)."""
+    return secrets.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
+
+
 @app.middleware("http")
 async def require_api_auth(request: Request, call_next):
     """Protect every API endpoint except the minimal health check."""
@@ -85,16 +90,16 @@ async def require_api_auth(request: Request, call_next):
 
     # Dedicated scanner credential must never become a trading credential.
     dedicated_tokens = [token for token in (SCANNER_READ_TOKEN, PORTFOLIO_READ_TOKEN) if token]
-    if (any(secrets.compare_digest(token, SITES_API_KEY) for token in dedicated_tokens)
+    if (any(_same_secret(token, SITES_API_KEY) for token in dedicated_tokens)
             or (len(dedicated_tokens) == 2
-                and secrets.compare_digest(dedicated_tokens[0], dedicated_tokens[1]))):
+                and _same_secret(dedicated_tokens[0], dedicated_tokens[1]))):
         return JSONResponse(status_code=503, content={"detail": "Dedicated read credentials must be unique"})
     if path.startswith('/api/scanner-read'):
         if len(SCANNER_READ_TOKEN) < 32:
             return JSONResponse(status_code=503, content={"detail": "Scanner read authentication is not configured"})
         scheme, _, token = request.headers.get('Authorization', '').partition(' ')
         if (scheme.lower() != 'bearer' or not token or
-                not secrets.compare_digest(token, SCANNER_READ_TOKEN)):
+                not _same_secret(token, SCANNER_READ_TOKEN)):
             return JSONResponse(status_code=401, content={"detail": "Invalid scanner read credentials"},
                                 headers={"WWW-Authenticate": "Bearer"})
         if request.method != 'GET' or not re.fullmatch(r'/api/scanner-read/(status|signals|signals/[1-9][0-9]*)', path):
@@ -110,7 +115,7 @@ async def require_api_auth(request: Request, call_next):
             return JSONResponse(status_code=503, content={"detail": "Portfolio read authentication is not configured"})
         scheme, _, token = request.headers.get('Authorization', '').partition(' ')
         if (scheme.lower() != 'bearer' or not token or
-                not secrets.compare_digest(token, PORTFOLIO_READ_TOKEN)):
+                not _same_secret(token, PORTFOLIO_READ_TOKEN)):
             return JSONResponse(status_code=401, content={"detail": "Invalid portfolio read credentials"},
                                 headers={"WWW-Authenticate": "Bearer"})
         if request.method != 'GET' or not re.fullmatch(r'/api/portfolio-read/(overview|holdings)', path):
@@ -127,7 +132,7 @@ async def require_api_auth(request: Request, call_next):
         )
 
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not token or not secrets.compare_digest(token, SITES_API_KEY):
+    if scheme.lower() != "bearer" or not token or not _same_secret(token, SITES_API_KEY):
         return JSONResponse(
             status_code=401,
             content={"detail": "Invalid or missing API credentials"},
@@ -206,7 +211,7 @@ def _parse_filter_reasons(raw: Optional[str]) -> List[str]:
 
 
 @app.get("/api/results")
-async def get_results(market: str = "ALL", signal_type: str = "ALL",
+def get_results(market: str = "ALL", signal_type: str = "ALL",
                       days: int = 7, limit: int = 200,
                       include_rejected: bool = False,
                       prioritize_13f: bool = True,
@@ -486,7 +491,7 @@ def _build_chart_overlay(row, daily) -> dict:
 
 
 @app.get("/api/chart/ohlcv")
-async def get_chart_ohlcv(
+def get_chart_ohlcv(
     market: str = Query(..., description="KR 또는 US"),
     ticker: str = Query(..., min_length=1, max_length=15),
     timeframe: str = Query("daily", description="daily 또는 weekly"),
@@ -893,7 +898,7 @@ async def delete_transaction(tx_id: int, db: Session = Depends(get_db)):
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/api/holdings")
-async def list_holdings(account_id: Optional[int] = None, db: Session = Depends(get_db)):
+def list_holdings(account_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(Holding).filter(Holding.is_active == True, Holding.quantity > 0)
     if account_id:
         q = q.filter(Holding.account_id == account_id)
@@ -916,7 +921,7 @@ async def list_holdings(account_id: Optional[int] = None, db: Session = Depends(
 
 
 @app.get("/api/portfolio-summary")
-async def portfolio_summary():
+def portfolio_summary():
     """키움 실계좌별 현금·평가손익 요약. 주문 및 환전 기능은 포함하지 않는다."""
     if not KIWOOM_WEB_ENABLED:
         return []
@@ -1083,7 +1088,7 @@ async def telegram_test():
 
 
 @app.get("/api/market/status")
-async def get_market_status(force: bool = False):
+def get_market_status(force: bool = False):
     """미국·한국 지수 Stage 분석 (Forest to Trees)"""
     try:
         from scanner.market_analysis import get_market_stages
@@ -1093,7 +1098,7 @@ async def get_market_status(force: bool = False):
 
 
 @app.get("/api/exchange-rate")
-async def get_exchange_rate():
+def get_exchange_rate():
     """USD/KRW 환율 (yfinance USDKRW=X)"""
     try:
         import yfinance as yf

@@ -49,7 +49,10 @@ def _number(value: Any, *, absolute: bool = False) -> float:
 
 def _ticker(value: Any) -> str:
     ticker = str(value or "").strip().upper().split("_", 1)[0]
-    if len(ticker) == 7 and ticker.startswith("A") and ticker[1:].isdigit():
+    # "A" + 6-char KRX code (digits or alphanumeric such as 0000D0). Requiring a
+    # digit after the prefix keeps 7-letter US tickers that start with A intact.
+    if (len(ticker) == 7 and ticker.startswith("A") and ticker[1].isdigit()
+            and ticker[1:].isascii() and ticker[1:].isalnum()):
         ticker = ticker[1:]
     return ticker
 
@@ -484,8 +487,12 @@ def get_kiwoom_account_summaries(
         valuation = account.pop("_holdings_valuation", None)
         if holdings_basis and "US" in ACCOUNT_MARKETS.get(account["account_profile"], ()):
             if valuation is None:
-                raise KiwoomError("미국주식 원장 평가 합계를 확인하지 못했습니다.")
-            account["overseas"].update(valuation)
+                # Fail closed for this account only: no other TR or zero is
+                # substituted, and the other accounts stay available.
+                account["overseas"] = {}
+                account["error"] = "미국주식 원장 평가 합계를 확인하지 못했습니다."
+            else:
+                account["overseas"].update(valuation)
         result.append(account)
     return result
 

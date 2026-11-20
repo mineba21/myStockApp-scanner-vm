@@ -3,7 +3,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from trading.scanner_buy_orders import (
     Account1LiveBroker,
@@ -99,6 +99,7 @@ def test_preview_records_prepared_order_without_sending(setup):
 @pytest.mark.parametrize("overrides,message", [
     ({"market": "JP"}, "지원하지 않는 시장"),
     ({"strict_filter_passed": False}, "Strict"),
+    ({"strict_filter_passed": None}, "Strict"),
     ({"stop_loss": 101.5}, "손절가"),
     ({"ticker": "BAD TICKER"}, "종목코드"),
 ])
@@ -107,6 +108,19 @@ def test_preview_blocks_ineligible_candidates(setup, overrides, message):
     with pytest.raises(ScannerBuyBlocked, match=message):
         service.prepare(candidate(**overrides), 1, 101.5)
     assert broker.buys == []
+
+
+def test_kr_preview_accepts_krx_alphanumeric_code(setup):
+    service, _, _, kr_broker = setup
+    row = service.prepare(kr_candidate(ticker="0000d0"), 1, 70000)
+    assert row["ticker"] == "0000D0"
+
+
+@pytest.mark.parametrize("ticker", ["00593", "0059300", "00 930", "00593!", "００５９３０"])
+def test_kr_preview_still_rejects_malformed_codes(setup, ticker):
+    service, _, _, _ = setup
+    with pytest.raises(ScannerBuyBlocked, match="종목코드"):
+        service.prepare(kr_candidate(ticker=ticker), 1, 70000)
 
 
 def test_preview_blocks_fat_finger_price_and_sub_cent_price(setup):
@@ -539,6 +553,17 @@ def test_api_preview_reads_candidate_from_db_and_reports_disabled(api_env):
     assert result["state"] == "PREPARED" and result["account_profile"] == "account1"
     assert result["execution_enabled"] is False
     assert "ACCOUNT1_ORDER_ENABLED" in result["execution_block_reason"]
+
+
+def test_api_quote_and_preview_block_unassessed_rows(api_env, monkeypatch):
+    monkeypatch.setenv("KIWOOM_WEB_ENABLED", "true")
+    row = scan_row(strict_filter_passed=None)
+    with pytest.raises(HTTPException) as quote_err:
+        api.buy_quote(Response(), row.id, FakeDb(row))
+    assert quote_err.value.status_code == 409
+    with pytest.raises(HTTPException) as preview_err:
+        preview(row)
+    assert preview_err.value.status_code in (409, 422)
 
 
 def test_api_execute_is_blocked_unless_both_switches_are_on(api_env, monkeypatch):
