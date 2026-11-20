@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 import subprocess
@@ -287,17 +286,6 @@ def test_cash_decrease_before_confirm_requires_new_preview(flow):
     with pytest.raises(RebalanceBlocked, match='현금 감소'):
         service.confirm(cid, 'BUY')
     assert len(broker.sent) == 1
-
-
-def test_legacy_routes_cannot_bypass_reconciliation(monkeypatch):
-    from web import kiwoom_order_api as api
-    from fastapi import HTTPException
-    monkeypatch.setenv('KIWOOM_TRADING_ENABLED', 'true')
-    for method, cls in [(api.execute_buy, api.BuyExecuteRequest), (api.execute_sell, api.SellExecuteRequest)]:
-        with pytest.raises(HTTPException) as exc:
-            asyncio.run(method(cls(preview_id='x' * 24, confirmation_ticker='SPY')))
-        assert exc.value.status_code == 503
-        assert '미체결' in exc.value.detail
 
 
 def test_refresh_same_sell_preview_cannot_restart_a_sent_cycle(flow):

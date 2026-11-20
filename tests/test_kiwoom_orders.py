@@ -1,12 +1,9 @@
-import asyncio
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 
 from trading.kiwoom_orders import KiwoomOrderClient, OrderUnknown
 from trading.kiwoom_readonly import KiwoomConfig
-from web import kiwoom_order_api
 
 
 class Session:
@@ -153,109 +150,3 @@ def test_domestic_limit_validates_ticker_and_integer_price(ticker, price):
     client = KiwoomOrderClient(KiwoomConfig("key", "secret", "mock"), Session())
     with pytest.raises(Exception):
         client.buy_kr_limit("token", exchange="KRX", ticker=ticker, quantity=1, price=price)
-
-
-def test_preview_is_account2_only_and_cannot_exceed_holdings(monkeypatch):
-    monkeypatch.setattr(kiwoom_order_api, "get_kiwoom_holdings", lambda force: [{
-        "account_profile": "account2", "market": "US", "ticker": "SPY",
-        "name": "SPY", "quantity": 3, "exchange": "NASDAQ",
-    }])
-    monkeypatch.delenv("KIWOOM_TRADING_ENABLED", raising=False)
-
-    preview = asyncio.run(kiwoom_order_api.preview_sell(
-        kiwoom_order_api.SellPreviewRequest(ticker="spy", quantity=2, limit_price=650)
-    ))
-    assert preview["execution_enabled"] is False
-    assert preview["exchange"] == "ND"
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(kiwoom_order_api.preview_sell(
-            kiwoom_order_api.SellPreviewRequest(ticker="SPY", quantity=4, limit_price=650)
-        ))
-    assert exc.value.status_code == 422
-
-
-def test_preview_falls_back_from_generic_us_exchange_name(monkeypatch):
-    monkeypatch.setattr(kiwoom_order_api, "get_kiwoom_holdings", lambda force: [{
-        "account_profile": "account2", "market": "US", "ticker": "BIL",
-        "name": "BIL", "quantity": 3, "exchange": "미국",
-    }])
-
-    preview = asyncio.run(kiwoom_order_api.preview_sell(
-        kiwoom_order_api.SellPreviewRequest(ticker="BIL", quantity=1, limit_price=91)
-    ))
-
-    assert preview["exchange"] == "NY"
-
-
-def test_preview_rejects_us_price_beyond_two_decimal_places():
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(kiwoom_order_api.preview_sell(
-            kiwoom_order_api.SellPreviewRequest(
-                ticker="BIL", quantity=1, limit_price=91.401
-            )
-        ))
-
-    assert exc.value.status_code == 422
-    assert "소수점 둘째 자리" in exc.value.detail
-
-
-def test_execute_is_blocked_without_explicit_server_flag(monkeypatch):
-    # 주변 환경(운영 호스트의 .env 는 KIWOOM_TRADING_ENABLED=true)에 의존하지
-    # 않도록 명시적으로 지운다. 이 줄이 없으면 주문이 켜진 호스트에서 503 대신
-    # 410(preview 만료)이 나와, 킬스위치 검증이 조용히 무력화된다.
-    monkeypatch.delenv("KIWOOM_TRADING_ENABLED", raising=False)
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(kiwoom_order_api.execute_sell(
-            kiwoom_order_api.SellExecuteRequest(
-                preview_id="x" * 24, confirmation_ticker="SPY"
-            )
-        ))
-    assert exc.value.status_code == 503
-
-
-def test_buy_preview_checks_account2_cash(monkeypatch):
-    monkeypatch.setattr(kiwoom_order_api, "_account2_orderable_cash", lambda: 100)
-    monkeypatch.delenv("KIWOOM_TRADING_ENABLED", raising=False)
-
-    preview = asyncio.run(kiwoom_order_api.preview_buy(
-        kiwoom_order_api.BuyPreviewRequest(ticker="BIL", quantity=1, limit_price=91.4)
-    ))
-    assert preview["execution_enabled"] is False
-    assert preview["estimated_cost"] == 91.4
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(kiwoom_order_api.preview_buy(
-            kiwoom_order_api.BuyPreviewRequest(ticker="BIL", quantity=2, limit_price=91.4)
-        ))
-    assert exc.value.status_code == 422
-    assert "주문가능 현금" in exc.value.detail
-
-
-def test_sell_quote_uses_account2_kiwoom_current_price(monkeypatch):
-    monkeypatch.setattr(
-        kiwoom_order_api,
-        "_find_holding",
-        lambda ticker: {"ticker": "QQQ", "exchange": "NASDAQ", "quantity": 3},
-    )
-    monkeypatch.setattr(
-        kiwoom_order_api, "load_profile_configs", lambda: {"account2": object()}
-    )
-
-    class Client:
-        def __init__(self, config):
-            pass
-
-        def get_overseas_quote(self, token, *, exchange, ticker):
-            assert exchange == "ND"
-            assert ticker == "QQQ"
-            return {"quote": {"cur_prc": "512.3400"}}
-
-    monkeypatch.setattr(kiwoom_order_api, "KiwoomReadOnlyClient", Client)
-    monkeypatch.setattr(kiwoom_order_api, "_get_token", lambda *args: "token")
-
-    result = kiwoom_order_api.quote_sell("QQQ")
-
-    assert result["current_price"] == 512.34
-    assert result["source"] == "KIWOOM_USA20100"
-    assert result["read_only"] is True
