@@ -117,3 +117,12 @@ def test_read_only_lookup_retries_rate_limit_without_resending_an_order():
     assert evidence.open_orders()[0]["order_number"] == "0000123"
     assert delays == [2]
     assert len(client.session.calls) == 2
+
+
+def test_ticker_accepts_krx_alphanumeric_code_and_prefix():
+    from trading.kiwoom_domestic_execution_evidence import ticker
+    assert ticker("0000d0") == "0000D0"
+    assert ticker("A0000D0") == "0000D0"
+    assert ticker("A005930") == "005930"
+    with pytest.raises(KiwoomError):
+        ticker("00D0")

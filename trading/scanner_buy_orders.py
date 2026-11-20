@@ -95,7 +95,7 @@ def fmt_price(market, value) -> str:
 def _valid_ticker(market, ticker) -> bool:
     if market == "US":
         return bool(ticker) and len(ticker) <= 12 and ticker.isascii() and ticker.replace(".", "").isalnum()
-    return len(ticker) == 6 and ticker.isascii() and ticker.isdigit()
+    return len(ticker) == 6 and ticker.isascii() and ticker.isalnum()  # KRX codes may be alphanumeric
 
 
 class Account1LiveBroker:
@@ -381,8 +381,9 @@ class ScannerBuyOrders:
         spec = MARKETS.get(market)
         if spec is None:
             raise ScannerBuyBlocked("지원하지 않는 시장입니다.")
-        if candidate.get("strict_filter_passed") is False:
-            raise ScannerBuyBlocked("Strict 필터에서 거부된 신호는 매수할 수 없습니다.")
+        if candidate.get("strict_filter_passed") is not True:
+            # False = rejected, None = legacy row never assessed. Neither is a pass.
+            raise ScannerBuyBlocked("Strict 필터를 통과한 것으로 확인되지 않은 신호는 매수할 수 없습니다.")
         ticker = str(candidate.get("ticker") or "").strip().upper()
         if not _valid_ticker(market, ticker):
             raise ScannerBuyBlocked("유효한 종목코드가 아닙니다.")

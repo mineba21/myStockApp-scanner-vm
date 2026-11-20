@@ -49,7 +49,10 @@ def _number(value: Any, *, absolute: bool = False) -> float:
 
 def _ticker(value: Any) -> str:
     ticker = str(value or "").strip().upper().split("_", 1)[0]
-    if len(ticker) == 7 and ticker.startswith("A") and ticker[1:].isdigit():
+    # "A" + 6-char KRX code (digits or alphanumeric such as 0000D0). Requiring a
+    # digit after the prefix keeps 7-letter US tickers that start with A intact.
+    if (len(ticker) == 7 and ticker.startswith("A") and ticker[1].isdigit()
+            and ticker[1:].isascii() and ticker[1:].isalnum()):
         ticker = ticker[1:]
     return ticker
 

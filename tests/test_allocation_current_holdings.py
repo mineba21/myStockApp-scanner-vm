@@ -13,7 +13,7 @@ class Client:
         self.row = row
 
     def get_overseas_account_balance(self, token):
-        return {"holdings": [dict(self.row)]}
+        return {"complete": True, "holdings": [dict(self.row)]}
 
 
 class Evidence:

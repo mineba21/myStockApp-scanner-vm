@@ -145,8 +145,9 @@ def buy_quote(response: Response, result_id: int = Query(ge=1), db: Session = De
     row = db.query(ScanResult).filter(ScanResult.id == result_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="스캔 결과를 찾을 수 없습니다.")
-    if row.strict_filter_passed is False:
-        raise HTTPException(status_code=409, detail="Strict 거부 종목은 매수할 수 없습니다.")
+    if row.strict_filter_passed is not True:
+        raise HTTPException(status_code=409,
+                            detail="Strict 필터 통과가 확인되지 않은 종목(거부 또는 미평가)은 매수할 수 없습니다.")
     market = _market(row.market)
 
     def load():

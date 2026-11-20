@@ -305,3 +305,9 @@ def test_ledger_valuation_distinguishes_zero_from_missing_and_invalid():
     assert kiwoom_holdings._holdings_valuation({"complete": True, "summary": None}) is None
     assert kiwoom_holdings._holdings_valuation({
         "complete": True, "summary": {**summary, "crnc_code": "KRW"}}) is None
+
+
+def test_holding_ticker_strips_prefix_from_krx_alphanumeric_code():
+    from web.kiwoom_holdings import _ticker
+    assert _ticker("A0000D0") == "0000D0"
+    assert _ticker("A005930") == "005930"

@@ -370,9 +370,9 @@ class KiwoomReadOnlyClient:
 
     def get_domestic_quote(self, token: str, *, ticker: str) -> dict[str, Any]:
         """``ka10001`` 국내주식 기본정보(현재가·상한가·하한가)를 조회한다."""
-        ticker = ticker.strip()
-        if len(ticker) != 6 or not ticker.isascii() or not ticker.isdigit():
-            raise KiwoomError("국내주식 종목코드는 숫자 6자리여야 합니다.")
+        ticker = ticker.strip().upper()
+        if len(ticker) != 6 or not ticker.isascii() or not ticker.isalnum():
+            raise KiwoomError("국내주식 종목코드는 영문 대문자·숫자 6자리여야 합니다.")
         report = self._post_read_only_report(
             token,
             path=DOMESTIC_QUOTE_PATH,

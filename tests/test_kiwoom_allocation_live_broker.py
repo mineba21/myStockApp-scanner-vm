@@ -32,14 +32,15 @@ class Evidence:
 
 
 class Client:
-    def __init__(self, *, quote_time="10:29", sellable="6"):
+    def __init__(self, *, quote_time="10:29", sellable="6", complete=True):
+        self.complete = complete
         self.quote_time = quote_time
         self.sellable = sellable
         self.balance_calls = []
 
     def get_overseas_account_balance(self, token, exchange="", ticker=""):
         self.balance_calls.append((exchange, ticker))
-        return {"holdings": [{"stk_cd": ticker or "QQQ", "qty": "6", "poss_qty": "6",
+        return {"complete": self.complete, "holdings": [{"stk_cd": ticker or "QQQ", "qty": "6", "poss_qty": "6",
                               "sell_alowq": self.sellable}]}
 
     def get_overseas_orderbook(self, token, *, exchange, ticker):
@@ -79,6 +80,12 @@ def test_snapshot_uses_total_holdings_and_broker_net_cash():
     assert result["holdings"] == {"QQQ": 6}
     assert result["orderable_cash"] == "1044.31"
     assert result["cash_includes_reservations"] is True
+
+
+@pytest.mark.parametrize("complete", [False, None])
+def test_snapshot_fails_closed_when_balance_is_incomplete(complete):
+    with pytest.raises(KiwoomError, match="잔고"):
+        broker(client=Client(complete=complete)).snapshot()
 
 
 def test_quotes_require_matching_recent_broker_timestamp():

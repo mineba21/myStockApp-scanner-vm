@@ -96,6 +96,9 @@ class KiwoomAllocationLiveBroker:
         balance = self._read_retry(
             lambda: self.client.get_overseas_account_balance(self.token)
         )
+        if balance.get("complete") is not True:
+            # A truncated or malformed balance would read missing ETFs as 0 shares.
+            raise KiwoomError("해외 잔고 조회가 완전하지 않아 리밸런싱을 중단했습니다. 잔고를 다시 확인하세요.")
         holdings = {}
         for row in balance.get("holdings", []):
             ticker = str(row.get("stk_cd") or "").strip().upper()
@@ -107,7 +110,7 @@ class KiwoomAllocationLiveBroker:
             held = quantity(row.get("poss_qty"))
             holdings[ticker] = holdings.get(ticker, 0) + held
         return {
-            "account_profile": "account2", "currency": "USD", "complete": True,
+            "account_profile": "account2", "currency": "USD", "complete": True,  # verified above; incomplete balances raise
             # ust21110.fc_ord_alowa is used as the broker's already-net
             # orderable amount. It is not manually reduced by open orders.
             "cash_includes_reservations": True, "as_of": self.clock(),
