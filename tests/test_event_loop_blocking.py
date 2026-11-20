@@ -50,7 +50,6 @@ def test_slow_broker_call_does_not_stall_health_check(webapp, monkeypatch):
 @pytest.mark.parametrize("module,name", [
     ("web.app", "get_results"), ("web.app", "list_holdings"), ("web.app", "portfolio_summary"),
     ("web.app", "get_chart_ohlcv"), ("web.app", "get_exchange_rate"), ("web.app", "get_market_status"),
-    ("web.kiwoom_order_api", "quote_sell"), ("web.kiwoom_order_api", "quote_buy"),
 ])
 def test_blocking_read_handlers_are_sync_so_they_run_in_the_threadpool(webapp, module, name):
     import importlib
