@@ -211,7 +211,7 @@ def _parse_filter_reasons(raw: Optional[str]) -> List[str]:
 
 
 @app.get("/api/results")
-async def get_results(market: str = "ALL", signal_type: str = "ALL",
+def get_results(market: str = "ALL", signal_type: str = "ALL",
                       days: int = 7, limit: int = 200,
                       include_rejected: bool = False,
                       prioritize_13f: bool = True,
@@ -491,7 +491,7 @@ def _build_chart_overlay(row, daily) -> dict:
 
 
 @app.get("/api/chart/ohlcv")
-async def get_chart_ohlcv(
+def get_chart_ohlcv(
     market: str = Query(..., description="KR 또는 US"),
     ticker: str = Query(..., min_length=1, max_length=15),
     timeframe: str = Query("daily", description="daily 또는 weekly"),
@@ -898,7 +898,7 @@ async def delete_transaction(tx_id: int, db: Session = Depends(get_db)):
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/api/holdings")
-async def list_holdings(account_id: Optional[int] = None, db: Session = Depends(get_db)):
+def list_holdings(account_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(Holding).filter(Holding.is_active == True, Holding.quantity > 0)
     if account_id:
         q = q.filter(Holding.account_id == account_id)
@@ -921,7 +921,7 @@ async def list_holdings(account_id: Optional[int] = None, db: Session = Depends(
 
 
 @app.get("/api/portfolio-summary")
-async def portfolio_summary():
+def portfolio_summary():
     """키움 실계좌별 현금·평가손익 요약. 주문 및 환전 기능은 포함하지 않는다."""
     if not KIWOOM_WEB_ENABLED:
         return []
@@ -1088,7 +1088,7 @@ async def telegram_test():
 
 
 @app.get("/api/market/status")
-async def get_market_status(force: bool = False):
+def get_market_status(force: bool = False):
     """미국·한국 지수 Stage 분석 (Forest to Trees)"""
     try:
         from scanner.market_analysis import get_market_stages
@@ -1098,7 +1098,7 @@ async def get_market_status(force: bool = False):
 
 
 @app.get("/api/exchange-rate")
-async def get_exchange_rate():
+def get_exchange_rate():
     """USD/KRW 환율 (yfinance USDKRW=X)"""
     try:
         import yfinance as yf

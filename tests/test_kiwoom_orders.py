@@ -254,7 +254,7 @@ def test_sell_quote_uses_account2_kiwoom_current_price(monkeypatch):
     monkeypatch.setattr(kiwoom_order_api, "KiwoomReadOnlyClient", Client)
     monkeypatch.setattr(kiwoom_order_api, "_get_token", lambda *args: "token")
 
-    result = asyncio.run(kiwoom_order_api.quote_sell("QQQ"))
+    result = kiwoom_order_api.quote_sell("QQQ")
 
     assert result["current_price"] == 512.34
     assert result["source"] == "KIWOOM_USA20100"

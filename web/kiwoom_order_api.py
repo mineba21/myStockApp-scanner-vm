@@ -110,7 +110,7 @@ def _account2_orderable_cash() -> float:
 
 
 @router.get("/sell/quote")
-async def quote_sell(ticker: str):
+def quote_sell(ticker: str):
     """매도 모달을 열 때 account2 보유종목의 키움 현재가를 다시 조회한다."""
     holding = _find_holding(ticker)
     exchange = _holding_exchange(holding)
@@ -136,7 +136,7 @@ async def quote_sell(ticker: str):
 
 
 @router.get("/buy/quote")
-async def quote_buy(ticker: str):
+def quote_buy(ticker: str):
     """자산배분 ETF 매수 모달을 열 때 키움 현재가를 다시 조회한다."""
     ticker = ticker.strip().upper()
     exchange = _allocation_exchange(ticker)
