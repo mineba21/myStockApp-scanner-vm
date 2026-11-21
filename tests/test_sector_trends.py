@@ -386,7 +386,12 @@ def test_apply_kr_sector_trends_updates_only_rows_from_this_scan(monkeypatch):
                       signal_date="2026-10-20", scan_time=started - timedelta(days=3)))
     db.commit()
 
-    returns = {"A00001": ok(6.0), "A00002": ok(5.5), "A00003": ok(7.0), "B00001": ok(5.2)}
+    # _apply_kr_sector_trends 는 now 를 받지 않고 실제 오늘로 신선도를 판정하므로,
+    # 고정 날짜를 쓰면 시간이 지나 STALE 이 된다. 기준일을 오늘 기준으로 만든다.
+    asof = date.today().isoformat()
+    start = (date.today() - timedelta(days=28)).isoformat()
+    returns = {t: ok(v, asof=asof, start=start) for t, v in
+               {"A00001": 6.0, "A00002": 5.5, "A00003": 7.0, "B00001": 5.2}.items()}
     _apply_kr_sector_trends(db, list(industries), returns, started)
 
     fresh, old = (db.query(ScanResult).filter(ScanResult.ticker == t).one() for t in ("A00001", "B00001"))
