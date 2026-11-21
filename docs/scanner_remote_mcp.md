@@ -10,7 +10,10 @@
 
 - OAuth 등록/발견, authorization code + S256 PKCE, 정확한 redirect/resource/scope 대조.
 - 연결할 때마다 소유자 승인 화면을 표시한다. 별도 256비트 난수 승인 암호가 필요하다.
-- 초기 전달용 원문 파일은 본인 Mac으로 전달한 뒤 서버에서 삭제한다. 서버는 SHA256 검증값만 보관한다. 사용자 선택의 짧은 암호로 대체하지 않는다.
+- 초기 전달용 원문 파일은 본인 Mac으로 전달한 뒤 서버에서 삭제한다. 서버는 검증값만 보관한다. 사용자 선택의 짧은 암호로 대체하지 않는다.
+- 검증값 형식(2026-11-21): 새 설치는 솔트 scrypt(`scrypt$N$r$p$salt$key`, `integrations/scanner_mcp/owner_password.py`)로 만든다.
+  기존 솔트 없는 SHA256 hex 값은 원문 없이 변환할 수 없어 그대로 검증한다. scrypt로 옮기려면 승인 암호를 새로 발급해야 한다.
+  스캐너·포트폴리오 서비스 모두 `remote.py` 옆에 `owner_password.py`가 있어야 기동한다(설치 스크립트가 복사한다).
 - 승인 폼은 CSRF 세션, Secure/HttpOnly/SameSite 쿠키, Origin 확인, iframe 금지.
 - 코드 2분, 승인 요청 10분, access token 1시간, refresh token 30일.
 - 코드/refresh 사용은 SQLite 트랜잭션으로 단일 소비. refresh 재사용 감지 시 같은 연결의 토큰 폐기.

@@ -18,6 +18,13 @@ server_spec = importlib.util.spec_from_file_location("server", HERE / "server.py
 portfolio_server = importlib.util.module_from_spec(server_spec)
 sys.modules["server"] = portfolio_server
 server_spec.loader.exec_module(portfolio_server)
+# Deployed beside remote.py by deploy/install_portfolio_mcp.py.
+password_spec = importlib.util.spec_from_file_location(
+    "owner_password", HERE.parent / "scanner_mcp" / "owner_password.py"
+)
+owner_password = importlib.util.module_from_spec(password_spec)
+sys.modules["owner_password"] = owner_password
+password_spec.loader.exec_module(owner_password)
 remote_spec = importlib.util.spec_from_file_location(
     "portfolio_oauth_remote", HERE.parent / "scanner_mcp" / "remote.py"
 )
