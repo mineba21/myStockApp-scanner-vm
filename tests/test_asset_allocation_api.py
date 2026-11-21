@@ -345,3 +345,13 @@ def test_monthly_scheduler_does_not_race_a_running_manual_refresh(client, monkey
     monkeypatch.setattr(api, "_refresh_asset_allocation", lambda p, r: calls.append(p))
     sched._run_monthly_allocation()
     assert calls == ["original"]  # "easy" is already running and is skipped
+
+
+@pytest.mark.parametrize("path", [
+    "/api/kiwoom/orders/sell/quote", "/api/kiwoom/orders/sell/preview",
+    "/api/kiwoom/orders/sell/execute", "/api/kiwoom/orders/buy/quote",
+    "/api/kiwoom/orders/buy/preview", "/api/kiwoom/orders/buy/execute",
+])
+def test_retired_legacy_order_routes_stay_removed(client, path):
+    test_client, _ = client
+    assert test_client.post(path, json={}).status_code == 404
