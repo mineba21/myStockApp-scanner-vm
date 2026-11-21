@@ -1811,8 +1811,26 @@
           <div>
             <label class="text-xs text-slate-500 mb-1 block">
               수량 (주) <span x-show="scanBuy.result?.suggested_qty>0" class="text-slate-400"
-                x-text="'· 제안 '+scanBuy.result?.suggested_qty+'주'"></span>
+                x-text="'· 스캔 시점 제안 '+scanBuy.result?.suggested_qty+'주'"></span>
             </label>
+            <!-- 실계좌 기준 참고 수량(live_sizing) 또는 숨긴 사유. 입력값을 자동으로 바꾸지 않는다. -->
+            <template x-if="scanBuy.result?.live_sizing">
+              <div class="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-600 mb-2">
+                <div class="font-semibold text-slate-700"
+                  x-text="'실계좌('+scanBuy.result?.live_sizing?.account_name+') 기준 참고 '+scanBuy.result?.live_sizing?.qty+'주'"></div>
+                <div class="mt-0.5"
+                  x-text="'주문가능 현금 '+fmtScanBuy(scanBuy.result?.live_sizing?.available_cash)+' · 손절가 '+fmtScanBuy(scanBuy.result?.live_sizing?.stop)+' 기준 · 참고용'"></div>
+                <template x-for="w in (scanBuy.result?.live_sizing?.heat_warnings || [])">
+                  <div class="mt-0.5 text-amber-700" x-text="w"></div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!scanBuy.result?.live_sizing && scanBuy.result?.live_sizing_blocked_reason">
+              <div class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800 mb-2">
+                <div class="font-semibold">실계좌 기준 제안 수량을 표시하지 않습니다</div>
+                <div class="mt-0.5" x-text="scanBuy.result?.live_sizing_blocked_reason"></div>
+              </div>
+            </template>
             <input type="number" min="1" step="1" class="input" x-model.number="scanBuy.quantity" @input="resetScanBuy()">
           </div>
           <div>
