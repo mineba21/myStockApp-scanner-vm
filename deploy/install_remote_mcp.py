@@ -2,7 +2,7 @@
 Does not read the application database or call brokerage APIs.
 """
 import grp
-import hashlib
+import sys
 import json
 import os
 from pathlib import Path
@@ -14,13 +14,16 @@ import time
 from dotenv import dotenv_values
 
 repo=Path('/home/ubuntu/apps/myStockApp/stock-scanner')
+sys.path.insert(0,str(repo/'integrations/scanner_mcp'))
+from owner_password import hash_owner_password, validate_owner_hash
+
 name='mystockapp-mcp'
 try: account=pwd.getpwnam(name)
 except KeyError:
     subprocess.run(['useradd','--system','--no-create-home','--shell','/usr/sbin/nologin',name],check=True)
     account=pwd.getpwnam(name)
 root=Path('/opt/mystockapp-mcp'); root.mkdir(mode=0o755,exist_ok=True)
-for filename in ('server.py','remote.py','requirements.txt'):
+for filename in ('server.py','remote.py','owner_password.py','requirements.txt'):
     shutil.copy2(repo/'integrations/scanner_mcp'/filename,root/filename)
     (root/filename).chmod(0o644)
 venv=root/'.venv'
@@ -32,10 +35,12 @@ subprocess.run([str(root/'.venv/bin/pip'),'install','-q','-r',str(root/'requirem
 state=Path('/var/lib/mystockapp-mcp'); state.mkdir(mode=0o700,exist_ok=True); os.chown(state,account.pw_uid,account.pw_gid)
 conf=Path('/etc/mystockapp-mcp'); conf.mkdir(mode=0o750,exist_ok=True); os.chown(conf,0,account.pw_gid)
 cfg=conf/'config.json'
-if cfg.exists(): config=json.loads(cfg.read_text())
+if cfg.exists():
+    config=json.loads(cfg.read_text())
+    validate_owner_hash(config.get('owner_hash'))  # legacy SHA-256 or scrypt; kept as is
 else:
     password=secrets.token_urlsafe(32)
-    config={'owner_hash':hashlib.sha256(password.encode()).hexdigest()}
+    config={'owner_hash':hash_owner_password(password)}
     # One-time handoff file; operator retrieves privately and removes after delivery.
     p=conf/'owner-password.pending'; p.write_text(password); p.chmod(0o600)
 read_key=dotenv_values(repo/'.env').get('SCANNER_READ_TOKEN')

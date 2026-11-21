@@ -12,10 +12,13 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import time
 
 
 repo = Path("/home/ubuntu/apps/myStockApp/stock-scanner")
+sys.path.insert(0, str(repo / "integrations/scanner_mcp"))
+from owner_password import validate_owner_hash  # noqa: E402
 service_name = "mystockapp-portfolio-mcp"
 try:
     account = pwd.getpwnam(service_name)
@@ -31,6 +34,7 @@ root.mkdir(mode=0o755, exist_ok=True)
 for source, target in (
     (repo / "integrations/portfolio_mcp/server.py", root / "server.py"),
     (repo / "integrations/scanner_mcp/remote.py", root / "remote.py"),
+    (repo / "integrations/scanner_mcp/owner_password.py", root / "owner_password.py"),
     (repo / "integrations/portfolio_mcp/requirements.txt", root / "requirements.txt"),
 ):
     shutil.copy2(source, target)
@@ -55,8 +59,10 @@ else:
 
 scanner_config = json.loads(Path("/etc/mystockapp-mcp/config.json").read_text())
 owner_hash = scanner_config.get("owner_hash", "")
-if len(owner_hash) != 64:
-    raise RuntimeError("Existing owner approval hash is unavailable")
+try:
+    validate_owner_hash(owner_hash)  # legacy SHA-256 or salted scrypt
+except ValueError as exc:
+    raise RuntimeError("Existing owner approval hash is unavailable") from exc
 
 state = Path("/var/lib/mystockapp-portfolio-mcp")
 state.mkdir(mode=0o700, exist_ok=True)

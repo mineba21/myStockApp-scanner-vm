@@ -23,6 +23,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from server import ScannerReader, create_server
+from owner_password import hash_owner_password, validate_owner_hash, verify_owner_password  # noqa: F401
 
 SCOPE = 'scanner:read'
 
@@ -37,8 +38,7 @@ class OwnerProvider:
         parsed=urlsplit(origin)
         if parsed.scheme != 'https' or parsed.path or parsed.query or parsed.fragment or parsed.username:
             raise ValueError('An HTTPS origin is required')
-        if len(owner_hash)!=64 or any(c not in '0123456789abcdef' for c in owner_hash):
-            raise ValueError('Owner credential SHA256 required')
+        validate_owner_hash(owner_hash)
         if scope not in ('scanner:read', 'portfolio:read'):
             raise ValueError('Unsupported read-only scope')
         self.origin, self.resource, self.owner_hash = origin, origin+'/mcp', owner_hash
@@ -157,7 +157,7 @@ class OwnerProvider:
                 if retry:
                     headers['Retry-After']=str(retry)
                     return HTMLResponse('시도 횟수를 초과했습니다. 잠시 후 다시 시도하세요.',429,headers=headers)
-                if not secrets.compare_digest(digest(str(form.get('password',''))),self.owner_hash):
+                if not verify_owner_password(str(form.get('password','')),self.owner_hash):
                     self._failures.append(time.time())
                     pending['failures']=pending.get('failures',0)+1
                     if pending['failures']>=5: self.delete(db,'pending',flow)

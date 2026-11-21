@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from urllib.parse import urlsplit,parse_qs
 from starlette.testclient import TestClient
-from remote import OwnerProvider,build_app,digest
+from remote import OwnerProvider,build_app,digest,hash_owner_password,verify_owner_password
 
 class Reader:
     def status(self): return {'source':'fake_scanner'}
@@ -14,9 +14,10 @@ class Reader:
     def signal(self,*args): return {'id':1}
 
 class OAuthTests(unittest.TestCase):
+    make_hash=staticmethod(digest)  # legacy unsalted SHA-256 stays valid
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.origin='https://scanner.example'
-        self.provider=OwnerProvider(self.tmp.name+'/auth.db',self.origin,digest('owner-test-password'))
+        self.provider=OwnerProvider(self.tmp.name+'/auth.db',self.origin,self.make_hash('owner-test-password'))
         self.client=TestClient(build_app(Reader(),self.provider),base_url=self.origin,follow_redirects=False)
         self.client.__enter__()
         self.verifier='v'*64
@@ -90,7 +91,7 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(self.client.post('/mcp',headers={'Authorization':'Bearer '+new.json()['access_token']},json={}).status_code,401)
     def test_revoke_and_restart(self):
         token=self.exchange(self.approve()).json()
-        provider=OwnerProvider(self.tmp.name+'/auth.db',self.origin,digest('owner-test-password'))
+        provider=OwnerProvider(self.tmp.name+'/auth.db',self.origin,self.make_hash('owner-test-password'))
         import asyncio
         self.assertIsNotNone(asyncio.run(provider.load_access_token(token['access_token'])))
         r=self.client.post('/revoke',data={'client_id':self.cid,'token':token['refresh_token']})
@@ -143,5 +144,28 @@ class OAuthTests(unittest.TestCase):
             for _ in range(5): self.post_password(fields,'wrong')
         self.provider._failures.clear()
         self.assertEqual(self.post_password(self.start_flow(),'owner-test-password').status_code,303)
+
+
+class ScryptOAuthTests(OAuthTests):
+    """The whole OAuth/consent suite again with a salted scrypt owner hash."""
+    make_hash=staticmethod(hash_owner_password)
+
+
+class OwnerPasswordHashTests(unittest.TestCase):
+    def test_scrypt_hash_is_salted_and_verifies(self):
+        a,b=hash_owner_password('pw'),hash_owner_password('pw')
+        self.assertTrue(a.startswith('scrypt$')); self.assertNotEqual(a,b)
+        self.assertTrue(verify_owner_password('pw',a)); self.assertFalse(verify_owner_password('px',a))
+    def test_legacy_sha256_still_verifies(self):
+        self.assertTrue(verify_owner_password('pw',digest('pw'))); self.assertFalse(verify_owner_password('px',digest('pw')))
+    def test_malformed_or_costly_hashes_are_rejected_at_startup(self):
+        good=hash_owner_password('pw').split('$')
+        bad=['', 'scrypt$x', 'scrypt$16384$8$1$!!$!!', 'A'*64,
+             '$'.join(['scrypt','3']+good[2:]),          # N not a power of two
+             '$'.join(['scrypt',str(2**20)]+good[2:]),   # cost too high for the service
+             '$'.join(good[:4]+[good[4],'AAAA'])]        # truncated derived key
+        for value in bad:
+            with self.subTest(value=value[:30]), tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(ValueError): OwnerProvider(d+'/a.db','https://scanner.example',value)
 
 if __name__=='__main__': unittest.main()
