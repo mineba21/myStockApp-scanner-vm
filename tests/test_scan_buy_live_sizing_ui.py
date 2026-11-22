@@ -29,3 +29,8 @@ def test_scan_time_suggestion_is_labelled_as_scan_time():
 def test_blocked_reason_is_rendered_as_text_not_html():
     block = _scan_buy_quantity_block()
     assert not re.search(r'x-html="[^"]*live_sizing', block)
+
+
+def test_modal_explains_hidden_scan_time_suggestion():
+    block = _scan_buy_quantity_block()
+    assert "scanBuy.result?.sizing_constrained_by==='heat_unknown'" in block

@@ -325,3 +325,85 @@ class TestBrokerEquityAutoRecord:
         assert calls == []
         assert db.query(AccountEquity).count() == 0
         assert signal["suggested_qty"] is None
+
+
+class TestUnknownHeatHidesScanTimeQuantity:
+    """2026-11-21: same rule as live sizing — unknown existing risk hides the quantity."""
+
+    def _setup(self, db, monkeypatch, holdings):
+        from database.models import Account
+
+        monkeypatch.setattr("scanner.scan_engine._sizing_config", lambda market: BASE_CFG)
+        db.add(AccountEquity(market="US", currency="USD", total_equity=100_000,
+                             cash_balance=100_000))
+        account = Account(name="manual", account_type="US_STOCK", currency="USD")
+        db.add(account)
+        db.flush()
+        for values in holdings:
+            db.add(Holding(account_id=account.id, name=values["ticker"], quantity=10,
+                           avg_price=100, is_active=True, **values))
+        db.commit()
+
+    def _signal(self):
+        return {"market": "US", "ticker": "SLB", "name": "SLB",
+                "signal_type": "BREAKOUT", "price": 34.2, "strict_price": 34.2,
+                "stop_loss": 30.72, "signal_date": "2026-11-20",
+                "ma150": 30.0, "volume_ratio": 1.82}
+
+    @pytest.mark.parametrize("missing", [
+        {"current_price": 120.0, "current_stop_loss": None},   # stop unknown
+        {"current_price": None, "current_stop_loss": 100.0},   # price unknown
+    ])
+    def test_unknown_existing_risk_hides_quantity_and_persists_reason(self, db, monkeypatch, missing):
+        from scanner.scan_engine import _attach_position_sizing, _save
+
+        self._setup(db, monkeypatch, [
+            {"ticker": "AAPL", "market": "US", "current_price": 120.0, "current_stop_loss": 100.0},
+            {"ticker": "MSFT", "market": "US", **missing},
+        ])
+        signal = self._signal()
+        _attach_position_sizing(db, [signal])
+        _save(db, signal)
+
+        assert signal["_sizing_status"] == "heat_unknown"
+        assert signal["_heat_unknown_count"] == 1
+        assert signal["sizing"] is None and signal["suggested_qty"] is None
+        assert signal["risk_amount"] is None and signal["position_pct"] is None
+        row = db.query(ScanResult).filter(ScanResult.ticker == "SLB").one()
+        assert row.suggested_qty is None
+        assert row.sizing_constrained_by == "heat_unknown"
+
+    def test_other_market_unknown_does_not_block(self, db, monkeypatch):
+        from scanner.scan_engine import _attach_position_sizing
+
+        self._setup(db, monkeypatch, [
+            {"ticker": "AAPL", "market": "US", "current_price": 120.0, "current_stop_loss": 100.0},
+            {"ticker": "005930", "market": "KR", "current_price": 70000.0, "current_stop_loss": None},
+        ])
+        signal = self._signal()
+        _attach_position_sizing(db, [signal])
+        assert signal["_sizing_status"] == "calculated"
+        assert signal["suggested_qty"] > 0
+
+    def test_breached_stop_is_known_risk_and_does_not_block(self, db, monkeypatch):
+        from scanner.scan_engine import _attach_position_sizing
+
+        self._setup(db, monkeypatch, [
+            {"ticker": "AAPL", "market": "US", "current_price": 90.0, "current_stop_loss": 100.0},
+        ])
+        signal = self._signal()
+        _attach_position_sizing(db, [signal])
+        assert signal["_sizing_status"] == "calculated"
+        assert signal["suggested_qty"] > 0
+
+    def test_notification_explains_hidden_quantity(self):
+        from scanner.scan_engine import _sizing_notification_lines
+
+        lines = _sizing_notification_lines({
+            "_sizing_status": "heat_unknown", "sizing": None, "_heat_unknown_count": 2,
+            "_heat_warnings": ["손절가 미등록 2건"],
+        })
+        text = "\n".join(lines)
+        assert "권장수량 표시 안 함" in text and "2건" in text
+        assert "자산 미등록" not in text
+        assert "손절가 미등록 2건" in text
