@@ -726,6 +726,22 @@ def _attach_position_sizing(db, signals: list) -> None:
             signal["_sizing_status"] = "equity_missing"
             continue
 
+        unknown = heat.get("missing_stop_count", 0) + heat.get("missing_price_count", 0)
+        if unknown:
+            # Same rule as live sizing (web.kiwoom_sizing): an existing holding
+            # without a stop or price has unknown risk, so the total-heat limit
+            # cannot be checked. Do not suggest a size that treats it as zero.
+            signal["sizing"] = None
+            signal["suggested_qty"] = None
+            signal["r_per_share"] = None
+            signal["risk_amount"] = None
+            signal["position_pct"] = None
+            signal["sizing_constrained_by"] = "heat_unknown"
+            signal["equity_snapshot"] = float(equity_row.total_equity)
+            signal["_sizing_status"] = "heat_unknown"
+            signal["_heat_unknown_count"] = unknown
+            continue
+
         result = calculate_position(
             entry=signal.get("strict_price"),
             stop=signal.get("stop_loss"),
@@ -1404,6 +1420,13 @@ def _format_currency(value, currency: str) -> str:
 def _sizing_notification_lines(signal: dict) -> list[str]:
     """한 신호의 포지션 사이징/heat 안내 문구를 만든다."""
     sizing = signal.get("sizing")
+    if signal.get("_sizing_status") == "heat_unknown":
+        lines = [
+            f"  ⚠️ 권장수량 표시 안 함 — 기존 보유 {signal.get('_heat_unknown_count', 0)}건의 "
+            "손절가 또는 현재가가 없어 전체 heat 한도를 계산할 수 없습니다. 보유 손절가를 등록하세요"
+        ]
+        lines.extend(f"  ⚠️ {warning}" for warning in signal.get("_heat_warnings") or [])
+        return lines
     if signal.get("_sizing_status") == "equity_missing" or sizing is None:
         lines = ["  ℹ️ 자산 미등록 — 설정에서 계좌 자산을 입력하면 권장수량이 표시됩니다"]
         lines.extend(f"  ⚠️ {warning}" for warning in signal.get("_heat_warnings") or [])

@@ -1812,6 +1812,8 @@
             <label class="text-xs text-slate-500 mb-1 block">
               수량 (주) <span x-show="scanBuy.result?.suggested_qty>0" class="text-slate-400"
                 x-text="'· 스캔 시점 제안 '+scanBuy.result?.suggested_qty+'주'"></span>
+              <span x-show="scanBuy.result?.sizing_constrained_by==='heat_unknown'" class="text-amber-700">
+                · 스캔 시점 제안 없음 (손절가·현재가 미등록 보유로 heat 계산 불가)</span>
             </label>
             <!-- 실계좌 기준 참고 수량(live_sizing) 또는 숨긴 사유. 입력값을 자동으로 바꾸지 않는다. -->
             <template x-if="scanBuy.result?.live_sizing">
