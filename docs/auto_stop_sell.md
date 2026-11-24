@@ -30,7 +30,10 @@
 | `trading/auto_stop/settings.py` | 환경변수, 실거래 게이트(`live_order_block_reason`, `live_cancel_block_reason`) |
 | `trading/auto_stop/us_calendar.py` | 규칙 기반 NYSE 캘린더: 휴장일, 13:00 조기폐장, 서머타임, env 임시휴장. 2020~2040 밖이면 닫힘 |
 | `trading/auto_stop/quotes.py` | 시세 검증, 기준가와 지정가 계산(Decimal) |
-| `trading/auto_stop/store.py` | `SCANNER_ORDER_JOURNAL_PATH` SQLite 테이블, 조건부 전이, 선점, fill ledger, lease, 알림 outbox |
+| `trading/auto_stop/store.py` | `SCANNER_ORDER_JOURNAL_PATH` SQLite 접근(DDL 없음, `mode=rw`), 조건부 전이, 선점, fill ledger, lease, 알림 outbox |
+| `trading/auto_stop/schema.py` | 런타임 스키마 검증(읽기 전용), 저널 전용 Migration 진입점 |
+| `trading/auto_stop/journal_migrations/` | 저널 전용 Alembic 환경 (`as0001`, 버전 표 `auto_stop_alembic_version`) |
+| `scripts/auto_stop_journal_migrate.py` | 배포 작업: 백업·사전 점검·upgrade·사후 검증 |
 | `trading/auto_stop/engine.py` | 상태 머신(tick) |
 | `trading/auto_stop/brokers.py` | `LiveStopSellBroker`(account1 실계좌 전용), `ShadowBroker`(가상 주문) |
 | `trading/auto_stop/service.py` | 등록, 일시중지, 해제, LIVE 전환, UNKNOWN 증거 해제, 헬스 |
@@ -38,9 +41,9 @@
 | `web/auto_stop_api.py` | `/api/auto-stop/*` (`SITES_API_KEY` 인증) |
 | `scheduler.py` | 30초 `IntervalTrigger` 작업 1개(`auto_stop_us_tick`, `max_instances=1`, coalesce) |
 
-- 테이블은 Alembic 밖 저널 SQLite에 모듈이 직접 만든다.
-  - 테이블: `auto_stop_positions`, `auto_stop_exit_events`, `auto_stop_orders`, `auto_stop_fill_ledger`, `auto_stop_runtime`, `auto_stop_alerts`, `auto_stop_audit`
-  - 운영 DB와 Alembic은 변경하지 않는다.
+- 테이블은 저널 SQLite에 **저널 전용 Migration으로만** 만든다 (아래 "저널 스키마와 Migration"). 런타임은 DDL을 실행하지 않는다.
+  - 테이블: `auto_stop_positions`, `auto_stop_exit_events`, `auto_stop_orders`, `auto_stop_fill_ledger`, `auto_stop_runtime`, `auto_stop_alerts`, `auto_stop_daily_stats`, `auto_stop_audit`
+  - 운영 DB와 운영 Alembic(`alembic/`)은 변경하지 않는다.
   - 저널을 삭제·초기화하거나 과거 사본으로 덮어쓰지 않는다. 덮어쓰면 중복 전송 방지가 깨진다.
 
 ## tick (30초)
@@ -277,10 +280,45 @@ SHADOW는 LIVE와 같은 상태 머신을 쓰고 브로커만 `ShadowBroker`로 
 - **긴급 중지는 이미 전송 중이거나 증권사에 접수된 주문의 취소를 보장하지 않는다.** 선점 트랜잭션을 지나 HTTP 요청이 나간 주문(SENDING)과 접수된 주문(SUBMITTED·PARTIAL_FILLED·CANCEL_*)은 그대로 체결될 수 있다. 긴급 중지 직후 화면의 진행 중 주문과 키움 앱 주문내역을 확인하고, 멈춰야 할 주문은 앱에서 직접 취소한다.
 - 기존 env 스위치와 종목별 `일시중지`는 그대로 동작한다.
 
+## 저널 스키마와 Migration
+
+- 자동 손절 테이블·인덱스는 `SCANNER_ORDER_JOURNAL_PATH` SQLite에만 있고, **저널 전용 Alembic**(`trading/auto_stop/journal_migrations`, 리비전 `as0001`, 버전 표 `auto_stop_alembic_version`)으로만 만든다. 운영 DB의 `alembic/`, `alembic_version`, `init_db()`와 설정·이력을 공유하지 않는다.
+- **런타임(스케줄러 tick, 웹 API, `AutoStopStore` 생성자)은 DDL을 실행하지 않는다.** 스키마 확인은 저널을 `mode=ro`로 열어 버전·객체만 보고, 저널 파일이 없으면 만들지 않는다. store 연결은 `mode=rw`라 파일이 없으면 실패한다.
+- Migration은 앱 시작·스케줄러·API에서 자동 실행하지 않는다. 배포 작업으로만 실행한다.
+
+| 스키마 상태 | OFF | SHADOW | LIVE |
+|---|---|---|---|
+| 준비됨 (`as0001`) | 기존 주문 대조·잔고 동기화 | 정상 | 정상 (다른 LIVE 조건 충족 시) |
+| 없음 (자동 손절 객체 0) | 건너뜀, health에 Migration 필요. Scanner 정상 | 감시·가상 주문 없음, WARN 알림 (하루 1회) | 모든 신규 매도·취소·재주문 없음, URGENT 알림 |
+| 버전 불일치·버전 없음, 구조는 대조 가능 | 기존 주문 대조만, 신규 주문 없음 (LIVE 미확정 주문이 있으면 URGENT) | 대조만, WARN | 대조만, URGENT |
+| 구조 손상 (대조 불가) | URGENT: 키움 앱에서 직접 확인 | 같음 | 같음 |
+
+LIVE 전송 조건(`live_order_block_reason`)에도 스키마 확인이 들어 있어, 주문·취소 선점 직전에 다시 검사한다.
+
+### Migration 실행 (배포 작업, 앱 정지 상태)
+
+```bash
+python -m scripts.auto_stop_journal_migrate --backup-dir /var/backups/mystockapp --check   # 사전 점검만 (변경 없음)
+python -m scripts.auto_stop_journal_migrate --backup-dir /var/backups/mystockapp           # 실행
+```
+
+- 사전: 대상 경로 확인(파일이 없으면 중단, 새 저널은 `--allow-create`일 때만), 무결성 검사, 테이블별 건수·내용 해시, 미확정 주문(`scanner_buy_orders` SENDING/UNKNOWN, 자동 손절 미확정) 확인, 기존 스키마 기록. 미확정 주문이 있으면 증권사 주문내역을 확인한 뒤 `--allow-unresolved`로만 진행한다.
+- 백업: `scripts/auto_stop_journal_backup`으로 읽기 전용 원본에서 사본을 만들고 무결성을 검사한다 (권한 600).
+- upgrade: 전체가 `BEGIN IMMEDIATE` 트랜잭션 하나다. 실패하면 DDL과 버전 기록이 함께 롤백되고 원본은 그대로다.
+  - 자동 손절 객체가 없으면 v1 DDL을 실행한다.
+  - 이전 자체 DDL 방식으로 이미 만들어진 저널은 객체 목록·정의(`sqlite_master`)가 v1과 정확히 같고 무결성·외래키 검사를 통과할 때만 버전을 기록한다. 하나라도 다르면 중단한다. 구조 검증 없는 `alembic stamp`는 하지 않는다.
+  - 재실행은 아무것도 바꾸지 않는다. downgrade는 지원하지 않는다 (주문 기록 삭제가 되므로).
+- 사후: 버전 `as0001`, 무결성, 기존 테이블 건수·해시·정의 불변, 신규 테이블·인덱스 구조, `scanner_buy_orders` 읽기, 런타임 `schema_status` 준비 확인. 보고서 JSON(권한 600)을 백업 폴더에 남긴다 (행 내용 없음).
+- 종료 코드: 0 성공, 2 사전 점검 실패, 3 Migration 실패(롤백), 4 사후 검증 실패. 0이 아니면 운영 배포·SHADOW 전환을 하지 않는다.
+- **실패해도 백업으로 자동 복원하지 않는다.** 실제 주문 기록이 있을 수 있는 저널을 과거 사본으로 덮지 않는다. 원인을 확인하고 사람이 판단한다.
+- 기존 `scanner_buy_orders` 테이블은 이전과 같이 Scanner 매수 모듈이 처음 쓸 때 스스로 만든다 (이번 변경 범위 밖, 정의 불변).
+
 ## 운영 절차
 
 1. **OFF 배포**
-   - 기본값 그대로 배포한다 (`AUTO_STOP_US_MODE` 미설정 = OFF). 앱을 재시작하고 `GET /api/auto-stop/health`에서 `mode=OFF`, `journal=true`, `kill_switch=null`을 확인한다.
+   - 기본값 그대로 배포한다 (`AUTO_STOP_US_MODE` 미설정 = OFF). 코드 배포만으로는 저널이 바뀌지 않는다: health는 `schema_ready=false`, `migration_required=true`이고 Scanner·계좌 기능은 그대로 동작한다.
+   - 앱을 멈추고 저널 Migration을 실행한 뒤 다시 시작한다 (아래 "저널 스키마와 Migration").
+   - `GET /api/auto-stop/health`에서 `mode=OFF`, `schema_ready=true`, `schema_version=as0001`, `kill_switch=null`을 확인한다.
    - OFF에서는 등록 폼이 보이지 않고 신규 감시·주문이 없다. 이미 등록된 포지션의 잔고 동기화와 기존 주문 대조는 계속한다.
    - 저널 백업 cron을 건다 (아래 "저널 백업").
 2. **SHADOW 시작** (최소 5거래일)

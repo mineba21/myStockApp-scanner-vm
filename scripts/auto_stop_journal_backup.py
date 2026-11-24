@@ -32,6 +32,7 @@ def backup(src: str, dest_dir: str, keep: int = 30) -> Path:
     finally:
         out.close()
         source.close()
+    os.chmod(target, 0o600)           # 주문 기록 사본: 소유자만 읽기
     olds = sorted(dest.glob(f"{src_path.stem}-*.sqlite3"))
     for old in olds[:-keep]:
         old.unlink()

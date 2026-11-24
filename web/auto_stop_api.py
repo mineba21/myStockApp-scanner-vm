@@ -44,10 +44,13 @@ class ResolveRequest(TickerConfirm):
 
 
 def _store():
+    """스키마가 준비된 저널만 연다. 스키마 확인은 읽기 전용이며 파일·테이블을 만들지 않는다."""
     from trading.auto_stop.runner import store_or_none
+    from trading.auto_stop.schema import schema_status
     store = store_or_none()
     if store is None:
-        raise HTTPException(status_code=503, detail="주문 저널 경로(SCANNER_ORDER_JOURNAL_PATH)가 설정되지 않았습니다.")
+        st = schema_status(S.Settings.from_env().journal_path)
+        raise HTTPException(status_code=503, detail=f"자동 손절 저널 Migration 필요: {st['schema_error']}")
     return store
 
 
@@ -193,10 +196,18 @@ def list_holdings(response: Response):
 @router.get("/health")
 def auto_stop_health(response: Response):
     response.headers["Cache-Control"] = "no-store"
+    from trading.auto_stop.runner import store_or_none
+    from trading.auto_stop.schema import schema_status
     settings = S.Settings.from_env()
-    if not settings.journal_path:
-        return {"mode": settings.mode, "journal": False,
-                "live_order_block_reason": S.live_order_block_reason(settings)}
-    store = _store()
-    return {"journal": True, **service.health(store, settings),
-            "recent_alerts": store.recent_alerts(10)}
+    st = schema_status(settings.journal_path)
+    live_block = S.live_order_block_reason(settings)
+    schema = {k: st[k] for k in ("journal_exists", "schema_ready", "schema_version", "expected_schema_version",
+                                 "migration_required", "schema_error", "reconcile_compatible")}
+    base = {"mode": settings.mode, "journal": bool(settings.journal_path), **schema,
+            "live_blocked_reason": live_block, "live_order_block_reason": live_block,
+            "replace_enabled": settings.replace_enabled, "shadow_replace_enabled": settings.shadow_replace_enabled,
+            "shadow_fill_model": settings.shadow_fill_model}
+    store = store_or_none(allow_compatible=True)        # 스키마가 없거나 다르면 None: DDL·파일 생성 없음
+    if store is None:
+        return base
+    return {**service.health(store, settings), **base, "recent_alerts": store.recent_alerts(10)}

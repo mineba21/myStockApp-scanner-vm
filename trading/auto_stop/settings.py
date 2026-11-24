@@ -153,6 +153,10 @@ def live_order_block_reason(settings: Settings | None = None) -> str | None:
     for name in ("KIWOOM_TRADING_ENABLED", "ACCOUNT1_ORDER_ENABLED"):
         if not _flag(name):
             return f"{name}가 꺼져 있습니다."
+    from trading.auto_stop.schema import schema_block_reason      # 순환 import 방지
+    reason = schema_block_reason(settings.journal_path or os.getenv("SCANNER_ORDER_JOURNAL_PATH", ""))
+    if reason:
+        return "저널 스키마 미준비: " + reason
     missing = [c for c in LIVE_REQUIRED if not settings.verified(c)]
     if missing:
         return "미검증 API 계약: " + ", ".join(missing) + " (AUTO_STOP_US_VERIFIED_CONTRACTS)"

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.auto_stop_fakes import FakeBroker, Harness, NoOrderReader, ts
+from tests.auto_stop_fakes import FakeBroker, Harness, NoOrderReader, migrated_journal, ts
 from trading.auto_stop import service
 from trading.auto_stop.brokers import LiveStopSellBroker, ShadowBroker
 from trading.auto_stop.settings import CONTRACTS, LIVE_REQUIRED
@@ -286,7 +286,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "start_scheduler", lambda: None, raising=False)
     monkeypatch.setattr(app_module, "stop_scheduler", lambda: None, raising=False)
     monkeypatch.setattr(app_module, "SITES_API_KEY", "k" * 32)
-    monkeypatch.setenv("SCANNER_ORDER_JOURNAL_PATH", str(tmp_path / "j.sqlite"))
+    monkeypatch.setenv("SCANNER_ORDER_JOURNAL_PATH", migrated_journal(tmp_path / "j.sqlite"))
     monkeypatch.setenv("AUTO_STOP_US_MODE", "SHADOW")
     monkeypatch.setattr(runner, "live_reader", lambda allow_orders=False: FakeBroker(lambda: ts(2026, 11, 23, 10, 0)))
     c = TestClient(app_module.app)

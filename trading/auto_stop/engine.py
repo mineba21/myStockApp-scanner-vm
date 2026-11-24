@@ -37,8 +37,10 @@ def new_owner() -> str:
 
 class Engine:
     def __init__(self, store, broker_factory, *, settings=None, clock=time.time, owner=None,
-                 notifier=None, settings_loader=S.Settings.from_env):
+                 notifier=None, settings_loader=S.Settings.from_env, schema_block=None):
         self.store = store
+        # 스키마 버전 불일치(대조 가능한 구조): 기존 주문 대조·잔고 동기화만 하고 신규 감시·주문·취소는 하지 않는다.
+        self.schema_block = schema_block
         self.broker_factory = broker_factory      # mode -> broker ("LIVE" 은 조회+주문, 주문 가능 여부는 별도 검사)
         self.settings_loader = settings_loader
         self.settings = settings or settings_loader()
@@ -126,7 +128,9 @@ class Engine:
             if mc.is_open:
                 self._tick_stats(mc)
                 self._sync_other_modes()
-            if self.settings.mode in ("SHADOW", "LIVE") and mc.is_open:
+            if self.schema_block:
+                self.summary["schema_block"] = self.schema_block
+            elif self.settings.mode in ("SHADOW", "LIVE") and mc.is_open:
                 self._session_notice(mc)
                 if not self._error_hold():
                     holdings = self._balance_sync(force=False)
@@ -135,7 +139,7 @@ class Engine:
                 else:
                     self._probe()
             self._finalize()
-            if self.settings.mode in ("SHADOW", "LIVE") and mc.after_close:
+            if self.settings.mode in ("SHADOW", "LIVE") and mc.after_close and not self.schema_block:
                 self._session_summary(mc)
             self.store.runtime_set("last_tick_ok_at", self.now(), self.now())
         except LeaseLost:
@@ -511,11 +515,15 @@ class Engine:
 
     # ── 6. 청산 진행 ─────────────────────────────────────────────
     def _guard(self, mode):
+        if self.schema_block:
+            return lambda: self.schema_block
         if mode == "LIVE":
             return lambda: S.live_order_block_reason(self.settings_loader())
         return lambda: None
 
     def _cancel_guard(self, mode):
+        if self.schema_block:
+            return lambda: self.schema_block
         if mode == "LIVE":
             return lambda: S.live_cancel_block_reason(self.settings_loader())
         # SHADOW 가상 취소: SHADOW 전용 스위치만 본다. ShadowBroker 는 주문 클라이언트가 없어 실취소가 불가능하다.

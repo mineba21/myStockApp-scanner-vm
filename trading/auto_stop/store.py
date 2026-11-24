@@ -1,4 +1,4 @@
-"""자동 손절 원장·주문 저널 (SCANNER_ORDER_JOURNAL_PATH SQLite, Alembic 밖).
+"""자동 손절 원장·주문 저널 (SCANNER_ORDER_JOURNAL_PATH SQLite). 스키마는 저널 전용 Alembic(trading/auto_stop/schema.py).
 
 모든 상태 변경은 BEGIN IMMEDIATE 트랜잭션 안의 조건부 UPDATE 로만 한다.
 주문·취소 선점은 같은 트랜잭션에서 lease 소유권, 미확정 주문 부재, 재주문·이월 한도를 함께 검증한다.
@@ -10,6 +10,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from decimal import Decimal
+from pathlib import Path
 
 UNRESOLVED = ("SENDING", "SUBMITTED", "PARTIAL_FILLED", "CANCEL_SENDING", "CANCEL_PENDING",
               "CANCEL_UNKNOWN", "UNKNOWN")
@@ -34,138 +35,21 @@ class LeaseLost(Exception):
     """lease 를 잃음. 이 작업자는 더 이상 주문·상태 변경을 하지 않는다."""
 
 
-SCHEMA = [
-    f'''CREATE TABLE IF NOT EXISTS auto_stop_positions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        mode TEXT NOT NULL CHECK(mode IN ('SHADOW','LIVE')),
-        account_profile TEXT NOT NULL CHECK(account_profile = 'account1'),
-        market TEXT NOT NULL CHECK(market = 'US'),
-        ticker TEXT NOT NULL,
-        exchange TEXT NOT NULL CHECK(exchange IN ('NA','ND','NY')),
-        source TEXT NOT NULL CHECK(source IN ('MANUAL_LINK','SCANNER_BUY','PROMOTED')),
-        source_ref TEXT,
-        scan_result_id INTEGER NOT NULL,
-        signal_snapshot TEXT NOT NULL,
-        stop_price TEXT NOT NULL,
-        initial_managed_qty INTEGER NOT NULL CHECK(initial_managed_qty >= 1),
-        remaining_managed_qty INTEGER NOT NULL CHECK(remaining_managed_qty >= 0),
-        total_filled_qty INTEGER NOT NULL DEFAULT 0 CHECK(total_filled_qty >= 0),
-        broker_qty_at_register INTEGER NOT NULL,
-        avg_cost_at_register TEXT,
-        state TEXT NOT NULL CHECK(state IN {_in(POSITION_STATES)}),
-        auto_paused INTEGER NOT NULL DEFAULT 0,
-        review_reason TEXT,
-        last_quote_price TEXT,
-        last_quote_at REAL,
-        last_price_check_at REAL,
-        last_balance_at REAL,
-        broker_qty_last INTEGER,
-        created_at REAL NOT NULL,
-        updated_at REAL NOT NULL,
-        details TEXT NOT NULL DEFAULT '{{}}')''',
-    # 사람이 정리하기 전(NEEDS_REVIEW 포함)에는 같은 모드·종목 재등록 금지
-    f'''CREATE UNIQUE INDEX IF NOT EXISTS auto_stop_position_live
-        ON auto_stop_positions(mode, account_profile, ticker)
-        WHERE state IN {_in(POSITION_LIVE_STATES)}''',
-    f'''CREATE TABLE IF NOT EXISTS auto_stop_exit_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        position_id INTEGER NOT NULL REFERENCES auto_stop_positions(id),
-        mode TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN {_in(EVENT_STATES)}),
-        triggered_at REAL NOT NULL,
-        trigger_price TEXT NOT NULL,
-        trigger_as_of REAL,
-        stop_price TEXT NOT NULL,
-        session_date TEXT NOT NULL,
-        session_replace_count INTEGER NOT NULL DEFAULT 0,
-        event_replace_count INTEGER NOT NULL DEFAULT 0,
-        carry_over_count INTEGER NOT NULL DEFAULT 0,
-        next_order_kind TEXT NOT NULL DEFAULT 'ORIGINAL' CHECK(next_order_kind IN {_in(ORDER_KINDS)}),
-        review_reason TEXT,
-        created_at REAL NOT NULL,
-        updated_at REAL NOT NULL)''',
-    f'''CREATE UNIQUE INDEX IF NOT EXISTS auto_stop_event_open
-        ON auto_stop_exit_events(position_id) WHERE state IN {_in(EVENT_OPEN_STATES)}''',
-    f'''CREATE TABLE IF NOT EXISTS auto_stop_orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        exit_event_id INTEGER NOT NULL REFERENCES auto_stop_exit_events(id),
-        mode TEXT NOT NULL CHECK(mode IN ('SHADOW','LIVE')),
-        account_profile TEXT NOT NULL,
-        attempt_no INTEGER NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN {_in(ORDER_KINDS)}),
-        parent_order_id INTEGER,
-        ticker TEXT NOT NULL,
-        exchange TEXT NOT NULL,
-        ref_price TEXT NOT NULL,
-        ref_source TEXT NOT NULL,
-        quote_as_of REAL,
-        limit_price TEXT NOT NULL,
-        requested_qty INTEGER NOT NULL CHECK(requested_qty >= 1),
-        filled_qty INTEGER NOT NULL DEFAULT 0 CHECK(filled_qty >= 0),
-        remaining_order_qty INTEGER NOT NULL CHECK(remaining_order_qty >= 0),
-        avg_fill_price TEXT,
-        order_number TEXT,
-        order_date TEXT,
-        broker_state TEXT,
-        state TEXT NOT NULL CHECK(state IN {_in(ORDER_STATES)}),
-        cancel_rejected INTEGER NOT NULL DEFAULT 0,
-        cancel_order_number TEXT,
-        cancel_sent_at REAL,
-        sent_at REAL,
-        last_checked_at REAL,
-        created_at REAL NOT NULL,
-        updated_at REAL NOT NULL,
-        details TEXT NOT NULL DEFAULT '{{}}',
-        UNIQUE(exit_event_id, attempt_no))''',
-    # 이벤트당 살아 있는 주문은 하나뿐
-    f'''CREATE UNIQUE INDEX IF NOT EXISTS auto_stop_order_unresolved
-        ON auto_stop_orders(exit_event_id) WHERE state IN {_in(UNRESOLVED)}''',
-    # 주문번호 재사용 범위가 확인되지 않았으므로 거래일·계좌·거래소까지 묶는다
-    '''CREATE UNIQUE INDEX IF NOT EXISTS auto_stop_order_number
-        ON auto_stop_orders(mode, account_profile, exchange, order_date, order_number)
-        WHERE order_number IS NOT NULL''',
-    '''CREATE TABLE IF NOT EXISTS auto_stop_fill_ledger (
-        order_id INTEGER NOT NULL REFERENCES auto_stop_orders(id),
-        cum_filled_qty INTEGER NOT NULL,
-        applied_delta INTEGER NOT NULL,
-        applied_at REAL NOT NULL,
-        evidence TEXT NOT NULL,
-        PRIMARY KEY(order_id, cum_filled_qty))''',
-    '''CREATE TABLE IF NOT EXISTS auto_stop_runtime (
-        key TEXT PRIMARY KEY, value TEXT, updated_at REAL NOT NULL)''',
-    '''CREATE TABLE IF NOT EXISTS auto_stop_alerts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        dedup_key TEXT NOT NULL UNIQUE,
-        severity TEXT NOT NULL CHECK(severity IN ('INFO','WARN','URGENT')),
-        text TEXT NOT NULL,
-        state TEXT NOT NULL DEFAULT 'PENDING' CHECK(state IN ('PENDING','SENT','FAILED')),
-        attempts INTEGER NOT NULL DEFAULT 0,
-        created_at REAL NOT NULL,
-        sent_at REAL)''',
-    '''CREATE TABLE IF NOT EXISTS auto_stop_daily_stats (
-        day TEXT NOT NULL, mode TEXT NOT NULL, metric TEXT NOT NULL, key TEXT NOT NULL DEFAULT '',
-        value REAL NOT NULL DEFAULT 0, PRIMARY KEY(day, mode, metric, key))''',
-    '''CREATE TABLE IF NOT EXISTS auto_stop_audit (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        at REAL NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
-        target TEXT NOT NULL, details TEXT NOT NULL)''',
-]
-
-
 def _row(r):
     return dict(r) if r is not None else None
 
 
 class AutoStopStore:
+    """스키마는 저널 전용 Migration(scripts.auto_stop_journal_migrate)이 만든다. 생성자는 DDL 을 실행하지 않고,
+    연결은 mode=rw 라 저널 파일이 없으면 새로 만들지 않고 실패한다. 호출 전 schema.schema_status 로 확인한다."""
+
     def __init__(self, path):
         self.path = str(path)
-        with self.tx() as db:
-            for stmt in SCHEMA:
-                db.execute(stmt)
+        self._uri = Path(self.path).resolve().as_uri() + "?mode=rw"
 
     @contextmanager
     def tx(self):
-        db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+        db = sqlite3.connect(self._uri, uri=True, timeout=15, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA synchronous=FULL")
         db.execute("PRAGMA foreign_keys=ON")

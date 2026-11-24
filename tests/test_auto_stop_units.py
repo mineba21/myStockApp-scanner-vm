@@ -81,6 +81,9 @@ def test_live_gate_requires_every_switch_and_read_contracts(monkeypatch, tmp_pat
            "AUTO_STOP_US_VERIFIED_CONTRACTS": "USA20101_QUOTE_TIME,UST21070_SELLABLE,UST21150_STATUS"}
     for k, v in env.items():
         monkeypatch.setenv(k, v)
+    assert "스키마" in S.live_order_block_reason()          # 저널 Migration 전에는 LIVE 불가
+    from tests.auto_stop_fakes import migrated_journal
+    migrated_journal(tmp_path / "j")
     assert S.live_order_block_reason() is None
     assert "REPLACE" in S.live_cancel_block_reason()
     monkeypatch.setenv("AUTO_STOP_US_REPLACE_ENABLED", "true")
@@ -238,7 +241,9 @@ def test_readonly_probe_never_imports_order_client():
 def test_journal_backup_copies_and_refuses_same_folder(tmp_path):
     from scripts.auto_stop_journal_backup import backup
     from trading.auto_stop.store import AutoStopStore
+    from tests.auto_stop_fakes import migrated_journal
     src = tmp_path / "j.sqlite"
+    migrated_journal(src)
     AutoStopStore(src).runtime_set("x", 1, 0)
     out = backup(str(src), str(tmp_path / "bk"))
     assert AutoStopStore(out).runtime_get("x") == 1

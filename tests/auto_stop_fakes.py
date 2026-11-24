@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from trading.auto_stop.engine import Engine
 from trading.auto_stop.quotes import Quote, QuoteUnavailable
 from trading.auto_stop.settings import CONTRACTS, Settings
+from trading.auto_stop.schema import upgrade_journal
 from trading.auto_stop.store import AutoStopStore
 
 NY = ZoneInfo("America/New_York")
@@ -115,6 +116,12 @@ class NoOrderReader(FakeBroker):
         raise AssertionError("SHADOW 에서 실취소 경로 호출")
 
 
+def migrated_journal(path):
+    """테스트 저널에 실제 저널 전용 Migration 을 적용한다 (런타임은 DDL 을 실행하지 않는다)."""
+    upgrade_journal(str(path), allow_create=True)
+    return str(path)
+
+
 def settings(tmp_path, **overrides):
     # 엔진 로직 테스트는 '모든 계약이 검증된' 설정을 기준으로 한다. 계약 게이트는 별도 테스트에서 끈다.
     base = Settings(mode="LIVE", replace_enabled=True, shadow_replace_enabled=True, price_interval_sec=0, status_interval_sec=0,
@@ -130,6 +137,7 @@ class Harness:
         monkeypatch.setenv("SCANNER_ORDER_JOURNAL_PATH", str(tmp_path / "j.sqlite"))
         self.clock = Clock()
         self.st = settings(tmp_path, **over)
+        migrated_journal(self.st.journal_path)
         self.store = AutoStopStore(self.st.journal_path)
         self.broker = broker or FakeBroker(self.clock)
         self.factory = factory or (lambda mode: self.broker)
