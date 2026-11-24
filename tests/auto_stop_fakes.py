@@ -117,7 +117,7 @@ class NoOrderReader(FakeBroker):
 
 def settings(tmp_path, **overrides):
     # 엔진 로직 테스트는 '모든 계약이 검증된' 설정을 기준으로 한다. 계약 게이트는 별도 테스트에서 끈다.
-    base = Settings(mode="LIVE", replace_enabled=True, price_interval_sec=0, status_interval_sec=0,
+    base = Settings(mode="LIVE", replace_enabled=True, shadow_replace_enabled=True, price_interval_sec=0, status_interval_sec=0,
                     balance_sync_sec=0, journal_path=str(tmp_path / "j.sqlite"),
                     verified_contracts=frozenset(CONTRACTS), shadow_fill_model="IMMEDIATE")
     return replace(base, **overrides)

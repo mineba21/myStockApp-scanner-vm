@@ -9,7 +9,7 @@
 - 정규장에서 유효한 당일 시세가 손절가 이하이면, 사람 확인 없이 지정가로 매도한다.
   - 기준가: 최신 현재가
   - 지정가: 기준가 × (1 − 0.5%), 센트 내림
-- 미체결이면 다음 순서로 잔여 수량만 다시 주문한다. 이 동작은 `AUTO_STOP_US_REPLACE_ENABLED`를 켰을 때만 한다.
+- 미체결이면 다음 순서로 잔여 수량만 다시 주문한다. 이 동작은 LIVE에서는 `AUTO_STOP_US_REPLACE_ENABLED`, SHADOW(가상)에서는 `AUTO_STOP_US_SHADOW_REPLACE_ENABLED`를 켰을 때만 한다.
   1. 5분 뒤 취소를 요청한다.
   2. 취소 확정과 최종 체결 수량을 확인한다.
   3. 잔고와 매도가능수량을 다시 조회한다.
@@ -192,7 +192,8 @@ UNKNOWN/CANCEL_UNKNOWN ─(주문번호 없음)→ 사람이 주문번호를 입
 | 변수 | 기본 | 설명 |
 |---|---|---|
 | `AUTO_STOP_US_MODE` | `OFF` | `OFF` / `SHADOW` / `LIVE` |
-| `AUTO_STOP_US_REPLACE_ENABLED` | `false` | 미체결 자동 취소·재주문. 꺼져 있으면 알림만 보낸다 |
+| `AUTO_STOP_US_REPLACE_ENABLED` | `false` | **LIVE 전용** 미체결 자동 취소·재주문. 꺼져 있으면 알림만 보낸다. SHADOW에는 영향 없음 |
+| `AUTO_STOP_US_SHADOW_REPLACE_ENABLED` | `false` | **SHADOW 전용** 가상 취소·재주문. LIVE에는 영향 없음. SHADOW 브로커는 주문 클라이언트가 없어 어떤 조합에서도 실주문·실취소가 나가지 않는다 |
 | `AUTO_STOP_US_TICK_SEC` | 30 | 스케줄러 주기. 재시작해야 반영된다 |
 | `AUTO_STOP_US_PRICE_INTERVAL_SEC` / `_STATUS_INTERVAL_SEC` / `_REPLACE_AFTER_SEC` / `_BALANCE_SYNC_SEC` | 60 / 30 / 300 / 300 | 내부 주기 |
 | `AUTO_STOP_US_MAX_REPLACES_PER_SESSION` / `_PER_EVENT` | 3 / 6 | |
@@ -251,6 +252,17 @@ SHADOW는 LIVE와 같은 상태 머신을 쓰고 브로커만 `ShadowBroker`로 
 
 - 가상 체결가는 지정가로 기록한다. 실제 체결가가 아니다.
 - **가상 체결 결과는 실제 체결률이나 실현손익으로 보고하지 않는다.** 일일 보고와 화면에 이 문구가 함께 표시된다.
+- 가상 주문마다 만든 시점의 `fill_model`과 `shadow_replace_enabled`를 기록한다(`details.shadow`). 운영 중 모델을 바꿔도 기존 주문은 만든 모델로 판정·집계한다.
+- 모델·SHADOW 재주문 스위치가 바뀌면 첫 tick에서 감사 기록(`auto_stop_audit`, action `shadow_config`)과 WARN 알림을 남긴다.
+- **NEXT_QUOTE와 STRESS 결과를 합쳐 성과로 평가하지 않는다.** 일일 보고는 모델별로 따로 집계한다.
+
+### STRESS 검증 절차 (선택, NEXT_QUOTE 5거래일 운영과 분리)
+
+1. NEXT_QUOTE 5거래일 보고를 먼저 확정한다.
+2. 장 시작 전에 `AUTO_STOP_US_SHADOW_FILL_MODEL=STRESS`, `AUTO_STOP_US_SHADOW_REPLACE_ENABLED=true`로 재시작한다. `AUTO_STOP_US_REPLACE_ENABLED`(LIVE)는 `false` 그대로 둔다.
+3. 그날 보고의 `[STRESS]` 행에서 부분체결 → 가상 취소(90초 지연) → 재주문 → 종료 흐름을 확인한다.
+4. 장 마감 후 `NEXT_QUOTE`, `SHADOW_REPLACE_ENABLED=false`로 되돌린다.
+5. STRESS로 진행된 SHADOW 포지션은 손절 진행·종료 상태라 LIVE로 전환할 수 없다(ACTIVE만 전환 가능). 전환하더라도 Shadow 주문·이벤트는 복사하지 않는다.
 
 ## 전체 긴급 중지 (kill switch)
 
@@ -302,6 +314,15 @@ SHADOW는 LIVE와 같은 상태 머신을 쓰고 브로커만 `ShadowBroker`로 
 | 가상 체결 | 체결가(지정가 기준) vs 손절가 % |
 | 미해결 | 열린 이벤트, 미확정 주문, 확인 필요 |
 | 알림·heartbeat | 알림 성공/실패/대기, heartbeat 정상 여부 |
+
+SHADOW 보고에는 `shadow` 항목이 붙는다.
+
+| 항목 | 내용 |
+|---|---|
+| `current` | 현재 `fill_model`, `shadow_replace_enabled` |
+| `by_model` | 가상 체결 모델별 주문 수, 원주문/재주문/이월, 체결·취소·미체결, 가상 체결가 vs 손절가 |
+| `config_changes` | 그날 모델·스위치 변경 시각과 값 |
+| `mixed_models` | 하루에 모델이 둘 이상이면 true. 이 경우 합산 수치로 평가하지 않는다 |
 
 누락·오류·미해결이 있으면 WARN, 없으면 INFO로 보낸다. 휴장일은 `trading_day=false`.
 

@@ -272,6 +272,12 @@ class AutoStopStore:
             db.execute("INSERT INTO auto_stop_audit(at,actor,action,target,details) VALUES(?,?,?,?,?)",
                        (now, actor, action, str(target), json.dumps(details, default=str)))
 
+    def audits(self, action, since, until):
+        with self.tx() as db:
+            rows = db.execute("SELECT at,actor,action,target,details FROM auto_stop_audit "
+                              "WHERE action=? AND at>=? AND at<? ORDER BY id", (action, since, until)).fetchall()
+        return [{**dict(r), "details": json.loads(r["details"])} for r in rows]
+
     # ── positions ───────────────────────────────────────────────
     def insert_position(self, now, **f) -> int:
         with self.tx() as db:

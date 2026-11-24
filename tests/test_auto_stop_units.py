@@ -59,6 +59,22 @@ def test_settings_defaults_off_and_clamped(monkeypatch):
     assert st.mode == "OFF" and st.slip_bps == 500 and st.replace_enabled
 
 
+def test_live_and_shadow_replace_switches_are_independent(monkeypatch):
+    monkeypatch.delenv("AUTO_STOP_US_SHADOW_REPLACE_ENABLED", raising=False)
+    monkeypatch.delenv("AUTO_STOP_US_REPLACE_ENABLED", raising=False)
+    st = S.Settings.from_env()
+    assert st.shadow_replace_enabled is False and st.replace_enabled is False          # 기본 둘 다 꺼짐
+    for live, shadow in (("true", "false"), ("false", "true")):
+        monkeypatch.setenv("AUTO_STOP_US_REPLACE_ENABLED", live)
+        monkeypatch.setenv("AUTO_STOP_US_SHADOW_REPLACE_ENABLED", shadow)
+        st = S.Settings.from_env()
+        assert st.replace_enabled_for("LIVE") is (live == "true")
+        assert st.replace_enabled_for("SHADOW") is (shadow == "true")
+        assert st.replace_enabled_for("OFF") is False
+        # LIVE 취소 게이트는 SHADOW 스위치를 보지 않는다
+        assert (S.live_cancel_block_reason(st) or "").find("SHADOW") == -1
+
+
 def test_live_gate_requires_every_switch_and_read_contracts(monkeypatch, tmp_path):
     env = {"AUTO_STOP_US_MODE": "LIVE", "KIWOOM_WEB_ENABLED": "true", "KIWOOM_TRADING_ENABLED": "true",
            "ACCOUNT1_ORDER_ENABLED": "true", "SCANNER_ORDER_JOURNAL_PATH": str(tmp_path / "j"),

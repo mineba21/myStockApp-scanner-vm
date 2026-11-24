@@ -53,7 +53,8 @@ def _dates(name: str) -> frozenset[str]:
 @dataclass(frozen=True)
 class Settings:
     mode: str = "OFF"
-    replace_enabled: bool = False
+    replace_enabled: bool = False            # LIVE 전용 (실계좌 자동 취소·재주문)
+    shadow_replace_enabled: bool = False     # SHADOW 전용 (가상 취소·재주문). 서로 영향을 주지 않는다
     tick_sec: int = 30
     price_interval_sec: int = 60
     status_interval_sec: int = 30
@@ -83,6 +84,14 @@ class Settings:
     def verified(self, name: str) -> bool:
         return name in self.verified_contracts
 
+    def replace_enabled_for(self, mode: str) -> bool:
+        """모드별 재주문 스위치. LIVE 는 REPLACE_ENABLED 만, SHADOW 는 SHADOW_REPLACE_ENABLED 만 본다."""
+        if mode == "LIVE":
+            return self.replace_enabled
+        if mode == "SHADOW":
+            return self.shadow_replace_enabled
+        return False
+
     def live_qty_cap(self) -> int:
         """1주 실매도 검증 전에는 LIVE 주문을 1주로 제한한다."""
         return self.max_order_qty if self.verified("UST20001_SELL") else 1
@@ -98,6 +107,7 @@ class Settings:
             verified_contracts=contracts,
             mode=mode if mode in MODES else "OFF",
             replace_enabled=_flag("AUTO_STOP_US_REPLACE_ENABLED"),
+            shadow_replace_enabled=_flag("AUTO_STOP_US_SHADOW_REPLACE_ENABLED"),
             tick_sec=_int("AUTO_STOP_US_TICK_SEC", 30, 10, 300),
             price_interval_sec=_int("AUTO_STOP_US_PRICE_INTERVAL_SEC", 60, 10, 900),
             status_interval_sec=_int("AUTO_STOP_US_STATUS_INTERVAL_SEC", 30, 10, 900),

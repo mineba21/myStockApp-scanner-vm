@@ -10,6 +10,7 @@ ShadowBroker: 시세·잔고는 실계좌에서 읽고, 매도·취소는 가상
 """
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -208,10 +209,19 @@ class ShadowBroker:
     def cancel(self, ticker, exchange, order_number):
         return {"order_number": "VC" + uuid.uuid4().hex[:10], "virtual": True}
 
+    def model_for(self, order) -> str:
+        """주문을 만든 시점의 모델 (기록이 없으면 현재 모델). 운영 중 모델을 바꿔도 기존 주문 판정은 섞지 않는다."""
+        try:
+            tags = json.loads(order.get("details") or "{}").get("shadow") or []
+            model = tags[0].get("fill_model")
+        except (ValueError, TypeError, AttributeError, IndexError):
+            model = None
+        return model if model in ("IMMEDIATE", "NEXT_QUOTE", "STRESS") else self.model
+
     def _row(self, order, state, filled, **extra):
         qty = order["requested_qty"]
         return {"order_number": order["order_number"], "ticker": order["ticker"], "side": "SELL",
-                "quantity": qty, "price": order["limit_price"], "virtual": True, "model": self.model,
+                "quantity": qty, "price": order["limit_price"], "virtual": True, "model": self.model_for(order),
                 "state": state, "filled_quantity": filled,
                 "remaining_quantity": 0 if state in ("FILLED", "CANCELLED") else qty - filled, **extra}
 
@@ -223,7 +233,7 @@ class ShadowBroker:
             return None
         if q.as_of is None:
             return None
-        if self.model != "IMMEDIATE" and (order.get("quote_as_of") is None or q.as_of <= order["quote_as_of"]):
+        if self.model_for(order) != "IMMEDIATE" and (order.get("quote_as_of") is None or q.as_of <= order["quote_as_of"]):
             return None
         return q if q.price >= Decimal(order["limit_price"]) else None
 
@@ -232,11 +242,12 @@ class ShadowBroker:
             return None
         qty, filled, now = order["requested_qty"], order["filled_qty"], self.clock()
         open_state = "PARTIAL" if filled else "OPEN"
+        model = self.model_for(order)
         if order["state"] in ("CANCEL_PENDING", "CANCEL_UNKNOWN"):
-            if self.model == "STRESS" and now - (order.get("cancel_sent_at") or now) < STRESS_CANCEL_DELAY_SEC:
+            if model == "STRESS" and now - (order.get("cancel_sent_at") or now) < STRESS_CANCEL_DELAY_SEC:
                 return self._row(order, open_state, filled, stress="cancel_delay")
             return self._row(order, "CANCELLED", filled)
-        if self.model == "STRESS" and order.get("attempt_no", 0) == 0:
+        if model == "STRESS" and order.get("attempt_no", 0) == 0:
             sent = order.get("sent_at") or now
             if now - sent >= STRESS_PARTIAL_AFTER_SEC and qty >= 2 and filled == 0:
                 return self._row(order, "PARTIAL", qty // 2, stress="partial",

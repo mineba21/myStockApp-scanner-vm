@@ -118,6 +118,8 @@ class Engine:
         try:
             mc = market_clock(now, self.settings)
             self.summary["market_open"] = mc.is_open
+            if self.settings.mode == "SHADOW":
+                self._track_shadow_config()
             self._recover_stale()
             self._reconcile_all()
             self._rollover(mc)
@@ -146,6 +148,25 @@ class Engine:
             raise
         self._end_tick()
         return self.summary
+
+    # ── SHADOW 설정 기록 ──────────────────────────────────────────
+    def _shadow_config(self, mode="SHADOW"):
+        model = getattr(self._broker(mode), "model", None) or self.settings.shadow_fill_model
+        return {"fill_model": model, "shadow_replace_enabled": self.settings.shadow_replace_enabled}
+
+    def _track_shadow_config(self):
+        """SHADOW 체결 모델·재주문 스위치 변경 시각을 감사 기록에 남긴다 (일일 보고의 모델 분리 근거)."""
+        current = {"fill_model": self.settings.shadow_fill_model,
+                   "shadow_replace_enabled": self.settings.shadow_replace_enabled}
+        prev = self.store.runtime_get("shadow_config")
+        if prev == current:
+            return
+        now = self.now()
+        self.store.runtime_set("shadow_config", current, now)
+        self.store.audit(now, "config", "shadow_config", "SHADOW", {"from": prev, "to": current})
+        if prev is not None:
+            self._alert(f"shadow_config:{int(now)}", "WARN",
+                        f"[자동손절] SHADOW 설정 변경: {prev} → {current}. 일일 보고는 모델별로 분리해 집계합니다.")
 
     # ── 운영 통계 (SHADOW 일일 보고서 근거) ────────────────────────
     def _day(self):
@@ -497,7 +518,9 @@ class Engine:
     def _cancel_guard(self, mode):
         if mode == "LIVE":
             return lambda: S.live_cancel_block_reason(self.settings_loader())
-        return lambda: None if self.settings_loader().replace_enabled else "AUTO_STOP_US_REPLACE_ENABLED 꺼짐"
+        # SHADOW 가상 취소: SHADOW 전용 스위치만 본다. ShadowBroker 는 주문 클라이언트가 없어 실취소가 불가능하다.
+        return lambda: (None if self.settings_loader().shadow_replace_enabled
+                        else "AUTO_STOP_US_SHADOW_REPLACE_ENABLED 꺼짐")
 
     def _replace_allowed(self, ev):
         return (ev["session_replace_count"] < self.settings.max_replaces_per_session
@@ -524,8 +547,9 @@ class Engine:
             if orders and orders[-1]["state"] not in ("FILLED", "CANCELLED"):
                 self._review_event(ev, f"직전 주문 상태 {orders[-1]['state']}")
                 continue
-            if ev["next_order_kind"] == "REPLACE" and not self.settings.replace_enabled:
-                self._review_event(ev, "잔여 수량 재주문이 필요하지만 AUTO_STOP_US_REPLACE_ENABLED가 꺼져 있습니다")
+            if ev["next_order_kind"] == "REPLACE" and not self.settings.replace_enabled_for(ev["mode"]):
+                flag = "AUTO_STOP_US_REPLACE_ENABLED" if ev["mode"] == "LIVE" else "AUTO_STOP_US_SHADOW_REPLACE_ENABLED"
+                self._review_event(ev, f"잔여 수량 재주문이 필요하지만 {flag}가 꺼져 있습니다")
                 continue
             if ev["next_order_kind"] == "REPLACE" and not self._replace_allowed(ev):
                 self._review_event(ev, "재주문 한도 도달 (세션 "
@@ -607,6 +631,9 @@ class Engine:
             return
         sent_at = self.now()
         self.store.set_order_fields(order["id"], sent_at, sent_at=sent_at)
+        if mode == "SHADOW":
+            # 가상 체결 모델을 주문마다 고정 기록한다: 모델이 바뀌어도 이 주문은 만든 모델로 판정·집계한다.
+            self.store.add_order_evidence(order["id"], sent_at, "shadow", self._shadow_config(mode))
         try:
             res = self._broker(mode).sell(pos["ticker"], pos["exchange"], qty, price)
         except OrderRejected as exc:

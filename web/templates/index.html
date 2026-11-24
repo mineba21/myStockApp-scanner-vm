@@ -793,7 +793,8 @@
         </div>
         <div>운영 모드: <strong data-testid="auto-stop-mode" x-text="health.mode"></strong>
           <span x-show="health.mode === 'SHADOW'"> · 가상 체결 모델 <span x-text="health.shadow_fill_model"></span> (실제 체결률 아님)</span>
-          · 자동 재주문 <span x-text="health.replace_enabled ? '켜짐' : '꺼짐'"></span></div>
+          · LIVE 자동 재주문 <span data-testid="live-replace" x-text="health.replace_enabled ? '켜짐' : '꺼짐'"></span>
+          · SHADOW 가상 재주문 <span data-testid="shadow-replace" x-text="health.shadow_replace_enabled ? '켜짐' : '꺼짐'"></span></div>
         <div x-show="health.mode === 'LIVE' && health.live_order_block_reason" class="text-red-700">LIVE 전송 차단: <span x-text="health.live_order_block_reason"></span></div>
         <div x-show="(health.missing_live_contracts || []).length" class="text-amber-700">LIVE 전 미검증 계약: <span x-text="(health.missing_live_contracts || []).join(', ')"></span>
           <span x-show="health.live_qty_cap === 1"> · 1주 실매도 검증 전 LIVE는 1주 한정</span></div>
@@ -922,6 +923,13 @@
           <template x-for="w in report.watch.positions" :key="w.id"><div class="text-xs">
             <span x-text="w.ticker"></span>: 정상 <span x-text="w.ok_checks + '/' + w.expected_checks"></span>, 실패 <span x-text="w.quote_fail"></span>, 무효 <span x-text="w.quote_invalid"></span>, 최대 시세 지연 <span x-text="w.max_quote_age_sec ?? '-'"></span>초, 마지막 정상 <span x-text="fmt(w.last_check_at)"></span></div></template>
           <template x-for="f in report.fills_vs_stop" :key="f.order_id"><div class="text-xs"><span x-text="f.ticker"></span> 가상 체결 <span x-text="f.filled_qty"></span>주 @ <span x-text="f.fill_price"></span> (손절가 대비 <span x-text="f.vs_stop_pct"></span>%)</div></template>
+          <template x-if="report.shadow && report.shadow.by_model"><div class="text-xs space-y-1" data-testid="report-by-model">
+            <div>현재 모델 <span x-text="report.shadow.current?.fill_model"></span> · SHADOW 재주문 <span x-text="report.shadow.current?.shadow_replace_enabled ? '켜짐' : '꺼짐'"></span>
+              <span x-show="report.shadow.mixed_models" class="text-amber-700"> · 모델 혼재: 모델별로 따로 평가</span></div>
+            <template x-for="e in Object.entries(report.shadow.by_model)" :key="e[0]"><div>
+              [<span x-text="e[0]"></span>] 주문 <span x-text="e[1].orders"></span> · 재주문 <span x-text="e[1].by_kind.REPLACE"></span> · 체결 <span x-text="e[1].filled"></span> · 취소 <span x-text="e[1].cancelled"></span> · 미체결 <span x-text="e[1].partial_or_open"></span></div></template>
+            <template x-for="c in report.shadow.config_changes" :key="c.at"><div>설정 변경 <span x-text="fmt(c.at)"></span>: <span x-text="JSON.stringify(c.to)"></span></div></template>
+          </div></template>
           <p class="text-xs text-amber-700" x-text="report.note"></p>
         </div></template>
       </div>

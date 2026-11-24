@@ -292,6 +292,7 @@ def health(store, settings=None, now=None) -> dict:
         "live_qty_cap": settings.live_qty_cap(),
         "live_cancel_block_reason": S.live_cancel_block_reason(settings),
         "replace_enabled": settings.replace_enabled,
+        "shadow_replace_enabled": settings.shadow_replace_enabled,
         "live_order_block_reason": S.live_order_block_reason(settings),
         "market_open": mc.is_open,
         "before_cutoff": mc.before_cutoff,
@@ -391,6 +392,10 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
                       "fill_price_basis": "avg_fill_price" if o["avg_fill_price"] else "limit_price",
                       "fill_price": str(price), "stop_price": str(stop),
                       "vs_stop_pct": float(round((price - stop) / stop * 100, 2))})
+    shadow = _shadow_breakdown(store, orders, fills, d) if mode == "SHADOW" else {}
+    if shadow:
+        shadow["current"] = {"fill_model": settings.shadow_fill_model,
+                             "shadow_replace_enabled": settings.shadow_replace_enabled}
     alerts = [a for a in store.recent_alerts(2000) if ny_date(a["created_at"]) == d]
     expected_ticks = int((end - start) // max(1, settings.tick_sec))
     max_gap = maxstat("max_tick_gap_sec")
@@ -413,6 +418,7 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
                    "partial_or_open": sum(o["state"] in UNRESOLVED for o in orders),
                    "cancelled": sum(o["state"] == "CANCELLED" for o in orders)},
         "fills_vs_stop": fills,
+        "shadow": shadow,
         "unresolved_events": len(store.events(mode=mode, states=("OPEN", "CARRY_OVER", "NEEDS_REVIEW"))),
         "unresolved_orders": len(unresolved_orders),
         "alerts": {"sent": sum(a["state"] == "SENT" for a in alerts),
@@ -421,6 +427,41 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         "heartbeat": {"last_at": heartbeat, "max_tick_gap_sec": max_gap,
                       "ok": bool(heartbeat) and (max_gap is None or max_gap <= 3 * settings.tick_sec)},
     }
+
+
+def _order_shadow_config(o) -> dict:
+    try:
+        tags = json.loads(o.get("details") or "{}").get("shadow") or []
+        return tags[0]
+    except (ValueError, TypeError, AttributeError, IndexError):
+        return {}
+
+
+def _shadow_breakdown(store, orders, fills, d) -> dict:
+    """SHADOW 결과를 가상 체결 모델별로 분리한다. 서로 다른 모델 결과를 합쳐 평가하지 않는다."""
+    fill_by_order = {f["order_id"]: f for f in fills}
+    by_model = {}
+    for o in orders:
+        cfg = _order_shadow_config(o)
+        model = cfg.get("fill_model") or "UNTAGGED"
+        m = by_model.setdefault(model, {"orders": 0, "by_kind": {"ORIGINAL": 0, "REPLACE": 0, "CARRY_OVER": 0},
+                                        "filled": 0, "cancelled": 0, "partial_or_open": 0,
+                                        "shadow_replace_enabled": set(), "fills_vs_stop": []})
+        m["orders"] += 1
+        m["by_kind"][o["kind"]] += 1
+        m["filled"] += o["state"] == "FILLED"
+        m["cancelled"] += o["state"] == "CANCELLED"
+        m["partial_or_open"] += o["state"] in UNRESOLVED
+        m["shadow_replace_enabled"].add(bool(cfg.get("shadow_replace_enabled")))
+        if o["id"] in fill_by_order:
+            m["fills_vs_stop"].append(fill_by_order[o["id"]])
+    for m in by_model.values():
+        m["shadow_replace_enabled"] = sorted(m["shadow_replace_enabled"])
+    start = datetime.combine(d, datetime.min.time(), tzinfo=NEW_YORK).timestamp()
+    changes = [{"at": a["at"], "from": a["details"].get("from"), "to": a["details"].get("to")}
+               for a in store.audits("shadow_config", start, start + 86400)]
+    return {"by_model": by_model, "config_changes": changes, "mixed_models": len(by_model) > 1,
+            "evaluation_note": "가상 체결 모델별로 따로 평가한다. NEXT_QUOTE와 STRESS 결과를 합쳐 성과로 보지 않는다."}
 
 
 def report_text(rep: dict) -> str:
@@ -432,4 +473,20 @@ def report_text(rep: dict) -> str:
             f"{rep['ticks']['expected']} (최대 간격 {rep['ticks']['max_gap_sec']}초) · API 오류 {rep['api']['errors']} "
             f"(429 {rep['api']['http_429']}) · 손절 {rep['triggers']} · 주문 {o['total']} (재주문 {o['by_kind']['REPLACE']}, "
             f"체결 {o['filled']}, 미체결 {o['partial_or_open']}) · 미해결 이벤트 {rep['unresolved_events']} · "
-            f"알림 실패 {rep['alerts']['failed']}" + (f" · {rep['note']}" if rep["note"] else ""))
+            f"알림 실패 {rep['alerts']['failed']}" + _shadow_text(rep.get("shadow"))
+            + (f" · {rep['note']}" if rep["note"] else ""))
+
+
+def _shadow_text(sh) -> str:
+    if not sh:
+        return ""
+    cur = sh.get("current") or {}
+    parts = [f" · 모델 {cur.get('fill_model')} (SHADOW 재주문 {'켜짐' if cur.get('shadow_replace_enabled') else '꺼짐'})"]
+    for model, m in sh.get("by_model", {}).items():
+        parts.append(f" · [{model}] 주문 {m['orders']} 재주문 {m['by_kind']['REPLACE']} 체결 {m['filled']} "
+                     f"취소 {m['cancelled']}")
+    if sh.get("config_changes"):
+        parts.append(f" · 설정 변경 {len(sh['config_changes'])}회")
+    if sh.get("mixed_models"):
+        parts.append(" · 모델 혼재: 모델별로 따로 평가")
+    return "".join(parts)

@@ -323,3 +323,138 @@ def test_api_report_holdings_and_health_contract_view(client):
     hs = client.get("/api/auto-stop/health").json()
     assert hs["shadow_fill_model"] == "NEXT_QUOTE" and set(hs["missing_live_contracts"]) == set(LIVE_REQUIRED)
     assert hs["live_qty_cap"] == 1
+
+
+# ── SHADOW 전용 재주문 스위치 ──────────────────────────────────
+SHADOW_ENV = {"KIWOOM_WEB_ENABLED": "true", "AUTO_STOP_US_MODE": "SHADOW"}
+
+
+def _stress_harness(tmp_path, monkeypatch, **over):
+    holder = {}
+    over = {"shadow_fill_model": "STRESS", **over}
+    h = Harness(tmp_path, monkeypatch, env=SHADOW_ENV, mode="SHADOW",
+                factory=lambda mode: ShadowBroker(holder["r"], h.st.shadow_fill_model, h.clock), **over)
+    holder["r"] = h.broker = NoOrderReader(h.clock)
+    return h
+
+
+def _run_stress(h, pid):
+    trigger(h)
+    h.clock.advance(61); h.tick()                 # 절반 가상 체결
+    h.clock.advance(250); h.tick()                # 300초 경과 → 가상 취소 판단
+    h.clock.advance(100); h.tick()                # 취소 지연 90초 경과
+    h.clock.advance(60); h.tick()
+
+
+def test_shadow_replace_on_live_replace_off(tmp_path, monkeypatch):
+    h = _stress_harness(tmp_path, monkeypatch, replace_enabled=False, shadow_replace_enabled=True)
+    pid = h.add(mode="SHADOW")
+    _run_stress(h, pid)
+    kinds = [o["kind"] for o in h.orders()]
+    assert kinds == ["ORIGINAL", "REPLACE"] and h.pos(pid)["state"] == "SOLD"
+    assert all(o["order_number"].startswith("V") for o in h.orders())
+    # 같은 조합에서 LIVE 는 자동 취소하지 않는다
+    (tmp_path / "live").mkdir()
+    live = Harness(tmp_path / "live", monkeypatch, replace_enabled=False, shadow_replace_enabled=True)
+    live.add()
+    trigger(live)
+    live.clock.advance(400)
+    live.tick(2)
+    assert len(live.broker.sells) == 1 and live.broker.cancels == []
+
+
+def test_shadow_replace_off_live_replace_on(tmp_path, monkeypatch):
+    h = _stress_harness(tmp_path, monkeypatch, replace_enabled=True, shadow_replace_enabled=False)
+    pid = h.add(mode="SHADOW")
+    _run_stress(h, pid)
+    orders = h.orders()
+    assert len(orders) == 1 and orders[0]["state"] == "PARTIAL_FILLED" and orders[0]["cancel_sent_at"] is None
+    assert h.pos(pid)["state"] == "EXITING"
+    # 같은 조합에서 LIVE 는 자동 취소·재주문한다
+    (tmp_path / "live").mkdir()
+    live = Harness(tmp_path / "live", monkeypatch, replace_enabled=True, shadow_replace_enabled=False)
+    live.add()
+    trigger(live)
+    live.clock.advance(400)
+    live.tick()
+    assert len(live.broker.cancels) == 1
+
+
+@pytest.mark.parametrize("live_flag", ["true", "false"])
+@pytest.mark.parametrize("shadow_flag", ["true", "false"])
+@pytest.mark.parametrize("model", ["IMMEDIATE", "NEXT_QUOTE", "STRESS"])
+def test_shadow_never_creates_or_calls_real_order_client(tmp_path, monkeypatch, live_flag, shadow_flag, model):
+    """실거래 스위치가 모두 켜져 있어도 SHADOW 는 주문 객체를 만들지 않고 실주문·실취소를 호출하지 않는다."""
+    from trading import kiwoom_orders
+    from trading.auto_stop import runner
+
+    def forbidden(*a, **k):
+        raise AssertionError("SHADOW 에서 실주문 클라이언트 호출")
+    monkeypatch.setattr(kiwoom_orders.KiwoomOrderClient, "__init__", forbidden)
+    monkeypatch.setattr(kiwoom_orders.KiwoomOrderClient, "sell_us_limit", forbidden)
+    monkeypatch.setattr(kiwoom_orders.KiwoomOrderClient, "cancel_us_order", forbidden)
+    env = {**SHADOW_ENV, "KIWOOM_TRADING_ENABLED": "true", "ACCOUNT1_ORDER_ENABLED": "true",
+           "AUTO_STOP_US_REPLACE_ENABLED": live_flag, "AUTO_STOP_US_SHADOW_REPLACE_ENABLED": shadow_flag,
+           "AUTO_STOP_US_SHADOW_FILL_MODEL": model}
+    requested = []
+    holder = {}
+
+    def fake_reader(*, allow_orders=False):
+        requested.append(allow_orders)
+        return holder["r"]
+    monkeypatch.setattr(runner, "live_reader", fake_reader)
+    h = Harness(tmp_path, monkeypatch, env=env, mode="SHADOW", shadow_fill_model=model,
+                replace_enabled=live_flag == "true", shadow_replace_enabled=shadow_flag == "true",
+                factory=runner.broker_factory)
+    holder["r"] = h.broker = NoOrderReader(h.clock)
+    monkeypatch.setattr(runner, "ShadowBroker", lambda reader, m: ShadowBroker(reader, m, h.clock))
+    pid = h.add(mode="SHADOW")
+    _run_stress(h, pid)
+    assert requested and not any(requested)                # SHADOW 는 allow_orders=False 로만 만든다
+    assert h.orders() and all(o["mode"] == "SHADOW" and o["order_number"].startswith("V") for o in h.orders())
+    assert h.store.orders(mode="LIVE") == []
+
+
+def test_shadow_orders_keep_creation_model_and_report_separates_models(tmp_path, monkeypatch):
+    h = _stress_harness(tmp_path, monkeypatch, shadow_fill_model="NEXT_QUOTE")
+    h.broker.holding["U"] = {"qty": 10, "sellable": 10, "avg_cost": Decimal("60")}
+    t = h.add(mode="SHADOW")
+    trigger(h)                                         # NEXT_QUOTE 주문 (같은 시세로는 체결하지 않음)
+    h.set(shadow_fill_model="STRESS")
+    h.engine = h.new_engine("w1")
+    h.clock.advance(61); h.tick()
+    first = h.orders()[0]
+    assert first["state"] == "FILLED" and first["filled_qty"] == 10   # STRESS 절반 체결이 아니라 NEXT_QUOTE 로 판정
+    u = h.add(mode="SHADOW", ticker="U")
+    trigger(h)
+    h.clock.advance(61); h.tick()
+    assert h.store.order(h.orders()[-1]["id"])["state"] == "PARTIAL_FILLED"
+    rep = service.daily_report(h.store, "2026-11-23", "SHADOW", settings=h.st, now=h.clock())
+    sh = rep["shadow"]
+    assert set(sh["by_model"]) == {"NEXT_QUOTE", "STRESS"} and sh["mixed_models"] is True
+    assert sh["by_model"]["NEXT_QUOTE"]["filled"] == 1 and sh["by_model"]["STRESS"]["partial_or_open"] == 1
+    assert [c["to"]["fill_model"] for c in sh["config_changes"]] == ["NEXT_QUOTE", "STRESS"]
+    assert sh["current"] == {"fill_model": "STRESS", "shadow_replace_enabled": True}
+    text = service.report_text(rep)
+    assert "[NEXT_QUOTE]" in text and "[STRESS]" in text and "모델 혼재" in text
+    assert any(k.startswith("shadow_config:") for k in h.alert_keys())
+    assert h.pos(t)["state"] == "SOLD" and h.pos(u)["state"] == "EXITING"
+
+
+def test_stress_events_never_move_to_live(tmp_path, monkeypatch):
+    h = _stress_harness(tmp_path, monkeypatch, shadow_replace_enabled=True)
+    h.broker.holding["U"] = {"qty": 10, "sellable": 10, "avg_cost": Decimal("60")}
+    busy = h.add(mode="SHADOW")
+    trigger(h)                                         # STRESS 이벤트 진행 중
+    idle = h.add(mode="SHADOW", ticker="U")
+    for k, v in {"KIWOOM_TRADING_ENABLED": "true", "ACCOUNT1_ORDER_ENABLED": "true",
+                 "AUTO_STOP_US_MODE": "LIVE"}.items():
+        monkeypatch.setenv(k, v)
+    h.set(mode="LIVE")
+    with pytest.raises(service.Refused, match="진행 중"):
+        service.promote(h.store, h.broker, busy, confirmation_ticker="T", now=h.clock(), settings=h.st)
+    h.broker.price = Decimal("50.00")
+    live = service.promote(h.store, h.broker, idle, confirmation_ticker="U", now=h.clock(), settings=h.st)
+    assert live["mode"] == "LIVE" and h.store.orders(mode="LIVE") == []
+    assert not [e for e in h.store.events() if e["position_id"] == live["id"]]
+    assert h.store.events(mode="LIVE") == []
