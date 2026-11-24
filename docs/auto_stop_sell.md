@@ -328,6 +328,18 @@ SHADOW는 LIVE와 같은 상태 머신을 쓰고 브로커만 `ShadowBroker`로 
   - `needs_review > 0`
 - 장 시작 "감시 시작" 알림이 오지 않으면 감시가 멈춘 신호다.
 
+권장 구성 (push 방식, API 키를 외부 서비스에 주지 않음):
+
+1. Healthchecks.io 같은 push 모니터에 체크를 만든다 (주기 1분, 유예 5분). ping URL은 비밀값으로 다룬다.
+2. VM crontab에 1분마다 로컬 health를 확인하고 정상일 때만 ping하는 줄을 넣는다. `SITES_API_KEY`와 ping URL은 권한 600 파일(예: `~/.config/mystockapp/heartbeat.env`)에서 읽는다.
+
+   ```cron
+   * * * * * . $HOME/.config/mystockapp/heartbeat.env && curl -fsS -m 10 -H "Authorization: Bearer $SITES_API_KEY" http://127.0.0.1:8000/api/auto-stop/health | jq -e '(.market_open | not) or (.heartbeat_age_sec != null and .heartbeat_age_sec < 120 and .unknown_orders == 0 and .needs_review == 0)' >/dev/null && curl -fsS -m 10 "$HC_PING_URL" >/dev/null
+   ```
+
+   - 앱이 죽었거나, 장중 heartbeat가 120초를 넘었거나, UNKNOWN·확인 필요가 생기면 ping이 끊겨 모니터가 경보를 보낸다.
+   - 장외에는 앱이 살아 있기만 하면 ping한다.
+
 ## 미검증 API 계약과 검증 절차
 
 | 항목 | 상태 | 현재 처리 | 검증 |
@@ -356,6 +368,18 @@ SHADOW는 LIVE와 같은 상태 머신을 쓰고 브로커만 `ShadowBroker`로 
 3. `python -m scripts.auto_stop_readonly_probe orders --date <과거 수동 주문이 있던 YYYYMMDD>`
    - 체결·부분체결·취소 주문 각각에서 `ord_qty`/`cntr_qty`/`ord_remnq`/`cncl_qty`/`ord_stat_nm`과 정규화 결과가 앱 주문내역과 같으면 `UST21150_STATUS`. 가격 후보 필드는 기록만 한다.
 4. 결과를 이 문서에 날짜와 함께 기록하고 env에 이름을 추가한 뒤 재시작한다.
+
+#### 조회 전용 확인 기록
+
+계좌번호·토큰·원 응답 전문은 적지 않는다. 필드명, 값의 일치 여부, 확인 시각만 기록한다. "판정"이 `확인`인 계약만 `AUTO_STOP_US_VERIFIED_CONTRACTS`에 넣는다.
+
+| 계약 | 확인일(ET) | 근거 (필드·비교 대상) | 판정 |
+|---|---|---|---|
+| `USA20101_QUOTE_TIME` | | `dt`/`bid_tm` 갱신 간격, 최대 age, `cur_prc` vs 앱 | 미확인 |
+| `USA20101_BID` | | 앱 매수1호가와 같은 필드명 | 미확인 |
+| `UST21070_SELLABLE` | | 행 수, `sell_alowq` vs 앱 매도가능수량 | 미확인 |
+| `UST21150_STATUS` | | 체결/부분/취소 주문별 수량·상태명 vs 앱 | 미확인 |
+| 체결 평균가 필드 | | 가격 후보 필드명과 앱 체결가 일치 여부 (계약 이름 없음, 매핑은 별도 승인) | 미확인 |
 
 ### 1주 실매도 검증 절차 (별도 사용자 승인 후, 사용자가 직접 수행)
 
