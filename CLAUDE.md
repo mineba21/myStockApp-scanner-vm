@@ -11,6 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 스캐너 로직: `docs/step1_review_checklist.md`, `docs/step2_review_checklist.md`. 섹터 표시는 `docs/sector_trends.md`(표시 전용, Gate 2·매매 판정에 섞지 않음).
 - 스캐너 조회 MCP: `docs/scanner_read_mcp.md`. 계좌 현황 MCP: `docs/portfolio_read_mcp.md` — 스캐너·사이트·주문 자격 증명과 분리된 조회 범위를 유지한다.
 - 스캐너 후보 매수(account1 미국, account4 국내): `docs/scanner_buy_orders.md`. 시장별 전송 스위치를 유지한다.
+- account1 미국 S01 자동 손절: `docs/auto_stop_sell.md`. AGENTS.md의 제한적 예외(취소 확정 후 잔여 재주문)는 이 기능에만 적용한다. 기본 `AUTO_STOP_US_MODE=OFF`, `AUTO_STOP_US_REPLACE_ENABLED=false`.
 - 모의투자 준비: `docs/kiwoom_step1_research.md`.
 - 테스트를 위해 실주문이나 운영 DB를 쓰지 않는다. 배포 성공과 실제 주문 기능 완성을 구분해 보고하고, 미검증 체결·현금을 성공으로 간주하지 않는다.
 

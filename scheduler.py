@@ -80,8 +80,33 @@ def start_scheduler():
         max_instances=1,
         misfire_grace_time=3600,
     )
+    _add_auto_stop_job(_sched)
     _sched.start()
     logger.info("스케줄러 시작")
+
+
+AUTO_STOP_JOB_ID = "auto_stop_us_tick"
+
+
+def _run_auto_stop():
+    from trading.auto_stop.runner import auto_stop_us_tick
+    auto_stop_us_tick()
+
+
+def _add_auto_stop_job(scheduler) -> None:
+    """account1 미국 S01 자동 손절 tick. OFF여도 등록한다 (기존 주문 대조·종료 판정용, 신규 주문 없음)."""
+    from apscheduler.triggers.interval import IntervalTrigger
+    from trading.auto_stop.settings import Settings
+    scheduler.add_job(
+        _run_auto_stop,
+        IntervalTrigger(seconds=Settings.from_env().tick_sec, timezone=NEW_YORK),
+        id=AUTO_STOP_JOB_ID,
+        name="미국 자동 손절 감시 (account1 S01)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=20,
+    )
 
 
 def stop_scheduler():
@@ -95,7 +120,7 @@ def get_next_run_times() -> list:
         return []
     result = []
     jobs = sorted(
-        (job for job in _sched.get_jobs() if job.next_run_time),
+        (job for job in _sched.get_jobs() if job.next_run_time and job.id != AUTO_STOP_JOB_ID),
         key=lambda job: job.next_run_time,
     )
     for job in jobs:

@@ -45,6 +45,8 @@ _FORCED = {
     "TELEGRAM_CHAT_ID":        "",
     "KIWOOM_TRADING_ENABLED":  "false",
     "KIWOOM_WEB_ENABLED":      "false",
+    "AUTO_STOP_US_MODE":       "OFF",
+    "AUTO_STOP_US_REPLACE_ENABLED": "false",
     "ALLOCATION_JOURNAL_PATH": os.path.join(_TMPDIR, "allocation.sqlite"),
     "ALLOCATION_LIQUIDATION_SCOPE": "",
     # 홈 디렉터리의 실제 캐시/자격증명 파일을 건드리지 않도록.

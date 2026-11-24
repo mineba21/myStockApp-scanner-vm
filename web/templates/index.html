@@ -777,6 +777,163 @@
      탭 3: 보유 주식
 ═════════════════════════════════════════════════════════ -->
 <div x-show="activeTab==='holdings'" x-cloak>
+  <section class="card p-4 mb-4" x-data="autoStopPanel()" x-init="load()" data-testid="auto-stop-panel">
+    <h2 class="font-bold">미국 자동 손절 (S01) · account1</h2>
+    <p class="text-sm text-slate-600 mt-2">등록한 보유종목이 등록 시 고정한 Scanner 손절가 이하로 내려가면 현재가 −0.5% 지정가로 자동 매도합니다. 이 화면은 주문을 보내지 않습니다(전송은 서버 감시 작업만). 일시중지·긴급 중지는 이미 접수된 주문을 취소하지 않으니 필요하면 키움 앱에서 취소하세요.</p>
+    <div class="flex flex-wrap gap-2 mt-2">
+      <button class="btn btn-ghost" @click="load()" :disabled="busy">상태 새로고침</button>
+      <button class="btn btn-ghost" @click="loadReport()" :disabled="busy || !health?.journal">오늘 운영 보고</button>
+    </div>
+    <p class="text-sm mt-2" role="status" data-testid="auto-stop-message" x-text="message"></p>
+
+    <template x-if="health">
+      <div class="text-sm mt-2 space-y-1" data-testid="auto-stop-health">
+        <div x-show="health.kill_switch" class="p-2 rounded bg-red-100 text-red-800 font-semibold" data-testid="kill-banner">
+          전체 긴급 중지 중 — 신규 매도·자동 취소·재주문 없음 (사유: <span x-text="health.kill_switch?.reason"></span>, <span x-text="fmt(health.kill_switch?.at)"></span>)
+        </div>
+        <div>운영 모드: <strong data-testid="auto-stop-mode" x-text="health.mode"></strong>
+          <span x-show="health.mode === 'SHADOW'"> · 가상 체결 모델 <span x-text="health.shadow_fill_model"></span> (실제 체결률 아님)</span>
+          · 자동 재주문 <span x-text="health.replace_enabled ? '켜짐' : '꺼짐'"></span></div>
+        <div x-show="health.mode === 'LIVE' && health.live_order_block_reason" class="text-red-700">LIVE 전송 차단: <span x-text="health.live_order_block_reason"></span></div>
+        <div x-show="(health.missing_live_contracts || []).length" class="text-amber-700">LIVE 전 미검증 계약: <span x-text="(health.missing_live_contracts || []).join(', ')"></span>
+          <span x-show="health.live_qty_cap === 1"> · 1주 실매도 검증 전 LIVE는 1주 한정</span></div>
+        <template x-if="health.journal">
+          <div class="space-y-1">
+            <div>정규장 <span x-text="health.market_open ? '열림' : '닫힘'"></span>
+              · 감시 heartbeat <span data-testid="heartbeat" :class="staleHeartbeat() ? 'text-red-700 font-semibold' : ''" x-text="age(health.heartbeat_age_sec)"></span>
+              · 마지막 정상 tick <span x-text="fmt(health.last_tick_ok_at)"></span>
+              · 마지막 정상 시세 <span data-testid="last-quote-ok" x-text="fmt(health.last_quote_ok_at)"></span></div>
+            <div>연속 오류 <span :class="health.consecutive_errors ? 'text-red-700' : ''" x-text="health.consecutive_errors"></span>
+              · 미확정 주문 <strong x-text="health.unresolved_orders"></strong>
+              · UNKNOWN <strong :class="health.unknown_orders ? 'text-red-700' : ''" x-text="health.unknown_orders"></strong>
+              · 확인 필요 <strong :class="health.needs_review ? 'text-red-700' : ''" x-text="health.needs_review"></strong></div>
+            <div x-show="health.last_api_error" class="text-amber-700" data-testid="last-api-error">최근 API 오류: <span x-text="health.last_api_error?.where"></span> (<span x-text="health.last_api_error?.type"></span>, <span x-text="fmt(health.last_api_error?.at)"></span>)</div>
+            <div x-show="health.last_quote_issue" class="text-amber-700">최근 시세 경고: <span x-text="health.last_quote_issue?.ticker"></span> — <span x-text="health.last_quote_issue?.reason"></span></div>
+          </div>
+        </template>
+        <p x-show="!health.journal" class="text-amber-700">주문 저널(SCANNER_ORDER_JOURNAL_PATH)이 설정되지 않아 자동 손절을 쓸 수 없습니다.</p>
+      </div>
+    </template>
+
+    <template x-if="health && health.journal">
+      <div class="mt-3 p-2 border rounded" data-testid="kill-switch">
+        <div class="font-semibold">전체 긴급 중지 (서버 재시작 없이 즉시 · 재시작 후에도 유지)</div>
+        <div class="flex flex-wrap gap-2 items-end mt-1">
+          <label class="text-xs" x-show="!health.kill_switch">사유<input class="input" x-model="kill.reason" data-testid="kill-reason"></label>
+          <label class="text-xs">확인 문구 (<span x-text="health.kill_switch ? 'RESUME' : 'STOP'"></span>)<input class="input" x-model="kill.confirmation" data-testid="kill-confirm"></label>
+          <button class="btn" :class="health.kill_switch ? '' : 'bg-red-600'" data-testid="kill-submit" :disabled="busy"
+            @click="run('/kill-switch', {enabled: !health.kill_switch, confirmation: kill.confirmation, reason: kill.reason}, health.kill_switch ? '긴급 중지를 해제했습니다.' : '전체 긴급 중지를 설정했습니다.').then(() => { kill.confirmation=''; })"
+            x-text="health.kill_switch ? '긴급 중지 해제' : '전체 긴급 중지'"></button>
+        </div>
+      </div>
+    </template>
+
+    <template x-if="health && health.journal && health.mode !== 'OFF'">
+      <div class="mt-3 p-2 border rounded" data-testid="register">
+        <div class="font-semibold">자동 손절 등록 (<span x-text="health.mode"></span>)</div>
+        <div class="flex flex-wrap gap-2 items-end mt-1">
+          <button class="btn btn-ghost" @click="loadHoldings()" :disabled="busy" data-testid="load-holdings">account1 미국 보유종목 불러오기</button>
+          <label class="text-xs">보유종목
+            <select class="input" x-model="form.holding_id" @change="pickHolding()" data-testid="holding-select">
+              <option value="">선택</option>
+              <template x-for="h in holdings" :key="h.holding_id"><option :value="h.holding_id" x-text="h.ticker + ' · ' + h.qty + '주 (매도가능 ' + h.sellable + ')'"></option></template>
+            </select></label>
+          <label class="text-xs">Scanner 신호
+            <select class="input" x-model="form.scan_result_id" data-testid="signal-select">
+              <option value="">선택</option>
+              <template x-for="sg in signals" :key="sg.id"><option :value="String(sg.id)" x-text="'#' + sg.id + ' ' + sg.signal_type + ' ' + sg.signal_date + ' · 손절가 ' + sg.stop_loss"></option></template>
+            </select></label>
+        </div>
+        <template x-if="selectedSignal()">
+          <div class="text-sm mt-2" data-testid="register-preview">등록 손절가 <strong x-text="Number(selectedSignal().stop_loss).toFixed(2)"></strong>
+            · 신호 <span x-text="selectedSignal().signal_type + ' ' + selectedSignal().signal_date"></span>
+            · 스캔가 <span x-text="selectedSignal().price"></span>
+            <span x-show="signalAgeDays() > 30" class="text-amber-700"> · <span x-text="signalAgeDays()"></span>일 지난 신호 — 확인 체크 필요</span></div>
+        </template>
+        <form class="flex flex-wrap gap-2 items-end mt-2" @submit.prevent="register()">
+          <label class="text-xs">관리 수량<input class="input w-24" type="number" min="1" x-model="form.managed_qty" required data-testid="qty"></label>
+          <label class="text-xs">확인 티커 재입력<input class="input w-24" x-model="form.confirmation_ticker" required data-testid="confirm-ticker"></label>
+          <label class="text-xs"><input type="checkbox" x-model="form.acknowledge_stale"> 오래된 신호 확인</label>
+          <button class="btn" :disabled="busy || !form.holding_id || !form.scan_result_id" data-testid="register-submit">자동 손절 등록</button>
+        </form>
+      </div>
+    </template>
+
+    <div class="overflow-x-auto" x-show="positions.length">
+      <table class="w-full my-2 text-sm" data-testid="positions"><thead><tr><th>종목</th><th>모드</th><th>상태</th><th>손절가</th><th>관리 잔여/최초</th><th>최근 시세 · 감시 시각</th><th>진행 주문</th><th></th></tr></thead>
+        <tbody><template x-for="p in positions" :key="p.id"><tr class="align-top" :data-testid="'pos-' + p.ticker + '-' + p.mode">
+          <td x-text="p.ticker"></td><td x-text="p.mode"></td>
+          <td><span class="px-2 py-0.5 rounded text-xs" :class="badge(p.state)" x-text="p.state"></span>
+            <span x-show="p.auto_paused" class="text-xs text-amber-700"> 일시중지</span>
+            <div class="text-xs text-red-700" x-text="p.review_reason || ''"></div></td>
+          <td x-text="p.stop_price"></td>
+          <td x-text="p.remaining_managed_qty + ' / ' + p.initial_managed_qty"></td>
+          <td><span x-text="p.last_quote_price || '-'"></span><div class="text-xs text-slate-500" x-text="fmt(p.last_price_check_at)"></div></td>
+          <td class="text-xs"><template x-for="o in liveOrders(p)" :key="o.id"><div>
+            <span x-text="o.kind"></span> <strong x-text="o.state"></strong> <span x-text="o.filled_qty + '/' + o.requested_qty + '주 @ ' + o.limit_price"></span>
+            <span class="text-slate-500" x-text="o.sent_at ? '(' + Math.round((Date.now()/1000 - o.sent_at)/60) + '분)' : ''"></span></div></template>
+            <span x-show="!liveOrders(p).length">-</span></td>
+          <td class="space-x-1 whitespace-nowrap">
+            <template x-if="['ACTIVE','EXITING','NEEDS_REVIEW'].includes(p.state)"><span>
+              <button class="btn btn-ghost" x-show="!p.auto_paused" @click="run('/positions/'+p.id+'/pause', {}, p.ticker + ' 일시중지')" :disabled="busy" :data-testid="'pause-' + p.ticker">일시중지</button>
+              <button class="btn btn-ghost" x-show="p.auto_paused" @click="run('/positions/'+p.id+'/resume', {}, p.ticker + ' 재개')" :disabled="busy">재개</button>
+              <button class="btn btn-ghost" @click="run('/positions/'+p.id+'/disable', {}, p.ticker + ' 해제')" :disabled="busy">해제</button>
+              <button class="btn btn-ghost" x-show="p.mode === 'SHADOW' && p.state === 'ACTIVE'" @click="promote = {id: p.id, p: p, ticker: ''}" :data-testid="'promote-' + p.ticker">LIVE 전환…</button>
+            </span></template>
+            <template x-for="o in unknownOrders(p)" :key="o.id"><div class="text-xs mt-1 text-red-700" data-testid="unknown-order">
+              주문 #<span x-text="o.id"></span> <strong x-text="o.state"></strong>: 키움 주문내역 주문번호로 증거 대조
+              <input class="input w-24" placeholder="주문번호" x-model="resolveForm[o.id]">
+              <button class="btn btn-ghost" @click="run('/orders/'+o.id+'/resolve', {order_number: resolveForm[o.id] || '', confirmation_ticker: p.ticker}, '증권사 주문내역으로 확인했습니다. 확인 필요 상태로 남습니다.')" :disabled="busy">대조</button>
+            </div></template>
+          </td>
+        </tr></template></tbody>
+      </table>
+    </div>
+
+    <template x-if="promote">
+      <div class="mt-3 p-3 border-2 border-red-300 rounded bg-red-50 text-sm" data-testid="promote-confirm">
+        <div class="font-semibold">LIVE 전환 확인 — <span x-text="promote.p.ticker"></span></div>
+        <ul class="list-disc ml-5 mt-1">
+          <li>관리 수량 <strong x-text="promote.p.initial_managed_qty"></strong>주 · 손절가 <strong x-text="promote.p.stop_price"></strong></li>
+          <li>새 LIVE 포지션을 만들며 SHADOW 주문·체결 기록은 복사하지 않습니다. 서버가 실제 보유수량·최신 시세를 다시 검증합니다.</li>
+          <li>이미 손절가 이하이면 자동 매도하지 않고 '확인 필요'로 등록됩니다.</li>
+          <li x-show="health.mode !== 'LIVE'" class="text-red-700">현재 운영 모드가 LIVE가 아니어서 서버가 거부합니다.</li>
+          <li x-show="health.live_order_block_reason" class="text-red-700">LIVE 차단: <span x-text="health.live_order_block_reason"></span></li>
+        </ul>
+        <div class="flex gap-2 items-end mt-2">
+          <label class="text-xs">티커 재입력<input class="input w-24" x-model="promote.ticker" data-testid="promote-ticker"></label>
+          <button class="btn bg-red-600" :disabled="busy" data-testid="promote-submit" @click="run('/positions/'+promote.id+'/promote', {confirmation_ticker: promote.ticker}, 'LIVE로 전환했습니다.').then(ok => { if (ok) promote = null; })">LIVE 전환 실행</button>
+          <button class="btn btn-ghost" @click="promote = null">취소</button>
+        </div>
+      </div>
+    </template>
+
+    <template x-if="report">
+      <div class="mt-3 p-2 border rounded text-sm" data-testid="report">
+        <div class="font-semibold">운영 보고 <span x-text="report.day + ' ' + report.mode"></span></div>
+        <template x-if="!report.trading_day"><p>휴장일입니다.</p></template>
+        <template x-if="report.trading_day"><div class="space-y-1">
+          <div>감시 <span x-text="report.watched_positions"></span>종목 · 정상 감시 <strong x-text="report.watch.ok + '/' + report.watch.expected"></strong> (누락 <span x-text="report.watch.missed"></span>)
+            · tick <span x-text="report.ticks.actual + '/' + report.ticks.expected"></span> (최대 간격 <span x-text="report.ticks.max_gap_sec ?? '-'"></span>초)</div>
+          <div>API 오류 <span x-text="report.api.errors"></span> · HTTP 429 <span x-text="report.api.http_429"></span> · 손절 <span x-text="report.triggers"></span>
+            · 주문 <span x-text="report.orders.total"></span> (재주문 <span x-text="report.orders.by_kind.REPLACE"></span>, 체결 <span x-text="report.orders.filled"></span>, 미체결 <span x-text="report.orders.partial_or_open"></span>)
+            · 미해결 이벤트 <span x-text="report.unresolved_events"></span> · 알림 성공/실패 <span x-text="report.alerts.sent + '/' + report.alerts.failed"></span>
+            · heartbeat <span x-text="report.heartbeat.ok ? '정상' : '이상'"></span></div>
+          <template x-for="w in report.watch.positions" :key="w.id"><div class="text-xs">
+            <span x-text="w.ticker"></span>: 정상 <span x-text="w.ok_checks + '/' + w.expected_checks"></span>, 실패 <span x-text="w.quote_fail"></span>, 무효 <span x-text="w.quote_invalid"></span>, 최대 시세 지연 <span x-text="w.max_quote_age_sec ?? '-'"></span>초, 마지막 정상 <span x-text="fmt(w.last_check_at)"></span></div></template>
+          <template x-for="f in report.fills_vs_stop" :key="f.order_id"><div class="text-xs"><span x-text="f.ticker"></span> 가상 체결 <span x-text="f.filled_qty"></span>주 @ <span x-text="f.fill_price"></span> (손절가 대비 <span x-text="f.vs_stop_pct"></span>%)</div></template>
+          <p class="text-xs text-amber-700" x-text="report.note"></p>
+        </div></template>
+      </div>
+    </template>
+
+    <template x-if="health && (health.recent_alerts || []).length">
+      <details class="mt-2 text-xs"><summary>최근 알림</summary>
+        <template x-for="a in health.recent_alerts" :key="a.id"><div><span x-text="a.severity"></span> · <span x-text="a.state"></span> · <span x-text="a.text"></span></div></template>
+      </details>
+    </template>
+  </section>
+
   <section class="card p-4 mb-4" x-data="allocationRebalancePanel()">
     <h2 class="font-bold">ETF 자산배분 · account2</h2>
     <p class="text-sm text-slate-600 mt-2">월별 목표 비중과 현재 보유수량을 비교해 초과분만 매도하고 부족분만 매수합니다. 목표에서 빠진 종목은 전량 매도합니다. 매도 체결과 유지수량 확인 후 실제 현금으로 부족 수량을 다시 계산합니다.</p>
@@ -3218,6 +3375,85 @@ function app() {
 }
 </script>
 <script>
+function autoStopPanel() {
+  return {
+    busy:false, message:'', health:null, positions:[], holdings:[], signals:[], report:null, promote:null,
+    kill:{reason:'', confirmation:''},
+    form:{holding_id:'', scan_result_id:'', managed_qty:'', confirmation_ticker:'', acknowledge_stale:false},
+    resolveForm:{},
+    async request(path, body) {
+      const response = await fetch('/api/auto-stop' + path,
+        body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const d = Array.isArray(data.detail) ? data.detail.map(x => x.msg).join(', ') : data.detail;
+        throw new Error(d || ('요청을 처리하지 못했습니다 (HTTP ' + response.status + ')'));
+      }
+      return data;
+    },
+    async load() {
+      try {
+        this.health = await this.request('/health');
+        if (this.health.journal) this.positions = (await this.request('/positions')).positions;
+      } catch (e) { this.message = e.message; }
+    },
+    async run(path, body, ok) {
+      this.busy = true; this.message = '';
+      try { await this.request(path, body); this.message = ok; await this.load(); return true; }
+      catch (e) { this.message = e.message; return false; }
+      finally { this.busy = false; }
+    },
+    async loadHoldings() {
+      this.busy = true;
+      try { this.holdings = await this.request('/holdings'); if (!this.holdings.length) this.message = 'account1 미국 보유종목이 없습니다.'; }
+      catch (e) { this.message = e.message; }
+      finally { this.busy = false; }
+    },
+    async pickHolding() {
+      const h = this.holdings.find(x => x.holding_id === this.form.holding_id);
+      this.signals = []; this.form.scan_result_id = '';
+      if (!h) return;
+      this.form.managed_qty = h.qty;
+      try {
+        this.signals = await this.request('/signals?ticker=' + encodeURIComponent(h.ticker));
+        if (this.signals.length) this.form.scan_result_id = String(this.signals[0].id);
+        else this.message = h.ticker + ': Strict 통과·손절가가 있는 미국 스캔 신호가 없습니다.';
+      } catch (e) { this.message = e.message; }
+    },
+    selectedSignal() { return this.signals.find(s => String(s.id) === String(this.form.scan_result_id)); },
+    signalAgeDays() {
+      const s = this.selectedSignal();
+      return s && s.signal_date ? Math.floor((Date.now() - Date.parse(s.signal_date + 'T00:00:00Z')) / 86400000) : 0;
+    },
+    register() {
+      return this.run('/positions', {
+        holding_id: this.form.holding_id, scan_result_id: Number(this.form.scan_result_id),
+        managed_qty: Number(this.form.managed_qty), mode: this.health.mode,
+        confirmation_ticker: this.form.confirmation_ticker, acknowledge_stale: this.form.acknowledge_stale,
+      }, '자동 손절을 등록했습니다.');
+    },
+    async loadReport() {
+      this.busy = true;
+      try { this.report = await this.request('/report'); } catch (e) { this.message = e.message; }
+      finally { this.busy = false; }
+    },
+    liveOrders(p) { return (p.orders || []).filter(o => !['FILLED','CANCELLED','REJECTED','NOT_SENT'].includes(o.state)); },
+    unknownOrders(p) { return (p.orders || []).filter(o => o.state === 'UNKNOWN' || o.state === 'CANCEL_UNKNOWN'); },
+    staleHeartbeat() { return this.health && this.health.market_open && (this.health.heartbeat_age_sec == null || this.health.heartbeat_age_sec > 120); },
+    badge(state) {
+      return {ACTIVE:'bg-emerald-100 text-emerald-800', EXITING:'bg-amber-100 text-amber-800',
+              NEEDS_REVIEW:'bg-red-100 text-red-800', SOLD:'bg-slate-200 text-slate-700'}[state] || 'bg-slate-100 text-slate-600';
+    },
+    age(sec) { return sec == null ? '기록 없음' : Math.round(sec) + '초 전'; },
+    fmt(ts) {
+      if (!ts) return '기록 없음';
+      const d = new Date(ts * 1000);
+      return d.toLocaleString('ko-KR', {timeZone:'Asia/Seoul', hour12:false}) + ' KST / ' +
+             d.toLocaleTimeString('en-US', {timeZone:'America/New_York', hour12:false}) + ' ET';
+    },
+  };
+}
+
 function allocationRebalancePanel() {
   return {
     busy:false, enabled:false, reason:'주문 상태를 조회하면 실행 가능 여부와 차단 사유를 표시합니다.',

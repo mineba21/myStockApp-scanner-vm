@@ -8,6 +8,7 @@
 - 섹터 표시·최근 추세: `docs/sector_trends.md`를 먼저 읽는다. 표시 전용이며 Gate 2·매매 판정에 섞지 않는다.
 - 스캐너 MCP/조회 연결: `docs/scanner_read_mcp.md`를 먼저 읽는다. 조회키의 계좌·주문 권한을 확대하지 않는다.
 - 스캐너 후보 매수(account1 미국, account4 국내): `docs/scanner_buy_orders.md`를 먼저 읽는다. 미검증 항목과 시장별 전송 스위치를 유지한다.
+- account1 미국 S01 자동 손절: `docs/auto_stop_sell.md`를 먼저 읽는다. 기본 OFF, 자동 취소·재주문 기본 꺼짐을 유지한다.
 - 계좌 현황 MCP: `docs/portfolio_read_mcp.md`를 먼저 읽는다. `portfolio:read`는 스캐너·사이트·주문 자격 증명과 분리한다.
 - ETF는 최신 사용자 결정에 따라 차액 재분배한다. 전량매도 방식으로 되돌리지 않는다.
 - 모의 응답과 격리 테스트를 사용한다. 테스트를 위해 실주문이나 운영 DB를 사용하지 않는다.
@@ -23,6 +24,7 @@
 - 기존 보유의 손절가·현재가가 없어 위험을 계산할 수 없으면 제안 수량을 숨긴다. `live_sizing`은 대상 키움 계좌·시장 기준, 스캔 `suggested_qty`는 활성 수동 보유의 시장 기준이다. 두 기준을 임의로 합치거나 수량 입력 기본값을 바꾸지 않는다. 상세는 `docs/scanner_buy_orders.md`를 따른다.
 - account2 ETF 주문은 `asset_allocation_api`의 영속 재분배 사이클을 사용한다. 제거된 `/api/kiwoom/orders/*`는 404를 유지하며 옛 개별 실행 경로를 복원하지 않는다. 스캐너 주문은 별도 경로다.
 - 영속 주문 저널과 OAuth 상태 DB를 삭제·초기화하거나 과거 사본으로 덮어쓰지 않는다. 접수 불명 주문은 자동 재전송하지 않는다.
+- 제한적 예외 (2026-11-24 사용자 승인): account1 미국주식 S01 자동 손절(`trading/auto_stop/`, `docs/auto_stop_sell.md`)에 한해, 사람 확인 없는 손절 지정가 매도와 미체결 시 **취소 확정 후 잔여 수량 재주문**(세션 3회·이벤트 6회 한도, `AUTO_STOP_US_REPLACE_ENABLED`)을 허용한다. 전송·취소 결과 불명은 자동 재시도하지 않고 증권사 주문내역 증거로만 해제한다. 스캐너 매수, 수동 주문, account2 리밸런싱, account4·국내·다른 계좌에는 적용하지 않는다. 이 승인은 개발 승인이며 LIVE 활성화는 운영자가 SHADOW 검증 후 별도로 결정한다.
 
 ## 검증과 배포
 
