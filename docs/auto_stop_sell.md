@@ -315,6 +315,8 @@ python -m scripts.auto_stop_journal_migrate --backup-dir /var/backups/mystockapp
 
 ## 운영 절차
 
+VM에서 실행하는 단계별 명령과 승인 지점은 `docs/vm_shadow_runbook.md`를 따른다.
+
 1. **OFF 배포**
    - 기본값 그대로 배포한다 (`AUTO_STOP_US_MODE` 미설정 = OFF). 코드 배포만으로는 저널이 바뀌지 않는다: health는 `schema_ready=false`, `migration_required=true`이고 Scanner·계좌 기능은 그대로 동작한다.
    - 앱을 멈추고 저널 Migration을 실행한 뒤 다시 시작한다 (아래 "저널 스키마와 Migration").
