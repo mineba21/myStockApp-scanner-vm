@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exit Strategy Backtest</title>
+<style>
+:root{
+  color-scheme:light;
+  --bg:#f6f6f4; --surface:#fcfcfb; --surface-2:#f0efec; --border:#e2e1dc;
+  --text:#0b0b0b; --text-2:#52514e; --text-3:#7d7c77;
+  --accent:#2a78d6; --gain:#0a7f0a; --gain-bg:#e3f3e3; --loss:#c43333; --loss-bg:#fbe6e6;
+  --warn:#9a6a00; --warn-bg:#fdf1d6; --info-bg:#e6effa;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4; --s6:#008300; --s7:#6250d6; --s8:#e34948;
+  --grid:#e7e6e1; --shadow:0 1px 2px rgba(0,0,0,.05),0 2px 8px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#121211; --surface:#1a1a19; --surface-2:#242422; --border:#33332f;
+    --text:#f0efec; --text-2:#c3c2b7; --text-3:#8f8e86;
+    --accent:#3987e5; --gain:#3fc23f; --gain-bg:#16301a; --loss:#ef7272; --loss-bg:#3a1b1b;
+    --warn:#e6b23a; --warn-bg:#352a10; --info-bg:#172537;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --s6:#0ca30c; --s7:#9085e9; --s8:#e66767;
+    --grid:#2c2c29; --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#121211; --surface:#1a1a19; --surface-2:#242422; --border:#33332f;
+  --text:#f0efec; --text-2:#c3c2b7; --text-3:#8f8e86;
+  --accent:#3987e5; --gain:#3fc23f; --gain-bg:#16301a; --loss:#ef7272; --loss-bg:#3a1b1b;
+  --warn:#e6b23a; --warn-bg:#352a10; --info-bg:#172537;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --s6:#0ca30c; --s7:#9085e9; --s8:#e66767;
+  --grid:#2c2c29; --shadow:none;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+header{background:var(--surface);border-bottom:1px solid var(--border);padding:18px 24px 0}
+h1{font-size:20px;margin:0 0 2px;letter-spacing:-.01em}
+.sub{color:var(--text-2);font-size:13px}
+nav{display:flex;gap:2px;overflow-x:auto;margin-top:14px;scrollbar-width:none}
+nav button{background:none;border:0;border-bottom:2px solid transparent;color:var(--text-2);padding:9px 12px;font:inherit;font-size:13px;cursor:pointer;white-space:nowrap}
+nav button.on{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.filters{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--border);padding:10px 24px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.filters label{font-size:12px;color:var(--text-2);display:flex;gap:6px;align-items:center}
+select,.seg button{font:inherit;font-size:13px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px}
+.seg{display:inline-flex}
+.seg button{border-radius:0;margin-left:-1px;cursor:pointer}
+.seg button:first-child{border-radius:6px 0 0 6px;margin-left:0}
+.seg button:last-child{border-radius:0 6px 6px 0}
+.seg button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+main{padding:20px 24px 60px;max-width:1440px;margin:0 auto}
+section.tab{display:none}
+section.tab.on{display:block}
+h2{font-size:17px;margin:4px 0 12px}
+h3{font-size:14px;margin:0 0 10px;color:var(--text)}
+.grid{display:grid;gap:14px}
+.g4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(420px,1fr))}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
+.kpi .l{font-size:12px;color:var(--text-2)}
+.kpi .v{font-size:24px;font-weight:650;letter-spacing:-.02em;margin-top:2px;font-variant-numeric:tabular-nums}
+.kpi .d{font-size:12px;color:var(--text-3);margin-top:2px}
+.pos{color:var(--gain)} .neg{color:var(--loss)} .mut{color:var(--text-3)}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 7px;border-radius:999px;letter-spacing:.02em;white-space:nowrap}
+.b-rec{background:var(--info-bg);color:var(--accent)}
+.b-snap{background:var(--warn-bg);color:var(--warn)}
+.b-port{background:var(--surface-2);color:var(--text-2)}
+.b-ok{background:var(--gain-bg);color:var(--gain)}
+.b-no{background:var(--loss-bg);color:var(--loss)}
+.b-wait{background:var(--warn-bg);color:var(--warn)}
+.note{font-size:12.5px;color:var(--text-2);background:var(--surface-2);border-radius:8px;padding:10px 12px;margin:10px 0}
+.note b{color:var(--text)}
+.tw{overflow-x:auto;max-width:100%}
+table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
+th,td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap}
+th{position:sticky;top:0;background:var(--surface);color:var(--text-2);font-weight:600;cursor:pointer;user-select:none}
+th:first-child,td:first-child,th.l,td.l{text-align:left}
+th.sorted::after{content:" ▾";color:var(--accent)}
+th.sorted.asc::after{content:" ▴"}
+tr:hover td{background:var(--surface-2)}
+td.hl{font-weight:650}
+.chart{position:relative;width:100%}
+.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.axis text{fill:var(--text-3);font-size:11px}
+.axis line,.axis path{stroke:var(--grid)}
+.tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:50;display:none;max-width:320px}
+.tip .t{font-weight:600;margin-bottom:3px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--text-2);margin:6px 0 4px}
+.legend span{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+.legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+.legend span.off{opacity:.35}
+.hm td{text-align:center;font-weight:600;min-width:56px}
+.list{margin:0;padding-left:18px}
+.list li{margin:3px 0}
+.rule{border-left:3px solid var(--border);padding-left:12px;margin:8px 0}
+.rule.ok{border-color:var(--gain)} .rule.no{border-color:var(--loss)} .rule.wait{border-color:var(--warn)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:12.5px}
+.kv div:nth-child(odd){color:var(--text-2)}
+.case-list button{display:block;width:100%;text-align:left;background:none;border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;color:var(--text);font:inherit;font-size:12.5px;cursor:pointer}
+.case-list button.on{border-color:var(--accent);background:var(--info-bg)}
+.small{font-size:12px;color:var(--text-2)}
+.toggle{margin-left:auto}
+@media (max-width:720px){
+  header,main,.filters{padding-left:16px;padding-right:16px}
+  .g2{grid-template-columns:1fr}
+  .kpi .v{font-size:20px}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Stock Scanner — Exit Strategy Backtest Report</h1>
+  <div class="sub" id="hdr-sub"></div>
+  <nav id="tabs"></nav>
+</header>
+<div class="filters" id="filters">
+  <label>시장 <span class="seg" id="f-market"></span></label>
+  <label>신호 유형 <select id="f-type"><option value="ALL">전체</option><option>BREAKOUT</option><option>RE_BREAKOUT</option><option>REBOUND</option></select></label>
+  <label>기간 <select id="f-period"><option value="full">전체</option><option value="last_1y">최근 1년</option><option value="last_6m">최근 6개월</option><option value="last_3m">최근 3개월</option></select></label>
+  <label>평가 기간 <select id="f-h"><option value="20">20거래일</option><option value="60" selected>60거래일</option><option value="120">120거래일</option></select></label>
+  <label>신호 그룹 <select id="f-group">
+    <option value="B_strict">B. Strict 통과</option><option value="A_all">A. 전체 신호</option>
+    <option value="C_gradeS">C. Grade S</option><option value="C_gradeA">C. Grade A</option><option value="D_gradeB">D. Grade B</option>
+    <option value="E_strong">E. STRONG</option><option value="F_moderate">F. MODERATE</option>
+    <option value="G_warn">G. 경고 있음</option><option value="G_nowarn">G. 경고 없음</option>
+    <option value="SNAP_visible">스냅샷 (MCP 현재 행)</option></select></label>
+  <label>전략 <select id="f-fam"><option value="CORE">핵심 비교군</option><option value="ALL">전체</option>
+    <option>S02</option><option>S03</option><option>S04</option><option>S05</option><option>S06</option><option>S07</option><option>S07T</option><option>S08</option><option>S09</option></select></label>
+  <button class="seg toggle" id="theme" style="padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);cursor:pointer">테마</button>
+</div>
+<main id="main"></main>
+<div class="tip" id="tip"></div>
+<script>
+const D = /*__DATA__*/null;
+const CORE = ["S00","S01","S02_fix7","S03_scap7","S03_atr2cap7","S04B_t1_wall","S04A_t0_w5","S04F_upthrust","S05_ma50x2","S05_stage3","S06_a10_d8","S06_a10_atr3","S07_a10_d6_r50_trail_pct10","S07T_t10_r50_trail_pct10","S08_20d_lt2","S09A","S09B","S09A_OPT","S09B_OPT"];
+const TABS = [["exec","01 Executive Summary"],["audit","02 Data Audit"],["cmp","03 Strategy Comparison"],["early","04 Early Exit"],["profit","05 Profit Protection"],["param","06 Parameter Analysis"],["case","07 Case Study"],["rec","08 Recommendation"]];
+const S = {market:"US", type:"ALL", period:"full", h:60, group:"B_strict", fam:"CORE", tab:"exec", hidden:{}};
+const $ = s=>document.querySelector(s);
+const esc = s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct=(x,d=1,sign=true)=>x==null||isNaN(x)?"–":((sign&&x>0?"+":"")+(x*100).toFixed(d)+"%");
+const num=(x,d=2)=>x==null||isNaN(x)?"–":(+x).toFixed(d);
+const cls=x=>x==null?"":x>0?"pos":x<0?"neg":"";
+const lab=s=>D.labels[s]||s;
+const markets=()=>[...new Set(D.summary.map(r=>r.market))].sort().reverse();
+function sv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
+const SER=()=>[1,2,3,4,5,6,7,8].map(i=>sv("--s"+i));
+
+/* ── tooltip ── */
+const tip=$("#tip");
+function showTip(e,html){tip.innerHTML=html;tip.style.display="block";const w=tip.offsetWidth,h=tip.offsetHeight;let x=e.clientX+14,y=e.clientY+14;if(x+w>innerWidth-8)x=e.clientX-w-14;if(y+h>innerHeight-8)y=e.clientY-h-14;tip.style.left=x+"px";tip.style.top=y+"px"}
+function hideTip(){tip.style.display="none"}
+
+/* ── sortable table ── */
+function table(el, cols, rows, opt={}){
+  let sortK=opt.sort||null, asc=opt.asc||false;
+  function draw(){
+    const rs=[...rows]; if(sortK){const c=cols.find(c=>c.k===sortK);rs.sort((a,b)=>{const va=c.v?c.v(a):a[sortK],vb=c.v?c.v(b):b[sortK];if(va==null)return 1;if(vb==null)return -1;return (va>vb?1:va<vb?-1:0)*(asc?1:-1)})}
+    el.innerHTML=`<div class="tw"><table><thead><tr>${cols.map(c=>`<th data-k="${c.k}" class="${c.l?"l":""} ${sortK===c.k?"sorted"+(asc?" asc":""):""}" title="${esc(c.t||"")}">${esc(c.h)}</th>`).join("")}</tr></thead><tbody>${
+      rs.length?rs.map(r=>`<tr>${cols.map(c=>{const raw=c.v?c.v(r):r[c.k];const txt=c.f?c.f(raw,r):esc(raw??"–");const cc=c.c?c.c(raw,r):"";return `<td class="${c.l?"l":""} ${cc} ${opt.hl&&opt.hl(r)?"hl":""}">${txt}</td>`}).join("")}</tr>`).join(""):`<tr><td colspan="${cols.length}" class="mut l">해당 조건의 데이터 없음</td></tr>`}</tbody></table></div>`;
+    el.querySelectorAll("th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(sortK===k)asc=!asc;else{sortK=k;asc=false}draw()});
+  }
+  draw();
+}
+const P=(k,h,t)=>({k,h,t,f:v=>pct(v),c:v=>cls(v)});
+const PN=(k,h,t)=>({k,h,t,f:v=>pct(v,1,false)});
+const PL=(k,h,t)=>({k,h,t,f:v=>pct(v,1,false),c:v=>v>0?"neg":""});
+const N=(k,h,d=2,t)=>({k,h,t,f:v=>num(v,d)});
+
+/* ── charts ── */
+function lineChart(el, series, opt={}){
+  const W=el.clientWidth||800, H=opt.h||300, m={l:48,r:16,t:10,b:28};
+  const vis=series.filter(s=>!S.hidden[s.name]);
+  const all=vis.flatMap(s=>s.d.map((d,i)=>[new Date(d).getTime(), s.v[i]]));
+  if(!all.length){el.innerHTML='<div class="mut small">데이터 없음</div>';return}
+  const x0=Math.min(...all.map(a=>a[0])),x1=Math.max(...all.map(a=>a[0]));
+  let y0=Math.min(...all.map(a=>a[1])),y1=Math.max(...all.map(a=>a[1]));const pad=(y1-y0)*.06||.05;y0-=pad;y1+=pad;
+  const X=t=>m.l+(t-x0)/(x1-x0||1)*(W-m.l-m.r), Y=v=>m.t+(1-(v-y0)/(y1-y0||1))*(H-m.t-m.b);
+  const ticks=5;let g="";
+  for(let i=0;i<=ticks;i++){const v=y0+(y1-y0)*i/ticks;g+=`<line x1="${m.l}" x2="${W-m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${m.l-6}" y="${Y(v)+4}" text-anchor="end">${opt.fmt?opt.fmt(v):num(v,2)}</text>`}
+  const yrs=[];for(let y=new Date(x0).getFullYear();y<=new Date(x1).getFullYear();y++)yrs.push(y);
+  yrs.forEach(y=>{const t=new Date(y,0,1).getTime();if(t>=x0&&t<=x1)g+=`<text x="${X(t)}" y="${H-8}" text-anchor="middle">${y}</text>`});
+  if(opt.base!=null&&opt.base>=y0&&opt.base<=y1)g+=`<line x1="${m.l}" x2="${W-m.r}" y1="${Y(opt.base)}" y2="${Y(opt.base)}" stroke="var(--text-3)" stroke-dasharray="3 3"/>`;
+  const paths=vis.map(s=>`<path d="${s.d.map((d,i)=>(i?"L":"M")+X(new Date(d).getTime()).toFixed(1)+","+Y(s.v[i]).toFixed(1)).join("")}" fill="none" stroke="${s.color}" stroke-width="${s.w||2}" ${s.dash?'stroke-dasharray="4 3"':""} stroke-linejoin="round"/>`).join("");
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}"><g class="axis">${g}</g>${paths}<line id="xh" y1="${m.t}" y2="${H-m.b}" stroke="var(--text-3)" stroke-width="1" visibility="hidden"/><rect x="${m.l}" y="${m.t}" width="${W-m.l-m.r}" height="${H-m.t-m.b}" fill="transparent"/></svg>`;
+  const svg=el.querySelector("svg"), xh=svg.querySelector("#xh");
+  svg.querySelector("rect").onmousemove=e=>{const r=svg.getBoundingClientRect();const px=(e.clientX-r.left)*W/r.width;const t=x0+(px-m.l)/(W-m.l-m.r)*(x1-x0);
+    xh.setAttribute("x1",px);xh.setAttribute("x2",px);xh.setAttribute("visibility","visible");
+    let date="";const rows=vis.map(s=>{let bi=0,bd=1e18;s.d.forEach((d,i)=>{const dd=Math.abs(new Date(d).getTime()-t);if(dd<bd){bd=dd;bi=i}});date=s.d[bi];return `<div><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${s.color}"></i> ${esc(s.name)}: <b>${opt.fmt?opt.fmt(s.v[bi]):num(s.v[bi],3)}</b></div>`}).join("");
+    showTip(e,`<div class="t">${date}</div>${rows}`)};
+  svg.querySelector("rect").onmouseleave=()=>{xh.setAttribute("visibility","hidden");hideTip()};
+}
+function legend(el, series, redraw){
+  el.innerHTML=series.map(s=>`<span data-n="${esc(s.name)}" class="${S.hidden[s.name]?"off":""}"><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join("");
+  el.querySelectorAll("span").forEach(sp=>sp.onclick=()=>{S.hidden[sp.dataset.n]=!S.hidden[sp.dataset.n];redraw()});
+}
+function barChart(el, items, opt={}){
+  // items: [{label, value, sub}] horizontal bars, diverging at 0
+  if(!items.length){el.innerHTML='<div class="mut small">데이터 없음</div>';return}
+  const W=el.clientWidth||600, rh=opt.rh||22, lw=opt.lw||Math.min(220,W*0.38), H=items.length*rh+24, r=W-12;
+  const vals=items.map(i=>i.value).filter(v=>v!=null);const mn=Math.min(0,...vals),mx=Math.max(0,...vals);
+  const X=v=>lw+(v-mn)/((mx-mn)||1)*(r-lw-60);
+  let s=`<line x1="${X(0)}" x2="${X(0)}" y1="0" y2="${H-20}" stroke="var(--text-3)"/>`;
+  items.forEach((it,i)=>{const y=i*rh+3, v=it.value??0, x=Math.min(X(0),X(v)), w=Math.abs(X(v)-X(0));const col=it.color||(v>=0?"var(--gain)":"var(--loss)");
+    s+=`<text x="${lw-8}" y="${y+rh/2+1}" text-anchor="end" fill="var(--text-2)" font-size="11.5">${esc(it.label.length>34?it.label.slice(0,33)+"…":it.label)}</text>
+    <rect class="bar" data-i="${i}" x="${x}" y="${y+3}" width="${Math.max(w,1)}" height="${rh-8}" rx="3" fill="${col}" opacity="${it.dim?0.45:0.9}"/>
+    <text x="${v>=0?X(v)+5:X(0)+5}" y="${y+rh/2+1}" text-anchor="start" fill="var(--text)" font-size="11.5">${opt.fmt?opt.fmt(it.value):pct(it.value)}</text>
+    <rect data-i="${i}" class="hit" x="0" y="${y}" width="${W}" height="${rh}" fill="transparent"/>`});
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}">${s}</svg>`;
+  el.querySelectorAll(".hit").forEach(h=>{h.onmousemove=e=>{const it=items[+h.dataset.i];showTip(e,`<div class="t">${esc(it.label)}</div>${it.tip||pct(it.value)}`)};h.onmouseleave=hideTip});
+}
+function heat(el, rowsL, colsL, get, opt={}){
+  // diverging around opt.mid (default 0): red(loss) ↔ green(gain); numbers printed in cells (색만으로 구분하지 않음)
+  const vals=[];rowsL.forEach(r=>colsL.forEach(c=>{const v=get(r,c);if(v!=null)vals.push(v)}));
+  const mid=opt.mid??0, ext=Math.max(...vals.map(v=>Math.abs(v-mid)),1e-9);
+  const dark=document.documentElement.dataset.theme==="dark"||(!document.documentElement.dataset.theme&&matchMedia("(prefers-color-scheme: dark)").matches);
+  const col=v=>{if(v==null)return "transparent";const t=Math.min(1,Math.abs(v-mid)/ext);const a=(0.12+0.6*t).toFixed(2);return v>=mid?(dark?`rgba(63,194,63,${a})`:`rgba(10,140,10,${a})`):(dark?`rgba(239,114,114,${a})`:`rgba(205,50,50,${a})`)};
+  el.innerHTML=`<div class="tw"><table class="hm"><thead><tr><th class="l">${esc(opt.corner||"")}</th>${colsL.map(c=>`<th>${esc(opt.colFmt?opt.colFmt(c):c)}</th>`).join("")}</tr></thead><tbody>${rowsL.map(r=>`<tr><td class="l">${esc(opt.rowFmt?opt.rowFmt(r):r)}</td>${colsL.map(c=>{const v=get(r,c);return `<td style="background:${col(v)}" title="${esc((opt.rowFmt?opt.rowFmt(r):r)+" / "+(opt.colFmt?opt.colFmt(c):c))}">${v==null?"–":(opt.fmt?opt.fmt(v):pct(v))}</td>`}).join("")}</tr>`).join("")}</tbody></table></div>`;
+}
+function candle(el, ch, ex){
+  const W=el.clientWidth||900, H=380, VH=70, m={l:56,r:12,t:10,b:24}, n=ch.dates.length;
+  const pr=[...ch.h,...ch.l,...(ch.ma21||[]),...(ch.ma50||[])].filter(v=>v!=null&&v>0);
+  if(ex.pivot)pr.push(ex.pivot);if(ex.initial_stop)pr.push(ex.initial_stop);
+  let y0=Math.min(...pr),y1=Math.max(...pr);const pd=(y1-y0)*.04;y0-=pd;y1+=pd;
+  const bw=(W-m.l-m.r)/n, X=i=>m.l+bw*(i+.5), Y=v=>m.t+(1-(v-y0)/(y1-y0))*(H-VH-m.t-m.b-8);
+  const vmax=Math.max(...ch.v), VY=v=>H-m.b-v/vmax*VH;
+  let g="";
+  for(let i=0;i<=5;i++){const v=y0+(y1-y0)*i/5;g+=`<line x1="${m.l}" x2="${W-m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${m.l-6}" y="${Y(v)+4}" text-anchor="end">${v>=1000?Math.round(v).toLocaleString():v.toFixed(2)}</text>`}
+  const step=Math.ceil(n/8);ch.dates.forEach((d,i)=>{if(i%step===0)g+=`<text x="${X(i)}" y="${H-6}" text-anchor="middle">${d.slice(2)}</text>`});
+  let c="";
+  for(let i=0;i<n;i++){if(!(ch.o[i]>0))continue;const up=ch.c[i]>=ch.o[i];const col=up?"var(--gain)":"var(--loss)";
+    c+=`<line x1="${X(i)}" x2="${X(i)}" y1="${Y(ch.h[i])}" y2="${Y(ch.l[i])}" stroke="${col}"/><rect x="${X(i)-bw*.35}" y="${Y(Math.max(ch.o[i],ch.c[i]))}" width="${bw*.7}" height="${Math.max(1,Math.abs(Y(ch.o[i])-Y(ch.c[i])))}" fill="${col}"/>
+    <rect x="${X(i)-bw*.35}" y="${VY(ch.v[i])}" width="${bw*.7}" height="${H-m.b-VY(ch.v[i])}" fill="var(--text-3)" opacity=".35"/>`}
+  const line=(arr,color,dash)=>{let p="";arr.forEach((v,i)=>{if(v!=null)p+=(p?"L":"M")+X(i).toFixed(1)+","+Y(v).toFixed(1)});return p?`<path d="${p}" fill="none" stroke="${color}" stroke-width="1.6" ${dash?`stroke-dasharray="${dash}"`:""}/>`:""};
+  const idx=d=>ch.dates.indexOf(d);
+  let ov=line(ch.ma21,"var(--s1)")+line(ch.ma50,"var(--s2)");
+  if(ch.trail){const arr=ch.dates.map(d=>{const t=ch.trail.find(x=>x.date===d);return t?t.v:null});ov+=line(arr,"var(--s7)","4 3")}
+  const hl=(v,color,txt)=>v?`<line x1="${m.l}" x2="${W-m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="${color}" stroke-dasharray="5 4"/><text x="${W-m.r-2}" y="${Y(v)-4}" text-anchor="end" fill="${color}" font-size="11">${txt}</text>`:"";
+  ov+=hl(ex.pivot,"var(--s4)","Pivot")+hl(ex.initial_stop,"var(--loss)","Initial stop");
+  const mk=(i,price,color,txt,up)=>i<0?"":`<g><path d="M${X(i)},${Y(price)+(up?6:-6)} l-6,${up?10:-10} l12,0 z" fill="${color}" stroke="var(--surface)" stroke-width="1.5"/><text x="${X(i)}" y="${Y(price)+(up?28:-20)}" text-anchor="middle" font-size="11" fill="var(--text)">${txt}</text></g>`;
+  ov+=mk(idx(ex.entry_date),ex.entry_price,"var(--s1)","매수",true);
+  (ex.fills||[]).forEach(f=>{const p=f.reason.startsWith("PARTIAL");ov+=mk(idx(f.date),f.price,p?"var(--s3)":"var(--loss)",p?"부분매도":"매도",false)});
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}"><g class="axis">${g}</g>${c}${ov}<rect id="hit" x="${m.l}" y="${m.t}" width="${W-m.l-m.r}" height="${H-m.t-m.b}" fill="transparent"/></svg>`;
+  const svg=el.querySelector("svg");
+  svg.querySelector("#hit").onmousemove=e=>{const r=svg.getBoundingClientRect();const i=Math.max(0,Math.min(n-1,Math.floor(((e.clientX-r.left)*W/r.width-m.l)/bw)));
+    showTip(e,`<div class="t">${ch.dates[i]}</div>시 ${num(ch.o[i])} 고 ${num(ch.h[i])}<br>저 ${num(ch.l[i])} 종 ${num(ch.c[i])}<br>MA21 ${num(ch.ma21[i])} · MA50 ${num(ch.ma50[i])}<br>거래량 ${Math.round(ch.v[i]).toLocaleString()}`)};
+  svg.querySelector("#hit").onmouseleave=hideTip;
+}
+
+/* ── data selectors ── */
+function sumRows(f={}){
+  const q={market:S.market,group:S.group,horizon:S.h,period:S.group==="B_strict"?S.period:"full",signal_type:S.type,...f};
+  return D.summary.filter(r=>Object.entries(q).every(([k,v])=>v==null||r[k]===v));
+}
+function famOk(s){if(S.fam==="ALL")return true;if(S.fam==="CORE")return CORE.includes(s);if(S.fam==="S09")return s.startsWith("S09");if(S.fam==="S07")return s.startsWith("S07_");return s.startsWith(S.fam)}
+const srcBadge=g=>g==="SNAP_visible"?'<span class="badge b-snap">SNAPSHOT_ONLY · 현재 MCP 행</span>':'<span class="badge b-rec">RECONSTRUCTED · 현재 로직 Replay</span>';
+
+/* ── TAB 01 ── */
+function tabExec(el){
+  const a=D.audit, sel=D.selection[S.market]||{}, rec=(a.reconstructed||{})[S.market]||{};
+  const s01=sumRows({strategy:"S01",group:"B_strict",period:"full",signal_type:"ALL",horizon:D.config.default_horizon})[0]||{};
+  const s00=sumRows({strategy:"S00",group:"B_strict",period:"full",signal_type:"ALL",horizon:D.config.default_horizon})[0]||{};
+  const picks=Object.entries(D.final).filter(([k])=>k.startsWith(S.market+":"));
+  const port=D.portfolio.filter(p=>p.market===S.market);
+  const pS01=port.find(p=>p.strategy==="S01")||{};
+  let html=`<h2>Executive Summary — ${S.market} ${srcBadge("B")}</h2>
+  <div class="grid g4">
+   <div class="card kpi"><div class="l">재생성 신호 (전체 / strict 통과)</div><div class="v">${(rec.rows_first_seen||0).toLocaleString()} / ${(rec.rows_strict_passed||0).toLocaleString()}</div><div class="d">신호일 ${rec.first_signal_date||"–"} ~ ${rec.last_signal_date||"–"}</div></div>
+   <div class="card kpi"><div class="l">분석 가능 거래 (strict, 60일)</div><div class="v">${(s01.trades||0).toLocaleString()}</div><div class="d">Train ${sel.n_train||0} · Val ${sel.n_validation||0} · Test ${sel.n_test||0}</div></div>
+   <div class="card kpi"><div class="l">운영 DB 스냅샷 (MCP 현재 행)</div><div class="v">${(a.snapshot.by_market||{})[S.market]||0}</div><div class="d">전체 ${a.snapshot.rows}행 · VERIFIED_HISTORICAL 0건</div></div>
+   <div class="card kpi"><div class="l">기존 Scanner Stop(S01) 60일</div><div class="v ${cls(s01.avg_return)}">${pct(s01.avg_return,2)}</div><div class="d">-10% 이상 손실 ${pct(s01.loss_10_rate,1,false)} · 최악 ${pct(s01.worst_trade)}</div></div>
+  </div>`;
+  html+=`<h3 style="margin-top:20px">기존 Scanner Stop 대비 — Validation 선택 · Test 1회 평가</h3><div class="grid g2">`;
+  picks.forEach(([k,f])=>{const t=f.test||{};const p=t[f.pick]||{}, b=t["S01"]||{}, h=t["S00"]||{};
+    html+=`<div class="card"><h3>${esc(k.split(":")[1]==="REBOUND"?"REBOUND":"BREAKOUT · RE_BREAKOUT")} → <span class="mut">${esc(f.pick)}</span></h3>
+    <div class="small" style="margin-bottom:8px">${esc(lab(f.pick_strategy))}</div>
+    <div class="tw"><table><thead><tr><th class="l">Test 구간</th><th>거래</th><th>평균</th><th>승률</th><th>PF</th><th>-10%↓ 비율</th><th>최악</th></tr></thead><tbody>
+    ${[["선택 전략",p],["S01 Scanner stop",b],["S00 보유",h]].map(([n,r])=>`<tr><td class="l">${n}</td><td>${r.trades??"–"}</td><td class="${cls(r.avg_return)}">${pct(r.avg_return,2)}</td><td>${pct(r.win_rate,1,false)}</td><td>${num(r.profit_factor)}</td><td>${pct(r.loss_10_rate,1,false)}</td><td class="neg">${pct(r.worst_trade)}</td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="small" style="margin-top:6px">S01 대비 쌍대 차이 (전체 기간, block bootstrap 90%): ${pct(f.paired_vs_S01_full_bootstrap?.mean_p05,2)} ~ ${pct(f.paired_vs_S01_full_bootstrap?.mean_p95,2)} · P(개선) ${pct(f.paired_vs_S01_full_bootstrap?.prob_positive,0,false)}</div></div>`});
+  html+=`</div>`;
+  if(port.length){html+=`<h3 style="margin-top:20px">포트폴리오 시뮬레이션 <span class="badge b-port">최대 ${D.config.portfolio.max_positions}종목 · 종목당 ${D.config.portfolio.position_pct*100}%</span></h3><div id="ex-port"></div>`}
+  html+=`<h3 style="margin-top:20px">권장 Hybrid 규칙 (요약)</h3><div id="ex-rules"></div>
+  <h3 style="margin-top:20px">데이터 품질 및 주요 한계</h3><div class="card"><ul class="list">
+   <li><b>운영 DB에는 불변 신호 이력이 없다.</b> 같은 신호를 다시 스캔하면 pivot·stop·grade가 덮어써지고, 행은 수동 삭제될 수 있으며, MCP에는 strict 거부 행이 보이지 않는다. → 성과 산출은 현재 스캐너 코드를 과거 일봉에 날짜별로 다시 돌린 <b>RECONSTRUCTED</b> 신호로 했고, 실제 당시 신호(VERIFIED_HISTORICAL)는 0건이다.</li>
+   <li>Replay 유니버스는 <b>현재</b> S&P500+NASDAQ100 / KOSPI+KOSDAQ 구성종목이다 → 상장폐지·편출 종목이 빠진 생존 편향이 있다.</li>
+   <li>운영 VM의 .env 임계값은 직접 확인하지 못했다. 운영 경고 문구로 확인한 BREAKOUT 주봉 거래량 기준 2x만 고정했고, 나머지는 로컬 설정으로 돌렸다. 운영 행과의 일치율은 Data Audit 탭에 있다.</li>
+   <li>Sector Stage(Gate 2)는 과거 시점 값을 재구성할 수 없어 H 그룹 분석은 스냅샷에서만 가능하다.</li>
+   <li>일봉 데이터만 써서 장중 가격 경로를 알 수 없다. 같은 봉에서 목표가와 손절가가 함께 닿으면 보수 시나리오(하방 먼저)를 기본으로 했다.</li>
+   <li>거래비용은 저장소에서 확인된 계좌 요율이 없어 <b>가정값</b>이다 (US 0.25%/0.25%, KR 0.015%/0.015%+거래세 0.20%, slippage 10bp).</li>
+  </ul></div>`;
+  el.innerHTML=html;
+  if(port.length)table($("#ex-port"),[{k:"strategy",h:"전략",l:1,f:v=>esc(v)},P("cagr","CAGR"),{k:"mdd",h:"MDD",f:v=>pct(v),c:()=>"neg"},N("sharpe","Sharpe"),N("calmar","Calmar"),P("cumulative_return","누적"),PN("time_in_market","시장 노출"),N("max_concurrent_positions","최대 동시",0),N("n_taken","거래",0)],port,{sort:"cagr"});
+  const rules=(D.rules.rules||[]).filter(r=>r.market===S.market);
+  table($("#ex-rules"),[{k:"signal_type",h:"유형",l:1},{k:"selected_strategy",h:"선택",l:1},{k:"initial_stop_method",h:"초기 손절",l:1,f:(v,r)=>esc(v)+(r.max_loss_pct?` (${(r.max_loss_pct*100).toFixed(0)}%)`:"")},{k:"breakout_failure_mode",h:"Breakout 실패",l:1},{k:"profit_activation_pct",h:"보호 활성",f:v=>v==null?"–":pct(v,0)},{k:"trailing_drawdown_pct",h:"고점 대비",f:v=>v==null?"–":"-"+pct(v,0,false)},{k:"partial_sell_ratio",h:"부분매도",f:v=>v==null?"–":pct(v,0,false)},{k:"recommendation_status",h:"상태",l:1,f:v=>`<span class="badge ${v==="RECOMMENDED_FOR_PAPER"?"b-ok":v==="NOT_RECOMMENDED"?"b-no":"b-wait"}">${esc(v)}</span>`}],rules);
+}
+
+/* ── TAB 02 ── */
+function tabAudit(el){
+  const a=D.audit, sn=a.snapshot, rv=a.replay_validation||{};
+  let html=`<h2>Data Audit</h2>
+  <div class="grid g4">
+   <div class="card kpi"><div class="l">MCP 가시 행 / 최대 ID</div><div class="v">${sn.rows} / ${sn.max_result_id}</div><div class="d">보이지 않는 ID ${sn.id_gaps_not_visible}개 (strict 거부 또는 삭제)</div></div>
+   <div class="card kpi"><div class="l">최초 저장 후 값 갱신된 행</div><div class="v">${sn.rows_updated_after_first_detection}</div><div class="d">최초 값 그대로 ${sn.values_at_first_detection} · first_detected_at 없음 ${sn.first_detected_null}</div></div>
+   <div class="card kpi"><div class="l">스냅샷 신호일 범위</div><div class="v" style="font-size:18px">${sn.first_signal_date} ~ ${sn.last_signal_date}</div><div class="d">고유 종목 ${sn.unique_tickers}</div></div>
+   <div class="card kpi"><div class="l">Replay ↔ 운영 행 일치율</div><div class="v">${rv.match_rate!=null?pct(rv.match_rate,0,false):"–"}</div><div class="d">signal_key 기준 ${rv.matched??"–"}/${rv.comparable??"–"} · pivot·stop 일치 ${rv.level_match_rate!=null?pct(rv.level_match_rate,0,false):"–"}</div></div>
+  </div>
+  <div class="note"><b>데이터 품질 구분.</b> VERIFIED_HISTORICAL(검증된 당시 기록) <b>0건</b> · SNAPSHOT_ONLY(현재 MCP 행) <b>${sn.rows}건</b> · RECONSTRUCTED(현재 로직 Replay) <b>${Object.values(a.reconstructed||{}).reduce((s,r)=>s+(r.rows_first_seen||0),0).toLocaleString()}건</b>. 세 출처를 하나의 확정 성과로 합치지 않는다.</div>
+  <div class="grid g2">
+   <div class="card"><h3>저장 구조 (코드 확인)</h3><div id="au-facts"></div></div>
+   <div class="card"><h3>재생성 신호 — 시장·유형별</h3><div id="au-rec"></div><h3 style="margin-top:14px">strict 거부 상위 사유 (${S.market})</h3><div id="au-rej"></div></div>
+   <div class="card"><h3>스냅샷 결측률</h3><div id="au-miss"></div></div>
+   <div class="card"><h3>OHLCV Coverage</h3><div id="au-ohlcv"></div><h3 style="margin-top:14px">Replay에 고정한 운영 임계값</h3><div class="small">${Object.entries(D.config.overrides||{}).map(([k,v])=>`${esc(k)} = ${esc(v)}`).join("<br>")||"없음"}</div>
+   <h3 style="margin-top:14px">진입 제외 사유</h3><div id="au-excl"></div></div>
+  </div>`;
+  el.innerHTML=html;
+  table($("#au-facts"),[{k:"topic",h:"항목",l:1},{k:"fact",h:"내용",l:1,f:v=>`<span style="white-space:normal;display:block;min-width:260px">${esc(v)}</span>`},{k:"evidence",h:"근거",l:1,f:v=>`<span class="small">${esc(v)}</span>`}],a.code_facts);
+  const recRows=[];Object.entries(a.reconstructed||{}).forEach(([m,r])=>{(r.by_market_type_all||[]).forEach(x=>{const st=(r.by_market_type_strict||[]).find(y=>y.signal_type===x.signal_type);recRows.push({market:m,signal_type:x.signal_type,all:x.n,strict:st?st.n:0})})});
+  table($("#au-rec"),[{k:"market",h:"시장",l:1},{k:"signal_type",h:"유형",l:1},N("all","전체",0),N("strict","strict 통과",0),{k:"r",h:"통과율",v:r=>r.strict/r.all,f:v=>pct(v,0,false)}],recRows);
+  const rj=((a.reconstructed||{})[S.market]||{}).top_reject_reasons||{};
+  table($("#au-rej"),[{k:"k",h:"사유",l:1},N("n","건수",0)],Object.entries(rj).map(([k,n])=>({k,n})),{sort:"n"});
+  table($("#au-miss"),[{k:"k",h:"필드",l:1},PN("v","결측률")],Object.entries(sn.missing_rate).map(([k,v])=>({k,v})),{sort:"v"});
+  table($("#au-ohlcv"),[{k:"m",h:"시장",l:1},N("u","유니버스",0),N("f","확보",0),N("x","실패",0),{k:"b",h:"가격 기준",l:1}],Object.entries(a.ohlcv).map(([m,o])=>({m,u:o.universe,f:o.frames,x:Object.keys(o.failures).length,b:o.price_basis})));
+  table($("#au-excl"),[{k:"market",h:"시장",l:1},{k:"source",h:"출처",l:1},{k:"reason",h:"사유",l:1},N("n","건수",0)],a.exclusions||[]);
+}
+
+/* ── TAB 03 ── */
+function tabCmp(el){
+  const rows=sumRows().filter(r=>famOk(r.strategy));
+  el.innerHTML=`<h2>Strategy Comparison ${srcBadge(S.group)}</h2>
+  <div class="note">같은 매수 신호·매수가·평가 기간(${S.h}거래일)·비용으로 비교. 평가 종료 시 미청산 포지션은 종가로 평가하며, 실현 손익과 구분한다(미청산 비율 열). 독립 신호 단위 지표이며, 같은 종목의 보유 기간 중첩에 따른 통계적 의존성이 있다.</div>
+  <div class="grid g2"><div class="card"><h3>평균 수익률 (거래당, 비용 반영)</h3><div id="cmp-bar"></div></div>
+  <div class="card"><h3>손실 방어 — -10% 이상 손실 비율</h3><div id="cmp-bar2"></div></div></div>
+  <div class="card" style="margin-top:14px"><h3>전략별 상세</h3><div id="cmp-t"></div></div>
+  <div class="card" style="margin-top:14px"><h3>포트폴리오 Equity Curve — ${S.market} <span class="badge b-port">포트폴리오 단위 · 60거래일 · strict 통과</span></h3><div class="legend" id="eq-leg"></div><div class="chart" id="eq"></div><div class="small">벤치마크 대비 실제 자금 제약(최대 ${D.config.portfolio.max_positions}종목, 동일 종목 중복 매수 금지) 하의 일별 평가금액. 독립 거래 수익률을 누적한 값이 아니다.</div></div>
+  <div class="card" style="margin-top:14px"><h3>Slippage 민감도 / 동일 봉 순서 시나리오</h3><div id="cmp-sens"></div></div>`;
+  const srt=[...rows].sort((a,b)=>(b.avg_return??-9)-(a.avg_return??-9)).slice(0,24);
+  barChart($("#cmp-bar"),srt.map(r=>({label:r.strategy,value:r.avg_return,tip:`${esc(lab(r.strategy))}<br>평균 ${pct(r.avg_return,2)} · 중앙 ${pct(r.median_return,2)}<br>승률 ${pct(r.win_rate,1,false)} · PF ${num(r.profit_factor)}<br>거래 ${r.trades}`})));
+  barChart($("#cmp-bar2"),srt.map(r=>({label:r.strategy,value:r.loss_10_rate,color:"var(--loss)",tip:`-10%↓ ${pct(r.loss_10_rate,1,false)} · -20%↓ ${pct(r.loss_20_rate,1,false)}<br>최악 ${pct(r.worst_trade)} · CVaR5 ${pct(r.cvar_5)}`})),{fmt:v=>pct(v,1,false)});
+  table($("#cmp-t"),[{k:"strategy",h:"전략",l:1,f:v=>`<b>${esc(v)}</b><div class="small">${esc(lab(v))}</div>`},N("trades","거래",0),P("avg_return","평균"),P("median_return","중앙"),PN("win_rate","승률"),N("profit_factor","PF"),N("payoff_ratio","손익비"),P("avg_win","평균 이익"),P("avg_loss","평균 손실"),P("worst_trade","최악"),PL("loss_5_rate","-5%↓"),PL("loss_10_rate","-10%↓"),PL("loss_20_rate","-20%↓"),PN("stop_rate","손절률"),P("mae_avg","MAE"),P("mfe_avg","MFE"),PN("giveback_avg","Giveback"),N("capture_median","Capture",2),N("avg_holding_days","보유일",1),PN("avg_cost","비용"),PN("open_at_end_rate","미청산")],rows,{sort:"avg_return",hl:r=>r.strategy==="S01"});
+  const eq=D.equity[S.market]||{};const names=Object.keys(eq).filter(n=>n.startsWith("BENCH")||famOk(n));const C=SER();
+  const ser=names.map((n,i)=>({name:n,d:eq[n].d,v:eq[n].v,color:n.startsWith("BENCH")?sv("--text-3"):C[i%8],dash:n.startsWith("BENCH")}));
+  const draw=()=>{legend($("#eq-leg"),ser,draw);lineChart($("#eq"),ser,{base:1,fmt:v=>num(v,2)+"x"})};draw();
+  const sens=D.sensitivity.filter(r=>r.market===S.market&&famOk(r.strategy));
+  const strategies=[...new Set(sens.map(r=>r.strategy))];
+  const cols=[...new Set(sens.map(r=>r.scenario+"|"+r.slip_bp))].sort();
+  heat($("#cmp-sens"),strategies,cols,(s,c)=>{const [sc,bp]=c.split("|");const r=sens.find(x=>x.strategy===s&&x.scenario===sc&&String(x.slip_bp)===bp);return r?r.avg_return:null},{corner:"평균 수익률",colFmt:c=>{const [sc,bp]=c.split("|");return (sc==="conservative"?"보수":"낙관")+" "+bp+"bp"}});
+}
+
+/* ── TAB 04 ── */
+function tabEarly(el){
+  const rows=D.early.filter(r=>r.market===S.market);
+  el.innerHTML=`<h2>Early Exit — Breakout 실패 조기 매도 ${srcBadge("B")}</h2>
+  <div class="note">BREAKOUT·RE_BREAKOUT은 Pivot, REBOUND는 신호 당시 MA150 이탈로만 판정한다 (REBOUND에 Pivot 조건을 강제하지 않음). 종가 확정 후 <b>다음 거래일 시가</b>에 매도. 기본 Hard Stop은 기존 Scanner stop_loss. "S01 대비"는 같은 신호를 Scanner stop만 적용했을 때와의 차이다. 매도 이후 경로는 분석용이며 매도 판단에 쓰지 않는다.</div>
+  <div class="card"><h3>S01 대비 평균 수익률 차이 (strict 통과, 60일)</h3><div id="ee-bar"></div></div>
+  <div class="card" style="margin-top:14px"><h3>조건별 상세 — 종가·거래량·기간·허용폭</h3><div id="ee-t"></div></div>
+  <div class="card" style="margin-top:14px"><h3>최초 진입가가 이미 Pivot 아래였던 신호 (정상 진입과 분리)</h3><div id="ee-bp"></div></div>`;
+  const top=[...rows].sort((a,b)=>b.avg_diff_vs_S01-a.avg_diff_vs_S01);
+  barChart($("#ee-bar"),top.slice(0,30).map(r=>({label:r.strategy,value:r.avg_diff_vs_S01,tip:`${esc(lab(r.strategy))}<br>조기매도 비율 ${pct(r.bf_exit_rate,1,false)}<br>손실 전 매도 ${pct(r.bf_exit_before_loss_rate,1,false)}<br>개선 ${pct(r.improved_rate,0,false)} / 악화 ${pct(r.worsened_rate,0,false)}`})),{fmt:v=>pct(v,2)});
+  table($("#ee-t"),[{k:"strategy",h:"규칙",l:1,f:v=>`<b>${esc(v)}</b><div class="small">${esc(lab(v))}</div>`},N("applied","적용",0),PN("bf_exit_rate","조기매도율"),PN("bf_exit_before_loss_rate","손실 전 매도"),P("avg_return","평균"),P("avg_diff_vs_S01","S01 대비"),PN("improved_rate","개선"),PN("worsened_rate","악화"),PL("loss10_rate","-10%↓"),PL("loss10_rate_S01","-10%↓ S01"),P("bf_post20_avg","매도 후 20일"),PN("bf_whipsaw_rate","+10% 반등"),PN("bf_recover_rate","매수가 회복")],rows,{sort:"avg_diff_vs_S01"});
+  table($("#ee-bp"),[{k:"strategy",h:"전략",l:1},{k:"below_pivot_entry",h:"Pivot 아래 진입",f:v=>v?"예":"아니오"},N("trades","거래",0),P("avg_return","평균"),PN("win_rate","승률")],D.below_pivot.filter(r=>r.market===S.market));
+}
+
+/* ── TAB 05 ── */
+function tabProfit(el){
+  const P60=D.param.filter(r=>r.market===S.market&&r.segment==="full"&&r.signal_type===S.type);
+  el.innerHTML=`<h2>Profit Protection ${srcBadge("B")}</h2>
+  <div class="note">보호 모드는 활성화 후 해제하지 않는다. 최고가와 활성화 여부는 <b>전 거래일까지</b> 확인된 고가로만 갱신한다(당일 고가 반영은 다음 날부터). 부분매도는 보호 이벤트당 1회이며, 이후 잔여 수량의 손절선을 낮추지 않는다.</div>
+  <div class="grid g2"><div class="card"><h3>S06 Trailing — 활성화 × 고점 대비 하락 (평균 수익률)</h3><div id="pp-h1"></div></div>
+  <div class="card"><h3>S06 Trailing — Giveback (MFE − 실현)</h3><div id="pp-h2"></div></div>
+  <div class="card"><h3>S07 부분매도 비중별 평균 (전 설정 평균)</h3><div id="pp-ratio"></div></div>
+  <div class="card"><h3>Trailing 기반 vs 목표가 기반 부분매도</h3><div id="pp-tt"></div></div></div>
+  <div class="card" style="margin-top:14px"><h3>MFE 대비 실제 수익 확보 (S06·S07·Hybrid)</h3><div id="pp-t"></div></div>`;
+  const s06=P60.filter(r=>/^S06_a\d+_d\d+$/.test(r.strategy));
+  const acts=[5,10,15,20], dds=[3,5,6,8,10];
+  const g=(a,d,k)=>{const r=s06.find(x=>x.strategy===`S06_a${a}_d${d}`);return r?r[k]:null};
+  heat($("#pp-h1"),acts,dds,(a,d)=>g(a,d,"avg_return"),{corner:"활성 \\ 하락",rowFmt:a=>"+"+a+"%",colFmt:d=>"-"+d+"%"});
+  const sums=sumRows({group:"B_strict",period:"full",horizon:D.config.default_horizon});
+  heat($("#pp-h2"),acts,dds,(a,d)=>{const r=sums.find(x=>x.strategy===`S06_a${a}_d${d}`);return r?-r.giveback_avg:null},{corner:"활성 \\ 하락",rowFmt:a=>"+"+a+"%",colFmt:d=>"-"+d+"%",fmt:v=>pct(-v,1,false),mid:sums.length?-Math.max(...sums.filter(x=>/^S06_a/.test(x.strategy)).map(x=>x.giveback_avg)):0});
+  const s07=P60.filter(r=>r.family==="S07");const byR={};s07.forEach(r=>{const m=r.strategy.match(/_r(\d+)_/);if(m)(byR[m[1]]=byR[m[1]]||[]).push(r.avg_return)});
+  barChart($("#pp-ratio"),Object.entries(byR).sort((a,b)=>a[0]-b[0]).map(([k,v])=>({label:k+"% 매도",value:v.reduce((s,x)=>s+x,0)/v.length,tip:`설정 ${v.length}개 평균<br>최고 ${pct(Math.max(...v),2)} · 최저 ${pct(Math.min(...v),2)}`})),{fmt:v=>pct(v,2)});
+  const tr=P60.filter(r=>r.family==="S07").sort((a,b)=>b.objective-a.objective).slice(0,6), tg=P60.filter(r=>r.family==="S07T").sort((a,b)=>b.objective-a.objective).slice(0,6);
+  barChart($("#pp-tt"),[...tr.map(r=>({label:r.strategy,value:r.avg_return,color:"var(--s1)",tip:esc(lab(r.strategy))})),...tg.map(r=>({label:r.strategy,value:r.avg_return,color:"var(--s2)",tip:esc(lab(r.strategy))}))],{fmt:v=>pct(v,2)});
+  const rows=sums.filter(r=>/^S0[67]|^S09/.test(r.strategy)&&famOk(r.strategy));
+  table($("#pp-t"),[{k:"strategy",h:"전략",l:1,f:v=>`<b>${esc(v)}</b><div class="small">${esc(lab(v))}</div>`},N("trades","거래",0),P("avg_return","평균"),P("mfe_avg","평균 MFE"),PN("giveback_avg","Giveback"),N("capture_median","Capture 중앙",2),P("partial_component_avg","부분매도 기여"),PN("profit_exit_protected_rate","이익 매도 후 하락"),PN("profit_exit_too_early_rate","매도 후 +15%"),N("avg_holding_days","보유일",1)],rows,{sort:"avg_return"});
+}
+
+/* ── TAB 06 ── */
+function tabParam(el){
+  const sel=D.selection[S.market]||{};
+  const pm=D.param.filter(r=>r.market===S.market);
+  el.innerHTML=`<h2>Parameter Analysis ${srcBadge("B")}</h2>
+  <div class="note">Train(초기 60%)·Validation(다음 20%)·Test(마지막 20%)를 매수일 기준 시간순으로 나눴다. 앞 구간 거래 중 보유 기간이 다음 구간에 걸치는 거래는 선택에서 제외(purge)했다. 선택 기준: 평균 순수익 − 0.25 × 하위 5% 평균 손실. Test는 최종 선택 뒤에만 평가했다.
+  <br>구간: ${Object.entries(sel.bounds||{}).map(([k,v])=>`<b>${k}</b> ${v[0]}~${v[1]}`).join(" · ")} · Validation purge 전 ${sel.n_validation_before_purge??"–"} → 후 ${sel.n_validation??"–"}</div>
+  <div class="grid g2"><div class="card"><h3>S02 고정 손절률 × 신호 유형 (전체 기간 평균 수익률)</h3><div id="pa-s02"></div></div>
+  <div class="card"><h3>S06 Trailing Heatmap — Train 구간</h3><div id="pa-s06"></div></div></div>
+  <div class="card" style="margin-top:14px"><h3>Family별 Train 최적 설정 → Validation → Test</h3><div id="pa-best"></div></div>
+  <div class="grid g2" style="margin-top:14px"><div class="card"><h3>과적합 위험 — 설정 순위 안정성 (Train vs Validation, Spearman)</h3><div id="pa-stab"></div><div class="small">0.3 미만이면 Train에서 좋았던 설정이 다음 구간에서 재현되지 않는다는 뜻이다 (과적합 위험).</div></div>
+  <div class="card"><h3>Walk-forward (24개월 학습 → 6개월 평가, rolling)</h3><div id="pa-wf"></div></div></div>
+  <div class="card" style="margin-top:14px"><h3>선택 기준 민감도 — 꼬리 손실 벌점 λ (score = 평균 + λ × CVaR5)</h3><div id="pa-lam"></div><div class="small">λ=0은 기대수익만 보고 고른 결과, λ가 클수록 큰 손실 회피를 우선한다. 기본값은 0.25. λ에 따라 선택이 바뀌면 '큰 손실 방지'와 '상승 보존'이 서로 교환 관계라는 뜻이다.</div></div>
+  <div class="card" style="margin-top:14px"><h3>전체 설정 결과 (${S.fam==="CORE"?"S02~S09 전체":S.fam})</h3><div id="pa-all"></div></div>`;
+  const types=["BREAKOUT","RE_BREAKOUT","REBOUND","ALL"], stops=[3,4,5,6,7,8,10];
+  heat($("#pa-s02"),stops,types,(p,t)=>{const r=pm.find(x=>x.segment==="full"&&x.signal_type===t&&x.strategy===`S02_fix${p}`);return r?r.avg_return:null},{corner:"손절 \\ 유형",rowFmt:p=>"-"+p+"%"});
+  heat($("#pa-s06"),[5,10,15,20],[3,5,6,8,10],(a,d)=>{const r=pm.find(x=>x.segment==="train"&&x.signal_type===S.type&&x.strategy===`S06_a${a}_d${d}`);return r?r.avg_return:null},{corner:"활성 \\ 하락",rowFmt:a=>"+"+a+"%",colFmt:d=>"-"+d+"%"});
+  const best=sel.best_by_family_train||{};const rows=Object.entries(best).filter(([f])=>!f.startsWith("_")).map(([fam,s])=>{const g=seg=>pm.find(x=>x.segment===seg&&x.strategy===s&&x.signal_type==="ALL")||{};const tr=g("train"),va=g("validation"),te=g("test");const fv=pm.filter(x=>x.segment==="train"&&x.family===fam&&x.signal_type==="ALL").map(x=>x.objective).sort((a,b)=>b-a);
+    const gap=fv.length>2?(fv[0]-fv[Math.floor(fv.length/2)]):null;
+    return {fam,s,tr:tr.avg_return,va:va.avg_return,te:te.avg_return,ntr:tr.trades,nte:te.trades,gap,stab:(sel.rank_stability_train_vs_val||{})[fam]}});
+  table($("#pa-best"),[{k:"fam",h:"Family",l:1},{k:"s",h:"Train 최적",l:1,f:v=>`<b>${esc(v)}</b><div class="small">${esc(lab(v))}</div>`},P("tr","Train"),P("va","Validation"),P("te","Test"),N("ntr","Train n",0),N("nte","Test n",0),N("stab","순위 안정성",2),{k:"risk",h:"과적합 위험",l:1,v:r=>r.stab,f:(v,r)=>v==null?"–":v<0.3||(r.va!=null&&r.tr!=null&&r.va<r.tr-0.02)?'<span class="badge b-no">높음</span>':v<0.6?'<span class="badge b-wait">보통</span>':'<span class="badge b-ok">낮음</span>'}],rows);
+  table($("#pa-stab"),[{k:"f",h:"Family",l:1},N("v","Spearman",2)],Object.entries(sel.rank_stability_train_vs_val||{}).map(([f,v])=>({f,v})),{sort:"v"});
+  table($("#pa-wf"),[{k:"window_start",h:"평가 시작",l:1},{k:"family",h:"Family",l:1},{k:"strategy",h:"선택",l:1},N("train_trades","학습 n",0),N("test_trades","평가 n",0),P("test_avg_return","평가 평균")],D.walk_forward.filter(r=>r.market===S.market));
+  table($("#pa-lam"),[N("lambda","λ",2),{k:"strategy",h:"Train 최적",l:1,f:v=>`<b>${esc(v)}</b> <span class="small">${esc(lab(v))}</span>`},P("train","Train"),P("validation","Validation"),P("test","Test"),P("s01_test","S01 Test"),PL("loss_10_test","Test -10%↓")],(D.lambda_sens||[]).filter(r=>r.market===S.market));
+  table($("#pa-all"),[{k:"strategy",h:"설정",l:1,f:v=>`<b>${esc(v)}</b><div class="small">${esc(lab(v))}</div>`},{k:"segment",h:"구간",l:1},N("trades","거래",0),N("objective","Objective",4),P("avg_return","평균"),PN("win_rate","승률"),N("profit_factor","PF"),PL("loss_10_rate","-10%↓"),P("worst_trade","최악")],pm.filter(r=>r.signal_type===S.type&&(S.fam==="CORE"||famOk(r.strategy))),{sort:"objective"});
+}
+
+/* ── TAB 07 ── */
+let caseSel=null;
+function tabCase(el){
+  const items=[];D.cases.forEach(c=>(c.examples||[]).forEach((e,i)=>items.push({c,e,id:c.case+i})));
+  const vis=items.filter(x=>x.e.market===S.market);
+  if(!caseSel||!vis.find(x=>x.id===caseSel))caseSel=vis[0]?.id;
+  const cur=items.find(x=>x.id===caseSel);
+  el.innerHTML=`<h2>Case Study — 실제 Scanner 신호 ${srcBadge("B")}</h2>
+  <div class="note">RECONSTRUCTED strict 통과 신호에서 조건에 맞는 사례를 자동으로 고른다. CASE G는 과거 후보 탈락 이력이 저장되지 않아, 스캐너가 '돌파 실패(D+3)'로 판정한 신호를 대리 지표로 썼다. 사례가 없는 CASE는 목록에 없다.</div>
+  <div class="grid" style="grid-template-columns:minmax(220px,280px) 1fr">
+   <div class="case-list">${D.cases.map(c=>`<div class="small" style="margin:8px 0 4px"><b>CASE ${c.case}</b> · ${esc(c.title)}</div>${(c.examples||[]).map((e,i)=>e.market===S.market?`<button data-id="${c.case+i}" class="${caseSel===c.case+i?"on":""}">${esc(e.ticker)} ${esc(e.name||"")}<div class="small">${e.signal_type} · ${e.entry_date} · <span class="${cls(e.return)}">${pct(e.return)}</span></div></button>`:"").join("")||'<div class="small mut">해당 시장 사례 없음</div>'}`).join("")}</div>
+   <div>${cur?`<div class="card"><h3>${esc(cur.e.ticker)} ${esc(cur.e.name||"")} — CASE ${cur.c.case}: ${esc(cur.c.title)}</h3>
+     <div class="legend"><span><i style="background:var(--s1)"></i>MA21</span><span><i style="background:var(--s2)"></i>MA50</span><span><i style="background:var(--s4)"></i>Pivot</span><span><i style="background:var(--loss)"></i>Initial stop · 매도</span><span><i style="background:var(--s3)"></i>부분매도</span>${cur.e.chart.trail?'<span><i style="background:var(--s7)"></i>Trailing stop</span>':""}</div>
+     <div class="chart" id="cs-chart"></div></div>
+     <div class="grid g2" style="margin-top:14px"><div class="card"><h3>시뮬레이션 (${esc(cur.c.strategy)})</h3><div class="kv">
+      <div>시장 · 신호</div><div>${cur.e.market} · ${cur.e.signal_type} (신호일 ${cur.e.signal_date})</div>
+      <div>매수</div><div>${cur.e.entry_date} @ ${num(cur.e.entry_price)}</div>
+      <div>Pivot</div><div>${num(cur.e.pivot)}</div><div>Initial stop</div><div>${num(cur.e.initial_stop)}</div>
+      <div>매도</div><div>${(cur.e.fills||[]).map(f=>`${f.date} ${esc(f.reason)} ${(f.portion*100).toFixed(0)}% @ ${num(f.price)}`).join("<br>")||"평가 종료 시 미청산"}</div>
+      <div>결과</div><div class="${cls(cur.e.return)}"><b>${pct(cur.e.return,2)}</b> (${esc(cur.e.exit_reason)})</div>
+      <div>매도 후</div><div>5일 ${pct(cur.e.post.post_5d)} · 20일 ${pct(cur.e.post.post_20d)} · 60일 ${pct(cur.e.post.post_60d)}</div></div></div>
+      <div class="card"><h3>같은 신호의 전략별 60일 결과</h3><div id="cs-str"></div></div></div>`:'<div class="card mut">선택한 시장에 사례가 없다.</div>'}</div></div>`;
+  el.querySelectorAll(".case-list button").forEach(b=>b.onclick=()=>{caseSel=b.dataset.id;render()});
+  if(cur){candle($("#cs-chart"),cur.e.chart,cur.e);table($("#cs-str"),[{k:"s",h:"전략",l:1,f:v=>`${esc(v)} <span class="small">${esc(lab(v))}</span>`},P("r","수익률")],Object.entries(cur.e.strategy_returns).map(([s,r])=>({s,r})),{sort:"r"})}
+}
+
+/* ── TAB 08 ── */
+function tabRec(el){
+  const rules=(D.rules.rules||[]);
+  const card=r=>{const st=r.recommendation_status;const c=st==="RECOMMENDED_FOR_PAPER"?"ok":st==="NOT_RECOMMENDED"?"no":"wait";const o=r.out_of_sample_performance||{};
+    return `<div class="card rule ${c}"><h3>${r.market} · ${r.signal_type} <span class="badge ${c==="ok"?"b-ok":c==="no"?"b-no":"b-wait"}">${esc(st)}</span></h3>
+    ${r.selected_strategy?`<div class="small" style="margin-bottom:8px">선택: <b>${esc(r.selected_strategy)}</b> — ${esc(r.selected_label||lab(r.selected_strategy))}</div>
+    <div class="kv"><div>초기 손절</div><div>${esc(r.initial_stop_method)}${r.max_loss_pct?` · 최대 손실 ${(r.max_loss_pct*100).toFixed(0)}%`:""}${r.atr_multiplier?` · ATR×${r.atr_multiplier}`:""}</div>
+    <div>Breakout 실패</div><div>${esc(r.breakout_failure_mode)}${r.breakout_confirmation_days?` · ${r.breakout_confirmation_days}일 종가`:""}${r.pivot_tolerance_pct!=null&&r.breakout_failure_mode!=="NONE"?` · 허용 ${(r.pivot_tolerance_pct*100).toFixed(0)}%`:""}${r.breakout_volume_ratio?` · 거래량 ${r.breakout_volume_ratio}x`:""}${r.breakout_watch_window_days?` · ${r.breakout_watch_window_days}일 감시`:""}</div>
+    <div>수익 보호</div><div>${r.profit_activation_pct!=null?`+${(r.profit_activation_pct*100).toFixed(0)}% 활성 → 고점 -${((r.trailing_drawdown_pct||0)*100).toFixed(0)}%`:"–"}${r.partial_sell_ratio?` · ${(r.partial_sell_ratio*100).toFixed(0)}% 부분매도 (${esc(r.partial_mode)})`:""}</div>
+    <div>잔여 수량</div><div>${esc(r.remaining_exit_method||"–")}</div>
+    <div>자동매도</div><div>${(r.auto_exit_rules||[]).map(x=>`<span class="badge b-rec">${esc(x)}</span>`).join(" ")}</div>
+    <div>승인 요청 유지</div><div>${(r.review_exit_rules||[]).map(x=>`<span class="badge b-wait">${esc(x)}</span>`).join(" ")||"–"}</div>
+    <div>표본</div><div>전체 ${r.sample_count?.all} · Validation ${r.sample_count?.validation} · Test ${r.sample_count?.test}</div>
+    <div>Test 평균</div><div><span class="${cls(o.pick?.avg_return)}">${pct(o.pick?.avg_return,2)}</span> vs S01 <span class="${cls(o.S01_scanner_stop?.avg_return)}">${pct(o.S01_scanner_stop?.avg_return,2)}</span> vs 보유 <span class="${cls(o.S00_hold?.avg_return)}">${pct(o.S00_hold?.avg_return,2)}</span></div>
+    <div>Test -10%↓</div><div>${pct(o.pick?.loss_10_rate,1,false)} vs S01 ${pct(o.S01_scanner_stop?.loss_10_rate,1,false)}</div>
+    ${r.tradeoff_note?`<div>교환 관계</div><div style="white-space:normal">${esc(r.tradeoff_note)}</div>`:""}
+    <div>Bootstrap</div><div>S01 대비 쌍대 차이 90% 구간 ${pct(r.robustness?.paired_vs_S01_bootstrap_full?.mean_p05,2)} ~ ${pct(r.robustness?.paired_vs_S01_bootstrap_full?.mean_p95,2)}</div></div>`:`<div class="small">${esc(r.note||"")}</div>`}</div>`};
+  el.innerHTML=`<h2>Recommendation</h2>
+  <div class="note"><b>${esc(D.rules.generated_note)}</b><br>상태 기준 — RECOMMENDED_FOR_PAPER: Validation·Test 모두 기존 Scanner stop(S01)보다 objective가 높고, Test의 -10% 이상 손실 비율이 S01 이하이며, 거래당 기대수익이 S01보다 0.5%p 넘게 낮지 않고, 전체 기간 S01 대비 쌍대 bootstrap 중앙값이 -0.5%p 이상이며, Test 표본이 30건 이상. NEED_MORE_DATA: 표본 부족 또는 결과가 엇갈림. NOT_RECOMMENDED: Test에서 S01보다 나쁨.</div>
+  <h3>US</h3><div class="grid g2">${rules.filter(r=>r.market==="US").map(card).join("")}</div>
+  <h3 style="margin-top:18px">KR</h3><div class="grid g2">${rules.filter(r=>r.market==="KR").map(card).join("")}</div>
+  <h3 style="margin-top:18px">자동매도 / 승인 요청 구분 (공통 원칙)</h3><div class="card"><ul class="list">
+   <li><b>자동매도 허용 권장</b>: P1 Hard Stop(Scanner stop과 최대 손실률 중 높은 가격), P2 Breakout 실패(종가 확인 → 다음 날 시가), P3 수익 보호 부분매도·잔여 trailing. 모두 가격만으로 결정되는 기계적 규칙이다.</li>
+   <li><b>승인 요청 유지 권장</b>: P4 추세 악화(MA 이탈·Stage 전환), P5 시간 손절. S09-B(전부 매도 가정)는 사용자가 모든 REVIEW를 승인했다고 가정한 가상 결과이며, 실제 자동매도 성과가 아니다.</li>
+   <li>기존 보유종목에는 신규 매도 기준을 소급 적용하지 않는다. 모의투자(paper)로 먼저 검증한다.</li></ul></div>
+  <h3 style="margin-top:18px">성과 불확실성 및 제한사항</h3><div class="card"><ul class="list">
+   <li>성과는 현재 스캐너 로직으로 재생성한 신호 기준이다. 당시 실제로 받았던 알림과 다를 수 있다 (로직 변경 이력, 운영 .env 미확인, 수정주가 재계산).</li>
+   <li>현재 구성종목 유니버스 → 생존 편향이 있어 절대 수익률은 과대 추정될 수 있다. 전략 간 <b>상대 비교</b>가 주된 용도다.</li>
+   <li>독립 신호 분석은 같은 종목의 보유 기간이 겹치는 거래를 포함한다. 불확실성은 block bootstrap으로 추정했다.</li>
+   <li>MCP 스냅샷(${D.audit.snapshot.rows}행, 약 3개월)은 60·120일 평가 기간을 채우지 못한 신호가 많아 참고용으로만 썼다.</li></ul></div>`;
+}
+
+/* ── shell ── */
+const RENDER={exec:tabExec,audit:tabAudit,cmp:tabCmp,early:tabEarly,profit:tabProfit,param:tabParam,case:tabCase,rec:tabRec};
+function render(){
+  const main=$("#main");main.innerHTML=`<section class="tab on" id="t-${S.tab}"></section>`;RENDER[S.tab]($("#t-"+S.tab));
+  document.querySelectorAll("#tabs button").forEach(b=>b.classList.toggle("on",b.dataset.t===S.tab));
+  document.querySelectorAll("#f-market button").forEach(b=>b.classList.toggle("on",b.dataset.m===S.market));
+  try{localStorage.setItem("exitbt",JSON.stringify({tab:S.tab,market:S.market}))}catch(e){}
+}
+function init(){
+  try{Object.assign(S,JSON.parse(localStorage.getItem("exitbt")||"{}"))}catch(e){}
+  if(!markets().includes(S.market))S.market=markets()[0];
+  const a=D.audit.reconstructed||{};
+  $("#hdr-sub").innerHTML=`생성 ${D.generated_at} · Replay ${D.config.replay_start} 이후 · 기본 평가 ${D.config.default_horizon}거래일 · 실제 주문 없음 · <span class="badge b-rec">RECONSTRUCTED</span> <span class="badge b-snap">SNAPSHOT_ONLY</span> <span class="badge b-port">PORTFOLIO</span>`;
+  $("#tabs").innerHTML=TABS.map(([k,v])=>`<button data-t="${k}">${v}</button>`).join("");
+  $("#tabs").querySelectorAll("button").forEach(b=>b.onclick=()=>{S.tab=b.dataset.t;render()});
+  $("#f-market").innerHTML=markets().map(m=>`<button data-m="${m}">${m}</button>`).join("");
+  $("#f-market").querySelectorAll("button").forEach(b=>b.onclick=()=>{S.market=b.dataset.m;render()});
+  [["#f-type","type"],["#f-period","period"],["#f-h","h"],["#f-group","group"],["#f-fam","fam"]].forEach(([id,k])=>{const e=$(id);e.value=String(S[k]);e.onchange=()=>{S[k]=k==="h"?+e.value:e.value;render()}});
+  $("#theme").onclick=()=>{const r=document.documentElement;const dark=r.dataset.theme?r.dataset.theme==="dark":matchMedia("(prefers-color-scheme: dark)").matches;r.dataset.theme=dark?"light":"dark";render()};
+  let t;addEventListener("resize",()=>{clearTimeout(t);t=setTimeout(render,150)});
+  render();
+}
+init();
+</script>
+</body>
+</html>

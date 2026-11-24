@@ -1,0 +1,71 @@
+# Exit Strategy Backtest — configuration
+# 운영 스캐너·운영 DB와 분리된 연구용 설정. 실제 주문 경로와 연결되지 않는다.
+
+data:
+  cache_dir: backtest/exit_strategy/data/cache
+  history_start: "2018-06-01"        # replay warm-up(2y 창 + MA150) 포함 시작일
+  replay_start: "2021-01-04"         # Replay scan 첫 판정일
+  replay_end: null                   # null → 확보된 마지막 거래일
+  scanner_window_days: 730           # 운영 스캐너가 analyze_stock 에 넘기는 일봉 기간(2y)
+  us_universe: "sp500+nasdaq100"     # 운영 기본값과 동일 (현재 구성종목 → 생존편향 존재)
+  kr_universe: "kospi+kosdaq"
+  us_benchmark: SPY
+  us_condition_indices: [SPY, QQQ]
+  kr_benchmark: "069500"
+  kr_condition_indices: ["069500"]
+
+# 운영 VM 의 .env 는 이 저장소에서 읽지 않는다. 운영 저장값에서 역으로 확인된 임계값만
+# replay 전에 환경변수로 고정한다 (load_dotenv 는 기존 환경변수를 덮지 않음).
+scanner_env_overrides:
+  # 운영 entry_warnings 문구 "주봉 거래량 미달 — 0.73x (돌파 기준 2x)" 로 확인 (로컬 기본값 0.5)
+  BREAKOUT_WEEKLY_VOL_RATIO: "2.0"
+
+snapshot:
+  # Scanner MCP(scanner_signals) 원문 덤프. 운영 DB를 직접 열지 않는다.
+  mcp_dump: backtest/exit_strategy/data/raw/page1.json
+
+entry:
+  # 신호 확인(스캔 완료) 이후 첫 정규장 시가
+  us_scan_utc_hour: 21     # 미국 정규장 마감 후 스캔 (21:30 UTC)
+  kr_scan_utc_hour: 7      # 국내 정규장 마감 후 스캔 (16:10 KST)
+
+horizons: [20, 60, 120]
+default_horizon: 60
+post_exit_days: [5, 10, 20, 60]
+
+costs:
+  # 확인된 계좌 요율이 저장소에 없어 아래는 모두 가정값이다 (보고서에 ASSUMED 표시).
+  US:
+    buy_commission: 0.0025     # 키움 해외주식 표준 온라인 0.25% (이벤트 요율 미반영) — ASSUMED
+    sell_commission: 0.0025    # ASSUMED
+    sell_tax: 0.0000278        # SEC fee 근사 — ASSUMED
+    fx_cost: 0.0               # 환전은 계좌 단위로 발생 → 거래별 비용에서 제외 (별도 표기)
+  KR:
+    buy_commission: 0.00015    # 키움 온라인 0.015% — ASSUMED
+    sell_commission: 0.00015   # ASSUMED
+    sell_tax: 0.0020           # 증권거래세+농특세 2026 기준 0.20% — ASSUMED
+    fx_cost: 0.0
+  slippage_bp: 10
+  slippage_sensitivity_bp: [0, 10, 25, 50]
+
+execution:
+  kr_limit_pct: 0.30           # 가격제한폭 ±30%
+  limit_lock_tolerance: 0.001  # 고가==저가 & 전일 대비 -29.9% 이하 → 하한가 잠김(매도 불가)
+
+portfolio:
+  initial_equity: 1.0
+  max_positions: 10
+  position_pct: 0.10           # 진입 시점 평가금액의 10%
+  allow_same_ticker: false
+
+validation:
+  train: 0.6
+  validation: 0.2
+  test: 0.2
+  walk_forward_train_months: 24
+  walk_forward_test_months: 6
+  bootstrap_block_days: 20
+  bootstrap_samples: 1000
+  min_trades_for_selection: 30
+  # 권장 상태 판정: 선택 전략의 거래당 기대수익이 S01 보다 이 값 이상 낮으면 권장하지 않는다
+  expectancy_tolerance: 0.005
