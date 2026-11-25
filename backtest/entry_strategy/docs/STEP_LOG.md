@@ -53,7 +53,7 @@
   - B01 의 B02 대비 백분위: H60 35~52(기존형 Entry 10), 운영형 2~7.
   - 운영형 B01 과 B01HX 의 수익률이 14% vs 111% 로 갈린다 (경로 의존).
 - 판정: NOT_RECOMMENDED 유지, B01 은 NEED_MORE_DATA (전향적 SHADOW 전용).
-- 실제 account1 보유 규모는 읽기 전용 Portfolio MCP 로 집계값만 확인했다: 보유 평가액이 순자산의 약 28% (구체 금액·종목 수는 기록하지 않음).
+- 실제 account1 보유 규모는 읽기 전용 Portfolio MCP 로 집계값만 확인했다 (실계좌 금액·비율·종목 수는 공개 저장소에 기록하지 않음).
 - 테스트: `tests/test_p7_risk.py` 8건. 테스트 내용은 Entry/Current Heat 차이, 미체결 예약, 현금 하한, Current 차단, 손절가 없는 보유, 손절선 이탈, 손절가 이하 체결 거부, 섹터 기록이다.
 
 ## P8 SHADOW 설계
