@@ -1518,6 +1518,8 @@
         <div class="text-xs" x-text="'현재 run #' + (h.current_run ?? '-') + (h.replay_in_progress || h.building_runs ? ' · 재계산 진행 중 (결과 미완료)' : '')"
           :class="h.replay_in_progress || h.building_runs ? 'text-amber-700 font-semibold' : 'text-slate-600'"></div>
         <div class="text-xs text-red-700 font-semibold" x-show="h.version_block" x-text="'처리 중단: ' + (h.version_block?.message||'')"></div>
+        <div class="text-xs text-slate-600" x-show="h.costs" data-testid="auto-buy-costs"
+          x-text="'비용 기준 ' + (h.costs?.basis||'-') + ' (P7 과 동일: 수수료 ' + pct(h.costs?.simulation?.buy_commission, 2) + '/' + pct(h.costs?.simulation?.sell_commission, 2) + ', 슬리피지 ' + (h.costs?.simulation?.slippage_bp ?? '-') + 'bp, 매도세 ' + (h.costs?.simulation?.sell_tax ?? '-') + ') · 운영 추정 비용 ' + (h.costs?.ops_estimate?.status||'-') + ' — 별도 기록, 손익 미사용'"></div>
       </div>
       <div class="p-2 rounded bg-slate-50 sm:col-span-2" data-testid="auto-buy-scan-reconcile">
         <div class="text-xs text-slate-500">미국 스캔 대조 (수집 시작 이후 운영 ScanLog 기준)</div>
@@ -1629,15 +1631,19 @@
         <div class="font-semibold text-amber-800">가격 미확정 포지션 · 체결 불명 주문 (삭제·위험 0 처리 없음)</div>
         <div class="text-xs mt-1" x-text="'종목 ' + s.unresolved.tickers.join(', ') + ' · 전액 손실 가정 합계 ' + usd(s.unresolved.stress_full_loss_total)"></div>
         <div class="overflow-x-auto"><table class="w-full text-xs mt-1">
-          <thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">계좌</th><th>종목</th><th class="text-right">수량</th><th class="text-right">마지막 확인 종가</th><th>미확정 시작</th><th class="text-right">결측 거래일</th><th>분류(판정 아님)</th><th class="text-right">진입 위험</th><th class="text-right">평가(전액손실 가정)</th></tr></thead>
+          <thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">계좌</th><th>종목</th><th class="text-right">수량</th><th class="text-right">마지막 확인 종가</th><th>미확정 시작</th><th class="text-right">결측 거래일</th><th>분류(판정 아님)</th><th class="text-right">진입 위험</th><th class="text-right">평가(전액손실 가정)</th><th>검토</th></tr></thead>
           <tbody class="divide-y divide-slate-100"><template x-for="(u, i) in s.unresolved.positions" :key="i"><tr>
             <td class="px-1" x-text="u.account_id"></td><td x-text="u.ticker"></td><td class="text-right" x-text="u.qty"></td>
             <td class="text-right" x-text="num(u.last_close) + ' (' + (u.last_close_day||'-') + ')'"></td><td x-text="u.unresolved_since"></td>
             <td class="text-right" x-text="u.missing_trading_days"></td><td x-text="u.classification"></td><td class="text-right" x-text="usd(u.entry_risk)"></td>
-            <td class="text-right" x-text="usd(u.value_at_last_close)"></td></tr></template>
+            <td class="text-right" x-text="usd(u.value_at_last_close)"></td>
+            <td :class="u.manual_review ? 'text-red-700 font-semibold' : 'text-slate-500'" x-text="u.manual_review ? 'MANUAL_REVIEW' : '자동 복구 중'"></td></tr></template>
             <template x-for="(o, i) in s.unresolved.orders" :key="'o'+i"><tr class="text-slate-600">
               <td class="px-1" x-text="o.account_id"></td><td x-text="o.ticker + ' (체결 불명 주문)'"></td><td class="text-right" x-text="o.qty"></td>
-              <td class="text-right" x-text="'지정가 ' + num(o.limit_price)"></td><td x-text="o.target_day"></td><td colspan="4"></td></tr></template></tbody></table></div>
+              <td class="text-right" x-text="'지정가 ' + num(o.limit_price)"></td><td x-text="o.target_day"></td><td colspan="4"></td>
+              <td :class="o.manual_review ? 'text-red-700 font-semibold' : 'text-slate-500'" x-text="o.manual_review ? 'MANUAL_REVIEW' : '자동 복구 중'"></td></tr></template></tbody></table></div>
+        <div class="text-xs text-red-700 mt-1" x-show="(s.unresolved.manual_review_bars||[]).length" data-testid="auto-buy-manual-review"
+          x-text="'수동 검토 대상 (자동 복구 ' + s.unresolved.recovery_window_days + '거래일 경과, 불완전·위험 유지): ' + s.unresolved.manual_review_bars.map(b => b.day + ' ' + b.ticker + ' ' + b.status).join(', ')"></div>
         <div class="text-xs text-slate-500 mt-1" x-text="s.unresolved.policy"></div>
       </div>
     </template>

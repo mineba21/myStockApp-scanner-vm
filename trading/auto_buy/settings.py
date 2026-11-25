@@ -19,8 +19,18 @@ MODES = ("OFF", "SHADOW")
 STRATEGY_VERSION = "SV1"
 FILL_MODEL = "DAILY_T1_100_v1"
 
-# 비용·체결 (P0~P7 과 같은 규칙. 단 매도세는 0 — P7 설정은 0.0000278, docs/auto_buy_shadow.md P-6)
-COSTS = {"buy_commission": 0.0025, "sell_commission": 0.0025, "sell_tax": 0.0, "slippage_bp": 10}
+# 비용 (정책 확정 2026-11-25): 가상 체결·손익은 P7 백테스트와 **같은 비교용 비용**으로 계산한다
+# (backtest/entry_strategy/configs/entry_backtest.yaml costs 와 동일. 대조 테스트가 일치를 확인한다).
+COST_BASIS = "P7_COMPARISON_v1"
+COSTS = {"buy_commission": 0.0025, "sell_commission": 0.0025, "sell_tax": 0.0000278, "slippage_bp": 10}
+# 실제 운영 추정 거래비용 — 비교용 비용과 구분해 기록만 한다. 시뮬레이션 손익에 쓰지 않는다.
+# 증권사 실제 수수료율·환전 비용·규제 수수료를 확인하지 않은 값이며 실제 체결 비용으로 보지 않는다.
+OPS_COST_ESTIMATE = {
+    "buy_commission": 0.0025, "sell_commission": 0.0025, "sell_tax": 0.0, "slippage_bp": 10,
+    "fx_cost": None,
+    "status": "UNVERIFIED",
+    "note": "운영 추정치(미검증). 실제 수수료·환전·SEC fee 미확인. 비교용 손익에 쓰지 않음",
+}
 LIMIT_PCT = 0.010          # 판단 종가 +1.0% 지정가, 다음 정규장 1일
 MIN_R_PCT = 3.0
 MAX_R_PCT = 15.0
@@ -44,6 +54,19 @@ RECOVERY_WINDOW_DAYS = 20            # 결측 일봉을 다시 받아 보는 기
 RECOVERY_MAX_DAYS_PER_RUN = 10       # job 1회에 재조회하는 결측 거래일 수 상한
 MAX_SCAN_HOURS = 6                   # 실행권이 비어 있고 이보다 오래된 RUNNING 스캔은 중단(ABANDONED)으로 본다
 LONG_MISSING_DAYS = 5                # 연속 결측이 이 이상이면 '거래정지·상장폐지 의심'으로 표시 (판정 아님)
+
+# 운영 정책 (2026-11-25 사용자 확정. 바꾸려면 버전을 올린다)
+POLICY = {
+    "unresolved_position": "가격 미확정 포지션은 신규 매수 차단을 유지한다. 가격·위험 확인 없이 자동 청산하거나 차단을 해제하지 않는다",
+    "substitute_decision_scan": False,      # 정규 스캔 실패·불완전일에 대체 결정 스캔을 허용하지 않는다 (NO_DECISION_SCAN)
+    "signal_cutoff_et": SIGNAL_CUTOFF_ET,
+    "bars_cutoff_et": BARS_CUTOFF_ET,
+    "early_close": "신호·데이터 마감은 조기폐장 마감 시각에 맞춰 당긴다 (마감 + 6h / + 7h20m)",
+    "recovery_window_days": RECOVERY_WINDOW_DAYS,
+    "after_recovery_window": "결측 위험·불완전 상태를 유지하고 수동 검토 대상(MANUAL_REVIEW)으로 표시한다",
+    "account_reconcile_tolerance": "max($5, 0.5%) — 초기 검증 기준",
+    "cost_basis": COST_BASIS,
+}
 
 # S5 채택 검토 기준 (평가 시작 전 고정, 표시·검토용. 충족해도 LIVE 를 승인하지 않는다)
 S5_CRITERIA = {
@@ -87,7 +110,8 @@ STRATEGIES = {
 
 
 def frozen_config() -> dict:
-    return {"version": STRATEGY_VERSION, "fill_model": FILL_MODEL, "costs": COSTS, "limit_pct": LIMIT_PCT,
+    return {"version": STRATEGY_VERSION, "fill_model": FILL_MODEL, "costs": COSTS, "cost_basis": COST_BASIS,
+            "ops_cost_estimate": OPS_COST_ESTIMATE, "policy": POLICY, "limit_pct": LIMIT_PCT,
             "profiles": PROFILES, "strategies": STRATEGIES, "b02_seeds": list(B02_SEEDS),
             "inputs": {"regular_trigger": REGULAR_SCAN_TRIGGER, "signal_cutoff_et": SIGNAL_CUTOFF_ET,
                        "bars_cutoff_et": BARS_CUTOFF_ET, "bar_min_delay_min": BAR_MIN_DELAY_MIN,

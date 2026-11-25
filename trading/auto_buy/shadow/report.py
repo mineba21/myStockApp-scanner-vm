@@ -98,7 +98,10 @@ def health(settings: Optional[S.AutoBuySettings] = None) -> dict:
            "journal_configured": bool(settings.journal_path), **{k: st[k] for k in
            ("journal_exists", "schema_ready", "schema_version", "expected_schema_version", "migration_required",
             "schema_error")}, "real_order_path": "없음 (OFF/SHADOW 전용 구현, 주문 모듈 미사용)",
-           "notice": VIRTUAL_NOTICE, "s1_limit_notice": S1_LIMIT_NOTICE}
+           "notice": VIRTUAL_NOTICE, "s1_limit_notice": S1_LIMIT_NOTICE,
+           "costs": {"basis": S.COST_BASIS, "simulation": S.COSTS, "ops_estimate": S.OPS_COST_ESTIMATE,
+                     "note": "가상 손익은 P7 과 같은 비교용 비용으로 계산한다. 운영 추정 비용은 별도 기록(미검증)이며 손익에 쓰지 않는다"},
+           "policy": S.POLICY}
     try:
         from trading.auto_buy.version import logic_hash
         out["logic_hash"] = logic_hash()
@@ -354,7 +357,9 @@ def summary(settings: Optional[S.AutoBuySettings] = None) -> dict:
 def unresolved(db, run, settings, now: Optional[datetime] = None) -> dict:
     """가격 미확정 포지션·체결 불명 주문. 삭제·위험 0 처리 없이 따로 보여 주고 전액 손실 스트레스를 계산한다."""
     from trading.auto_buy.shadow import calendar as CAL
+    from trading.auto_buy.shadow.inputs import expired_missing_bars, recovery_floor
     last = CAL.last_closed_session(now or datetime.now(timezone.utc), settings)
+    floor = recovery_floor(last, settings)
     pos = []
     for p in db.execute("SELECT * FROM ab_positions WHERE run_id=? AND state='OPEN' AND price_status='UNRESOLVED' "
                         "ORDER BY account_id, ticker", (run,)):
@@ -368,16 +373,24 @@ def unresolved(db, run, settings, now: Optional[datetime] = None) -> dict:
                     "entry_risk": max(0.0, p["entry_price"] - p["stop_price"]) * p["qty"],
                     "classification": ("NO_DATA_SUSPECTED_HALT_OR_DELISTING" if n >= S.LONG_MISSING_DAYS
                                        else "GAP_PROVIDER_OR_HALT"),
-                    "evidence": "가격·청산 근거 없음 (체결가를 만들지 않음)"})
+                    "evidence": "가격·청산 근거 없음 (체결가를 만들지 않음)",
+                    "manual_review": bool(floor and since < floor)})
     orders = [dict(o) for o in db.execute(
         "SELECT account_id, ticker, target_day, qty, limit_price, stop_price FROM ab_orders "
         "WHERE run_id=? AND state='FILL_UNKNOWN' ORDER BY target_day", (run,))]
+    for o in orders:
+        o["manual_review"] = bool(floor and date.fromisoformat(o["target_day"]) < floor)
     tickers = sorted({p["ticker"] for p in pos} | {o["ticker"] for o in orders})
-    return {"positions": pos, "orders": orders, "tickers": tickers,
+    review = sorted({p["ticker"] for p in pos if p["manual_review"]} | {o["ticker"] for o in orders if o["manual_review"]})
+    return {"positions": pos, "orders": orders, "tickers": tickers, "manual_review_tickers": review,
+            "manual_review_bars": expired_missing_bars(db, floor),
+            "recovery_window_days": S.RECOVERY_WINDOW_DAYS, "recovery_floor": floor.isoformat() if floor else None,
             "stress_full_loss_total": sum(p["value_at_last_close"] for p in pos)
             + sum(o["qty"] * o["limit_price"] for o in orders),
-            "policy": "미확정 포지션은 신규 매수를 막는다. 차단 해제 조건·장기 미확정 처리(거래정지·상장폐지 확인 시 "
-                      "평가 방법)는 별도 정책 승인 사항이며 이번 구현은 판정하지 않는다."}
+            "policy": S.POLICY["unresolved_position"] + f". 자동 복구는 최근 {S.RECOVERY_WINDOW_DAYS}거래일까지이며, "
+                      "그 이후에도 결측 위험·불완전 상태를 유지하고 수동 검토 대상(MANUAL_REVIEW)으로 표시한다. "
+                      "거래정지·상장폐지·공급자 누락은 판정하지 않는다 (분류는 결측 기간 기준 표시)."}
+
 
 def account_detail(account_id: str, settings: Optional[S.AutoBuySettings] = None) -> Optional[dict]:
     settings = settings or S.AutoBuySettings.from_env()

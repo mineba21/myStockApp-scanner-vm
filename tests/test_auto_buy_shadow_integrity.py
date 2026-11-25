@@ -277,7 +277,8 @@ def test_long_halt_or_delisting_stays_unresolved_with_stress(shadow, prod):
         db.close()
     row = next(x for x in u["positions"] if x["account_id"] == "SV1:P7C:B01")
     assert row["missing_trading_days"] == 6 and row["classification"] == "NO_DATA_SUSPECTED_HALT_OR_DELISTING"
-    assert row["entry_risk"] > 0 and u["stress_full_loss_total"] > 0 and "별도 정책" in u["policy"]
+    assert row["entry_risk"] > 0 and u["stress_full_loss_total"] > 0 and "차단을 유지" in u["policy"]
+    assert row["manual_review"] is False and u["manual_review_bars"] == []        # 아직 자동 복구 기간 안
     last = one(shadow, "SELECT * FROM ab_daily WHERE run_id=? AND account_id='SV1:P7C:B01' ORDER BY day DESC", run)
     assert "PRICE_DATA_MISSING" in json.loads(last["safety_blocks"]) and last["unresolved_value"] > 0
 
@@ -483,3 +484,40 @@ def test_scan_started_before_decision_but_captured_later_is_not_late(shadow, pro
     assert el["decision_role"] == "NON_DECISION" and "NOT_DECISION_SCAN" in json.loads(el["reasons"])
     assert not q(shadow, "SELECT * FROM ab_events WHERE kind='LATE_SCAN_AFTER_DECISION'")
 
+
+def test_missing_beyond_recovery_window_stays_incomplete_and_flags_manual_review(shadow, prod):
+    """정책: 자동 복구 시도는 20거래일. 그 이후에도 결측 위험·불완전·차단을 유지하고 수동 검토 대상으로 표시한다."""
+    from datetime import date
+    from trading.auto_buy.shadow import calendar as CAL
+    scan(prod, utc(D1, 21, 30), [sig("AAA")])
+    job(shadow, prod, Bars({}), evening(D1))
+    scan(prod, utc(D2, 21, 30), [])
+    bars = Bars({D2: {"AAA": BAR_A2}})
+    job(shadow, prod, bars, evening(D2))
+    days = [d.isoformat() for d in CAL.trading_days_between(date.fromisoformat(D3), date(2027, 1, 6), shadow)]
+    assert len(days) > S.RECOVERY_WINDOW_DAYS + 1
+    for d in days:
+        scan(prod, utc(d, 21, 30), [])
+        job(shadow, prod, bars, final(d))
+    run = run_ids(shadow)["CURRENT"]
+    # 복구 기간이 지난 뒤 공급자가 D3 일봉을 돌려줘도 자동 복구·재계산하지 않는다 (재조회 대상 아님)
+    late = Bars({D3: {"AAA": Bar(100, 101, 99, 100)}})
+    job(shadow, prod, late, final(days[-1]))
+    assert not [c for c in late.calls if c[1] == D3]
+    assert len(q(shadow, "SELECT * FROM ab_runs")) == 1
+    assert one(shadow, "SELECT status FROM ab_bars WHERE day=? AND ticker='AAA' ORDER BY input_rev DESC", D3)["status"] == "MISSING"
+    p = one(shadow, "SELECT * FROM ab_positions WHERE run_id=? AND account_id='SV1:P7C:B01'", run)
+    assert p["state"] == "OPEN" and p["price_status"] == "UNRESOLVED"              # 자동 청산 없음
+    last = one(shadow, "SELECT * FROM ab_daily WHERE run_id=? AND account_id='SV1:P7C:B01' ORDER BY day DESC", run)
+    assert last["day"] == days[-1] and last["data_status"] == "INCOMPLETE"
+    assert "PRICE_DATA_MISSING" in json.loads(last["safety_blocks"]) and last["stress_full_loss"] > 0   # 차단·위험 유지
+    ev = q(shadow, "SELECT * FROM ab_events WHERE kind='MANUAL_REVIEW_REQUIRED'")
+    assert len(ev) == 1 and D3 in ev[0]["details"]                                # 한 번만 기록
+    db = connect_rw(shadow.journal_path)
+    try:
+        u = RP.unresolved(db, run, shadow, now=final(days[-1]))
+    finally:
+        db.close()
+    row = next(x for x in u["positions"] if x["account_id"] == "SV1:P7C:B01")
+    assert row["manual_review"] is True and "AAA" in u["manual_review_tickers"]
+    assert {"day": D3, "ticker": "AAA", "status": "MISSING"} in u["manual_review_bars"]

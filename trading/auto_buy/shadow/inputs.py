@@ -28,7 +28,7 @@ from typing import Callable, Optional
 from trading.auto_buy import settings as S
 from trading.auto_buy.shadow import calendar as CAL
 from trading.auto_buy.shadow import engine as EN
-from trading.auto_buy.shadow.store import event, set_runtime, tx
+from trading.auto_buy.shadow.store import event, get_runtime, set_runtime, tx
 from trading.auto_buy.shadow.vfills import Bar
 
 logger = logging.getLogger(__name__)
@@ -203,12 +203,8 @@ def recover_missing(db, provider: Callable, now: datetime, settings=None) -> lis
     last = CAL.last_closed_session(now, settings)
     if last is None:
         return []
-    floor = last
-    for _ in range(S.RECOVERY_WINDOW_DAYS):
-        p = CAL.prev_trading_day(floor, settings)
-        if p is None:
-            break
-        floor = p
+    floor = recovery_floor(last, settings)
+    _flag_manual_review(db, expired_missing_bars(db, floor))
     rows = db.execute(
         "SELECT b.day, b.ticker FROM ab_bars b WHERE b.status IN ('MISSING','INVALID') AND b.day>=? "
         "AND b.input_rev = (SELECT MAX(input_rev) FROM ab_bars x WHERE x.day=b.day AND x.ticker=b.ticker) "
@@ -230,6 +226,42 @@ def recover_missing(db, provider: Callable, now: datetime, settings=None) -> lis
             event(db, "INFO", "bars_recovered", f"결측 일봉 {len(recovered)}건 확인 — 시작일부터 재계산",
                   recovered=recovered[:50])
     return recovered
+
+
+def recovery_floor(last, settings):
+    """자동 복구 대상 기간의 첫 거래일. 이보다 이른 결측은 더 이상 재조회하지 않는다 (수동 검토 대상)."""
+    if last is None:
+        return None
+    floor = last
+    for _ in range(S.RECOVERY_WINDOW_DAYS):
+        p = CAL.prev_trading_day(floor, settings)
+        if p is None:
+            break
+        floor = p
+    return floor
+
+
+def expired_missing_bars(db, floor) -> list:
+    """복구 기간이 지난 미복구 일봉 (최신 리비전이 MISSING·INVALID). 삭제·정상 처리 없이 수동 검토 대상으로 보인다."""
+    if floor is None:
+        return []
+    return [{"day": r[0], "ticker": r[1], "status": r[2]} for r in db.execute(
+        "SELECT b.day, b.ticker, b.status FROM ab_bars b WHERE b.status IN ('MISSING','INVALID') AND b.day<? "
+        "AND b.input_rev = (SELECT MAX(input_rev) FROM ab_bars x WHERE x.day=b.day AND x.ticker=b.ticker) "
+        "ORDER BY b.day, b.ticker", (floor.isoformat(),))]
+
+
+def _flag_manual_review(db, expired: list) -> None:
+    """복구 기간이 지난 결측을 한 번씩 이벤트로 남긴다. 상태(불완전·위험·차단)는 바꾸지 않는다."""
+    seen = set(map(tuple, get_runtime(db, "manual_review_flagged") or []))
+    new = [(b["day"], b["ticker"]) for b in expired if (b["day"], b["ticker"]) not in seen]
+    if not new:
+        return
+    with tx(db):
+        event(db, "WARN", "MANUAL_REVIEW_REQUIRED",
+              f"자동 복구 기간({S.RECOVERY_WINDOW_DAYS}거래일)이 지난 결측 일봉 {len(new)}건 — 불완전·위험 유지, 수동 검토 필요",
+              bars=new[:50])
+        set_runtime(db, "manual_review_flagged", sorted(seen | set(new)))
 
 
 def replay(db, provider: Callable, reason: str, settings=None) -> dict:

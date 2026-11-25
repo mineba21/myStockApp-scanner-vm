@@ -3,8 +3,10 @@
 입력은 하나: 합성 OHLC 와 후보 목록. P7 쪽은 백테스트 자체 함수(fills.build_orders/build_exits → portfolio.make_input →
 risk_portfolio.run)로, SHADOW 쪽은 운영 엔진(trading.auto_buy.shadow.engine.process_account_day)으로 계산한다.
 
-P7 프로필 중 운영 가정과 다른 부분은 운영(SHADOW) 기준으로 맞춘다 (차이·원인은 문서와 아래 상수에 기록).
-- 비용: P7 configs 의 sell_tax 0.0000278 (SEC fee 가정) ↔ SHADOW COSTS sell_tax 0.0 → 운영 COSTS 로 맞춤
+비용은 정책(2026-11-25)대로 양쪽이 같다: P7 은 configs/entry_backtest.yaml 의 costs 를 그대로 쓰고, SHADOW 는
+settings.COSTS(비교용 비용 P7_COMPARISON_v1)를 쓴다. 두 값이 같은지는 test_comparison_costs_identical_to_p7 이 확인한다.
+(운영 추정 비용 settings.OPS_COST_ESTIMATE 는 별도 기록이며 이 대조와 시뮬레이션 손익에 쓰지 않는다.)
+P7 프로필 중 다음 표현 차이는 비교 때 맞춘다 (원인은 문서에 기록).
 - 지정가: P7 은 종가×1.01 미반올림, SHADOW 는 센트 반올림 → 종가를 정수 달러로 만들어 두 값이 같게 함
 - Entry Heat 기록 시점: P7 rec 은 판단 전, SHADOW ab_daily 는 판단(신규 예약) 후 → 비교 때 그날 신규 예약 위험을 뺌
 - 체결 당일 손절 사유: P7 'STOP'(day0 플래그) ↔ SHADOW 'STOP_DAY0' → 같은 사유로 대응
@@ -131,7 +133,7 @@ def _shadow(tmp_path, days, tickers, ohlc, cand):
 @pytest.mark.parametrize("seed", [7, 11, 23])
 def test_shadow_engine_matches_p7_on_identical_inputs(tmp_path, seed, monkeypatch):
     days, tickers, frames, ohlc, cands = _data(seed)
-    cand, p7 = _p7(days, frames, cands, S.COSTS)                            # P7 비용을 운영 COSTS 로 맞춤
+    cand, p7 = _p7(days, frames, cands, _p7_config_costs())                 # P7 은 자체 설정 비용 그대로
     db, run = _shadow(tmp_path, days, tickers, ohlc, cand)
     try:
         # 체결·손절·거래 목록
@@ -184,11 +186,16 @@ def test_shadow_engine_matches_p7_on_identical_inputs(tmp_path, seed, monkeypatc
         db.close()
 
 
-def test_cost_assumption_difference_is_explicit():
-    """P7 설정 비용과 운영 SHADOW 비용의 차이를 숨기지 않는다 (대조는 운영 기준으로 맞춰 수행)."""
+def _p7_config_costs() -> dict:
     import yaml
     from pathlib import Path
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "entry_backtest.yaml").read_text())
-    p7c = {k: cfg["costs"][k] for k in S.COSTS}
-    diff = {k: (p7c[k], S.COSTS[k]) for k in S.COSTS if p7c[k] != S.COSTS[k]}
-    assert diff == {"sell_tax": (0.0000278, 0.0)}, json.dumps(diff)
+    return dict(cfg["costs"])
+
+
+def test_comparison_costs_identical_to_p7():
+    """정책: P7 과 SHADOW 비교에는 같은 거래비용 가정을 쓴다. 운영 추정 비용은 따로 기록한다 (비교·손익 미사용)."""
+    p7c = _p7_config_costs()
+    assert {k: p7c[k] for k in S.COSTS} == S.COSTS, json.dumps({"p7": p7c, "shadow": S.COSTS})
+    assert S.COST_BASIS == "P7_COMPARISON_v1" and S.frozen_config()["cost_basis"] == S.COST_BASIS
+    assert S.OPS_COST_ESTIMATE["status"] == "UNVERIFIED" and "ops_cost_estimate" in S.frozen_config()
