@@ -9,6 +9,7 @@
 - 스캐너 MCP/조회 연결: `docs/scanner_read_mcp.md`를 먼저 읽는다. 조회키의 계좌·주문 권한을 확대하지 않는다.
 - 스캐너 후보 매수(account1 미국, account4 국내): `docs/scanner_buy_orders.md`를 먼저 읽는다. 미검증 항목과 시장별 전송 스위치를 유지한다.
 - account1 미국 S01 자동 손절: `docs/auto_stop_sell.md`를 먼저 읽는다. 기본 OFF, 자동 취소·재주문 기본 꺼짐을 유지한다. 저널 스키마는 저널 전용 Migration(`scripts.auto_stop_journal_migrate`)으로만 만들고 런타임(스케줄러·API·store)에서 DDL을 실행하지 않는다.
+- account1 미국 Scanner 자동매수 SHADOW: `docs/auto_buy_shadow.md`를 먼저 읽는다. 기본 OFF, LIVE 미구현·거부, 가상 계좌만. SHADOW 저널은 전용 Migration으로만 만들고 런타임에서 DDL·파일 생성을 하지 않는다. 운영 DB에 표를 추가하지 않는다.
 - 계좌 현황 MCP: `docs/portfolio_read_mcp.md`를 먼저 읽는다. `portfolio:read`는 스캐너·사이트·주문 자격 증명과 분리한다.
 - ETF는 최신 사용자 결정에 따라 차액 재분배한다. 전량매도 방식으로 되돌리지 않는다.
 - 모의 응답과 격리 테스트를 사용한다. 테스트를 위해 실주문이나 운영 DB를 사용하지 않는다.

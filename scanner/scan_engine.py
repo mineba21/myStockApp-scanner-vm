@@ -564,6 +564,7 @@ def _run_scan_locked(market, universe, triggered_by):
         db.commit()
         if capture is not None:
             capture.safe('finish')
+        _auto_buy_snapshot_hook(log.id, market)
 
         return {"status": "done", "total_scanned": total_scanned,
                 "signals_found": len(buy_signals),
@@ -584,6 +585,25 @@ def _run_scan_locked(market, universe, triggered_by):
 
     finally:
         db.close()  # running flag is released by run_scan() once this returns/raises
+
+
+def _auto_buy_snapshot_hook(scan_log_id: int, market: str) -> None:
+    """자동매수 SHADOW 불변 스냅샷 (docs/auto_buy_shadow.md). 기본 OFF 면 아무것도 하지 않는다.
+
+    스캔 DONE 커밋 직후, 이 스캔의 실행권 안(다른 스캔이 시작될 수 없음)에서 별도 SHADOW SQLite 에 복사만 한다.
+    운영 DB 는 읽기만 하고 Scanner 판정·저장·알림에는 영향을 주지 않는다. 실패해도 스캔 결과는 그대로다.
+    """
+    if market not in ("US", "ALL"):
+        return
+    try:
+        from trading.auto_buy.settings import AutoBuySettings
+        settings = AutoBuySettings.from_env()
+        if not settings.shadow_enabled:
+            return
+        from trading.auto_buy.shadow.snapshot import capture_scan_log
+        capture_scan_log(scan_log_id, source="HOOK", settings=settings)
+    except Exception as exc:  # Scanner 보호: 어떤 실패도 스캔 결과에 영향 없음
+        logger.warning("자동매수 SHADOW 스냅샷 hook 실패: %s", type(exc).__name__)
 
 
 def _append_entry_warning(signal: dict, message: str) -> None:
