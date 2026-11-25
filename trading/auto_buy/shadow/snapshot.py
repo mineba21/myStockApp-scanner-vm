@@ -231,6 +231,15 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
         trig = getattr(log, "triggered_by", None)
         commit, thash, lhash, now = scanner_commit(), threshold_hash(), _logic_hash(), time.time()
         with tx(db):
+            if abandoned:
+                # 중단 후보 선정 뒤 기록 직전에 원본이 끝났으면 ABANDONED 로 저장하지 않는다 (다음 보충 수집이 정상 처리)
+                session.expire_all()
+                fresh = session.get(ScanLog, scan_log_id)
+                if fresh is None or fresh.finished_at is not None or fresh.status != "RUNNING":
+                    return {"skipped": "abandoned_candidate_finished", "scan_log_id": scan_log_id,
+                            "status": getattr(fresh, "status", None)}
+            if db.execute("SELECT 1 FROM ab_scan_captures WHERE scan_log_id=?", (scan_log_id,)).fetchone():
+                return {"duplicate": True, "scan_log_id": scan_log_id}
             collection_start = get_runtime(db, "collection_started_at")
             if collection_start is None:
                 collection_start = log.started_at.isoformat()
@@ -250,6 +259,10 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
                 notes.append("비정상 종료로 RUNNING 에 남은 스캔 (매수 판단 미사용, 일부 행만 저장됐을 수 있음)")
             if late:
                 notes.append("당일 후보 확정 이후 스캔 — 당일 후보에 추가하지 않음 (LATE_SCAN_AFTER_DECISION)")
+            # 신호 마감 이후에 '새로 시작한' 스캔은 결정 스캔이 될 수 없다 (마감 전에 시작해 늦게 끝난 스캔은 될 수 있음)
+            after_cutoff = bool(dayk and not intraday and not late and started_after_cutoff(log.started_at, day, settings))
+            if after_cutoff:
+                notes.append("신호 마감 이후 시작한 스캔 — 결정 스캔으로 쓰지 않음 (SCAN_AFTER_SIGNAL_CUTOFF)")
             db.execute("INSERT INTO ab_scan_captures(scan_log_id, scan_market, scan_status, triggered_by, "
                        "scan_started_at, scan_finished_at, trading_day, intraday, source, complete, recoverability, "
                        "late_after_decision, rows_captured, strict_rows, signals_found, affected_rows, note, captured_at) "
@@ -294,14 +307,14 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
             # 당일 후보 확정: 정규 스캔·DONE·완전 수집·장 마감 후, 아직 확정 전일 때만
             frozen_now = False
             if (frozen is None and status == "DONE" and complete and not intraday and dayk
-                    and trig == S.REGULAR_SCAN_TRIGGER):
+                    and trig == S.REGULAR_SCAN_TRIGGER and not after_cutoff):
                 sig_hash = hashlib.sha256(json.dumps(sorted(
                     r_[0] for r_ in db.execute("SELECT row_sha256 FROM ab_signal_snapshots WHERE scan_log_id=?",
                                                 (scan_log_id,)))).encode()).hexdigest()[:16]
                 db.execute("INSERT INTO ab_day_inputs(day, decision_status, decision_scan_log_id, frozen_at, frozen_by, "
                            "signal_set_hash, strategy_version, config_hash, logic_hash) VALUES (?,?,?,?,?,?,?,?,?)",
                            (dayk, "FROZEN", scan_log_id, now, source, sig_hash, S.STRATEGY_VERSION,
-                            S.config_hash(), lhash))
+                            S.config_hash(settings), lhash))
                 frozen_now = True
             if late:
                 decided = set()
@@ -315,6 +328,10 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
                       f"{len(new)}건은 당일 후보에 추가하지 않음", day=dayk, scan_log_id=scan_log_id,
                       scan_started_at=_iso(log.started_at), triggered_by=trig, new_strict_tickers=new[:50],
                       decision_status=frozen["decision_status"])
+            if after_cutoff:
+                event(db, "WARN", "SCAN_AFTER_SIGNAL_CUTOFF",
+                      f"{dayk} 신호 마감 이후 시작한 스캔 #{scan_log_id} — 결정 스캔으로 쓰지 않음 (Strict {strict_rows}건)",
+                      day=dayk, scan_log_id=scan_log_id, scan_started_at=_iso(log.started_at), triggered_by=trig)
             set_runtime(db, "last_capture", {"scan_log_id": scan_log_id, "source": source, "rows": len(rows),
                                              "complete": complete, "status": status, "at": now})
             if not complete:
@@ -327,12 +344,53 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
         session.close()
 
 
+def started_after_cutoff(started_at, day, settings) -> bool:
+    from trading.auto_buy.shadow.inputs import signal_cutoff
+    cut = signal_cutoff(day, settings)
+    return cut is not None and CAL._utc(started_at) >= cut
+
+
+def decision_scan_pending(db, day, settings, *, session_factory=None, scan_running: bool = False) -> bool:
+    """신호 마감이 지났어도 그 거래일 결정 스캔을 기다려야 하는지.
+
+    마감 전에 시작한 그날 정규 스캔이 아직 끝나지 않았거나(실행 중), 끝났지만 아직 수집되지 않았으면 기다린다.
+    마감 이후 새로 시작한 스캔은 기다리지 않는다 (결정 스캔이 될 수 없음). 운영 DB 를 읽지 못하면 기다린다.
+    """
+    from database.models import ScanLog, SessionLocal
+    from trading.auto_buy.shadow.inputs import signal_cutoff
+    close, cut = CAL.close_at(day, settings), signal_cutoff(day, settings)
+    if close is None or cut is None:
+        return False
+    naive = lambda dt: dt.astimezone(timezone.utc).replace(tzinfo=None)  # noqa: E731
+    try:
+        session = (session_factory or SessionLocal)()
+        try:
+            logs = session.query(ScanLog.id, ScanLog.status).filter(
+                ScanLog.market.in_(US_SCAN_MARKETS), ScanLog.triggered_by == S.REGULAR_SCAN_TRIGGER,
+                ScanLog.started_at >= naive(close), ScanLog.started_at < naive(cut)).all()
+        finally:
+            session.close()
+    except Exception:
+        return True
+    captured = {r[0] for r in db.execute("SELECT scan_log_id FROM ab_scan_captures")}
+    for lid, status in logs:
+        if lid in captured:
+            continue
+        if status == "DONE" or (status == "RUNNING" and scan_running):
+            return True
+    return False
+
+
 def catch_up(settings: AutoBuySettings, *, session_factory=None, scan_running: Callable[[], bool] = lambda: False,
              start_day: Optional[str] = None, now: Optional[datetime] = None) -> list[dict]:
     """HOOK 이 놓친 스캔과 중단(RUNNING 잔존) 스캔을 보충하고, 운영 스캔 실행 건수와 수집 이력을 대조한다.
 
     스캔 진행 중이면 아무것도 하지 않는다 (진행 중 스캔을 ABANDONED 로 오인하지 않음).
     ABANDONED 판정: 실행권이 비어 있고, (이후 다른 스캔 기록이 있음 | 현재 프로세스 시작 이전에 시작 | MAX_SCAN_HOURS 경과).
+    기록 직전에 원본 상태를 다시 읽어 그 사이 끝난 스캔은 ABANDONED 로 저장하지 않는다.
+
+    전제: Scanner 는 이 앱 프로세스 하나에서만 실행된다 (실행권·``scan_status`` 가 프로세스 안에서만 유효하고,
+    ScanLog ID 순서를 실행 순서로 해석한다). 별도 프로세스·서버에서 같은 운영 DB 로 스캔하면 이 판정은 성립하지 않는다.
     """
     if not settings.shadow_enabled or scan_running():
         return []

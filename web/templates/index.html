@@ -1571,7 +1571,7 @@
             <td class="text-right" x-text="num(c.mdd_worsening_pp)"></td><td class="text-right" x-text="num(c.b02_percentile, 0) + (c.ranking_review ? ' 검토' : '')"></td>
             <td x-text="c.avg_r_ci95 ? num(c.avg_r_ci95[0]) + ' ~ ' + num(c.avg_r_ci95[1]) : '-'"></td>
             <td class="text-right" x-text="pct(c.filter_effect_return)"></td><td class="text-right" x-text="pct(c.ranking_effect_vs_b02_median)"></td>
-            <td class="text-right" :class="c.safety_violations ? 'text-red-700 font-semibold' : ''" x-text="c.safety_violations"></td></tr></template></tbody></table></div>
+            <td class="text-right" :class="c.safety_violations ? 'text-red-700 font-semibold' : ''" :title="c.safety_breakdown ? ('실제 행 ' + c.safety_breakdown.non_virtual_rows + ' · 오류 이벤트 ' + c.safety_breakdown.error_events + ' · 미수집 스캔 ' + c.safety_breakdown.uncaptured_scans + ' · heartbeat 지연 ' + c.safety_breakdown.heartbeat_stale + ' · 버전 차단 ' + c.safety_breakdown.version_block) : ''" x-text="c.safety_violations"></td></tr></template></tbody></table></div>
         <div class="text-xs text-slate-500 mt-1">미청산 평가손익 포함 · 필터 효과 = B01 − B00-N · 순위 효과 = B01 − B02 중앙값 · 40건 확보만으로 LIVE 승인 없음</div>
       </div>
     </template>

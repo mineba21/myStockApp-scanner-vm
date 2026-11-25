@@ -5,6 +5,7 @@
 - ``AUTO_BUY_SHADOW_JOURNAL_PATH``: SHADOW 전용 SQLite 절대경로. 기본값 없음(미설정이면 SHADOW 도 동작하지 않음).
   운영 주문 저널(SCANNER_ORDER_JOURNAL_PATH)·ETF 저널(ALLOCATION_JOURNAL_PATH)과 같은 파일이면 거부한다.
 - 전략·위험 설정은 코드에 동결한다 (``STRATEGY_VERSION``). 바꾸려면 버전을 올려 새 가상 계좌로 시작한다.
+  추가 휴장일·조기폐장일(``AUTO_BUY_US_EXTRA_CLOSED_DATES``·``AUTO_BUY_US_EXTRA_EARLY_CLOSE_DATES``)도 설정 해시에 들어간다.
 """
 from __future__ import annotations
 
@@ -109,8 +110,14 @@ STRATEGIES = {
 }
 
 
-def frozen_config() -> dict:
-    return {"version": STRATEGY_VERSION, "fill_model": FILL_MODEL, "costs": COSTS, "cost_basis": COST_BASIS,
+def calendar_overrides(settings: Optional["AutoBuySettings"] = None) -> dict:
+    """추가 휴장일·조기폐장일 설정. 주문 목표일·마감 시각을 바꾸므로 설정 해시에 넣는다 (바꾸면 버전을 올린다)."""
+    s = settings or AutoBuySettings.from_env()
+    return {"extra_closed": sorted(s.extra_closed_dates), "extra_early_close": sorted(s.extra_early_close_dates)}
+
+
+def frozen_config(settings: Optional["AutoBuySettings"] = None) -> dict:
+    return {"version": STRATEGY_VERSION, "calendar_overrides": calendar_overrides(settings), "fill_model": FILL_MODEL, "costs": COSTS, "cost_basis": COST_BASIS,
             "ops_cost_estimate": OPS_COST_ESTIMATE, "policy": POLICY, "limit_pct": LIMIT_PCT,
             "profiles": PROFILES, "strategies": STRATEGIES, "b02_seeds": list(B02_SEEDS),
             "inputs": {"regular_trigger": REGULAR_SCAN_TRIGGER, "signal_cutoff_et": SIGNAL_CUTOFF_ET,
@@ -123,8 +130,8 @@ def frozen_config() -> dict:
                    "no chase warning, stop <= 15% (REBOUND: no pivot conditions)"}
 
 
-def config_hash() -> str:
-    raw = json.dumps(frozen_config(), sort_keys=True, ensure_ascii=False, default=str)
+def config_hash(settings: Optional["AutoBuySettings"] = None) -> str:
+    raw = json.dumps(frozen_config(settings), sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -140,10 +147,14 @@ def account_ids() -> list[tuple[str, str, str, Optional[int]]]:
 
 
 def _same_file(a: str, b: str) -> bool:
+    """같은 경로(심볼릭 링크 해석)이거나, 둘 다 있으면 같은 파일(하드링크 포함, inode 비교)인지."""
     if not a or not b:
         return False
     try:
-        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+        pa, pb = Path(a).expanduser(), Path(b).expanduser()
+        if pa.resolve() == pb.resolve():
+            return True
+        return pa.exists() and pb.exists() and os.path.samefile(pa, pb)
     except OSError:
         return False
 

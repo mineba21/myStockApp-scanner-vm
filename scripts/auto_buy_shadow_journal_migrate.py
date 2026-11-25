@@ -8,6 +8,8 @@
 - ``--env-file``: .env 를 셸에서 실행(source)하지 않고 ``dotenv_values`` 로 필요한 경로 키만 읽는다. 값은 출력하지 않는다.
 - ``--check``: 파일·테이블을 만들지 않는다. 파일이 없으면 종료 코드 2. ``--check --allow-create`` 는 생성 가능 여부
   (상위 디렉터리 존재·쓰기 가능, 다른 저널과 겹치지 않음)만 확인하고 아무것도 만들지 않는다.
+  기존 파일이 최신 스키마가 아니면 임시 사본에서 upgrade 를 시험해 실패하면 종료 코드 2 (불완전한 ab_* 스키마 등).
+- 다른 저널과의 동일성은 경로(심볼릭 링크 해석)와 inode(하드링크)로 비교한다.
 - 권한: 실행 중 ``umask 077``. 새 저널은 ``O_CREAT|O_EXCL`` 0600 으로 먼저 만들고(심볼릭 링크 따라가지 않음),
   완료 후 저널과 ``-journal``/``-wal``/``-shm`` 부속 파일, 보고서를 0600 으로 맞춘다.
 
@@ -58,6 +60,25 @@ def _create_exclusive(path: str) -> None:
     os.close(fd)
 
 
+def dry_run_upgrade(journal: str) -> dict:
+    """읽기 전용 원본을 임시 디렉터리에 복사(SQLite backup API)해 upgrade 를 시험한다. 원본은 바꾸지 않는다."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="ab_dryrun_") as tmp:
+        copy = os.path.join(tmp, "journal_copy.sqlite3")
+        src = sqlite3.connect(Path(journal).as_uri() + "?mode=ro", uri=True)
+        dst = sqlite3.connect(copy)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        try:
+            version = upgrade_journal(copy)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        return {"ok": True, "schema_version": version}
+
+
 def _secure(path: str) -> list:
     done = []
     for suffix in ("",) + SIDECARS:
@@ -105,8 +126,14 @@ def run(journal: str, backup_dir: str, *, allow_create=False, check=False) -> di
             raise Abort(2, f"무결성 검사 실패: {integ}")
         if foreign:
             raise Abort(2, f"자동매수 SHADOW 저널이 아닌 객체가 있습니다 (다른 DB 로 보임): {foreign[:10]}")
+    if exists and not rep["status_before"]["schema_ready"]:
+        # 실제 upgrade 가능 여부를 원본을 건드리지 않고 임시 사본에서 확인한다 (불완전한 ab_* 스키마 등)
+        rep["dry_run"] = dry_run_upgrade(journal)
+        if not rep["dry_run"]["ok"]:
+            raise Abort(2, f"사본 upgrade 시험 실패 — 이 저널은 Migration 할 수 없습니다: {rep['dry_run']['error']}")
     if check:
-        rep["result"] = "CHECK_ONLY" if exists else "CHECK_ONLY_WOULD_CREATE"
+        rep["result"] = ("CHECK_ONLY_ALREADY_CURRENT" if exists and rep["status_before"]["schema_ready"]
+                         else "CHECK_ONLY" if exists else "CHECK_ONLY_WOULD_CREATE")
         return rep
     if exists and rep["status_before"]["schema_ready"]:
         rep["result"] = "ALREADY_CURRENT"

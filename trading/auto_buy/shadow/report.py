@@ -13,6 +13,7 @@ from typing import Optional
 
 from trading.auto_buy import settings as S
 from trading.auto_buy.shadow.schema import ro_connect, schema_status
+from trading.auto_buy.shadow.vfills import unit_proceeds
 
 VIRTUAL_NOTICE = ("모든 수치는 가상 계좌(SHADOW)이며 실제 주문·체결·실현손익이 아닙니다. "
                   "가상 체결은 일봉 기준(DAILY_T1_100_v1)이라 장중 호가·부분체결·주문 거부를 재현하지 않습니다.")
@@ -94,7 +95,7 @@ def health(settings: Optional[S.AutoBuySettings] = None) -> dict:
     st = schema_status(settings.journal_path) if settings.journal_path else schema_status(None)
     out = {"mode": settings.mode, "requested_mode": settings.requested_mode, "live_requested": settings.live_requested,
            "live_supported": False, "config_error": settings.config_error, "shadow_enabled": settings.shadow_enabled,
-           "strategy_version": S.STRATEGY_VERSION, "config_hash": S.config_hash(), "fill_model": S.FILL_MODEL,
+           "strategy_version": S.STRATEGY_VERSION, "config_hash": S.config_hash(settings), "fill_model": S.FILL_MODEL,
            "journal_configured": bool(settings.journal_path), **{k: st[k] for k in
            ("journal_exists", "schema_ready", "schema_version", "expected_schema_version", "migration_required",
             "schema_error")}, "real_order_path": "없음 (OFF/SHADOW 전용 구현, 주문 모듈 미사용)",
@@ -142,6 +143,13 @@ def _mdd(eq: list) -> float:
     return mdd
 
 
+def profit_factor(pnls) -> Optional[float]:
+    """거래별 총이익 / 총손실 (P7 ``profit_factor``·``profit_factor_incl_open`` 과 같은 정의). 총손실 0 이면 None."""
+    gw = sum(x for x in pnls if x > 0)
+    gl = -sum(x for x in pnls if x < 0)
+    return gw / gl if gl > 0 else None
+
+
 def account_metrics(db, acc, run) -> dict:
     daily = db.execute("SELECT * FROM ab_daily WHERE run_id=? AND account_id=? ORDER BY day",
                        (run, acc["id"])).fetchall()
@@ -152,23 +160,21 @@ def account_metrics(db, acc, run) -> dict:
                         (run, acc["id"])).fetchall()
     opened = db.execute("SELECT * FROM ab_positions WHERE run_id=? AND account_id=? AND state='OPEN'",
                         (run, acc["id"])).fetchall()
-    gw = sum(p["pnl"] for p in closed if p["pnl"] > 0)
-    gl = -sum(p["pnl"] for p in closed if p["pnl"] < 0)
     rs = [p["r_multiple"] for p in closed if p["r_multiple"] is not None]
-    open_r, open_pnl = [], 0.0
+    # 미청산 평가: P7 과 같이 종목별로 매도 비용(수수료+매도세+슬리피지)을 뺀 가치로 평가하고, 상계하지 않는다
+    open_r, open_pnls = [], []
     for p in opened:
         px = p["last_close"] or p["entry_price"]
-        val = p["qty"] * px * (1 - S.COSTS["slippage_bp"] / 1e4) * (1 - S.COSTS["sell_commission"])
-        open_pnl += val - p["cost"]
+        pnl = p["qty"] * unit_proceeds(px) - p["cost"]
+        open_pnls.append(pnl)
         if p["risk0"] > 0:
-            open_r.append((val - p["cost"]) / p["risk0"])
+            open_r.append(pnl / p["risk0"])
+    open_pnl = sum(open_pnls)
     oc = {r["state"]: r["n"] for r in db.execute(
         "SELECT state, COUNT(*) n FROM ab_orders WHERE run_id=? AND account_id=? GROUP BY state", (run, acc["id"]))}
     blocks = db.execute("SELECT reason, COUNT(*) n FROM ab_decisions WHERE run_id=? AND account_id=? "
                         "AND outcome!='ORDERED' GROUP BY reason ORDER BY n DESC", (run, acc["id"])).fetchall()
     last = daily[-1] if daily else None
-    pf_open_w = gw + max(open_pnl, 0.0)
-    pf_open_l = gl + max(-open_pnl, 0.0)
     return {
         "id": acc["id"], "profile": acc["profile"], "strategy": acc["strategy"], "seed": acc["seed"],
         "start_day": acc["start_day"], "initial": base, "days": len(daily),
@@ -178,8 +184,8 @@ def account_metrics(db, acc, run) -> dict:
         "cum_return": (eq[-1] / base - 1) if eq and base else None,
         "mdd": _mdd(eq) if eq else None,
         "closed_trades": len(closed), "open_positions": len(opened),
-        "pf": (gw / gl) if gl > 0 else (None if not closed else math.inf if gw > 0 else None),
-        "pf_incl_open": (pf_open_w / pf_open_l) if pf_open_l > 0 else (math.inf if pf_open_w > 0 else None),
+        "pf": profit_factor([p["pnl"] for p in closed]),
+        "pf_incl_open": profit_factor([p["pnl"] for p in closed] + open_pnls),     # 미청산은 종목별로, 상계 없음
         "open_pnl": open_pnl if opened else 0.0,
         "avg_r_closed": sum(rs) / len(rs) if rs else None,
         "avg_r_incl_open": (sum(rs) + sum(open_r)) / (len(rs) + len(open_r)) if rs or open_r else None,
@@ -222,7 +228,20 @@ def _ci95(vals: list) -> Optional[list]:
     return [m - h, m + h]
 
 
-def s5_panel(db, metrics: list, b02: dict, period: dict, safety_violations: int) -> dict:
+def safety_violations(db, health: dict) -> dict:
+    """S5 안전 위반 집계. 실제 행 혼입뿐 아니라 job·스냅샷·재계산 오류, 미수집 스캔, heartbeat 지연, 버전 차단도 센다."""
+    errors = {r[0]: r[1] for r in db.execute("SELECT kind, COUNT(*) FROM ab_events WHERE severity='ERROR' GROUP BY kind")}
+    rec = health.get("scan_reconciliation") or {}
+    out = {"non_virtual_rows": int(health.get("non_virtual_rows") or 0),
+           "error_events": int(sum(errors.values())), "error_kinds": errors,
+           "uncaptured_scans": int(rec.get("uncaptured") or 0),
+           "heartbeat_stale": int((health.get("heartbeat") or {}).get("status") == "STALE"),
+           "version_block": int(bool(health.get("version_block")))}
+    out["total"] = sum(v for k, v in out.items() if k != "error_kinds")
+    return out
+
+
+def s5_panel(db, metrics: list, b02: dict, period: dict, safety: dict) -> dict:
     """S5 기준(평가 시작 전 고정)에 대한 현재 상태. 판정은 고정: NOT_RECOMMENDED 유지, B01 = NEED_MORE_DATA."""
     crit = S.S5_CRITERIA
     out = {"criteria": crit, "profiles": {}, "verdict": "NOT_RECOMMENDED", "b01_status": "NEED_MORE_DATA",
@@ -263,7 +282,8 @@ def s5_panel(db, metrics: list, b02: dict, period: dict, safety_violations: int)
             "ranking_review": (None if b02.get(prof, {}).get("b01_percentile") is None else
                                b02[prof]["b01_percentile"] >= crit["performance"]["b02_percentile_rank_review"]),
             "avg_r_ci95": _ci95(b01["r_values_incl_open"]),
-            "safety_violations": safety_violations,
+            "safety_violations": safety["total"],
+            "safety_breakdown": safety,
             "data_incomplete_days": period["data_incomplete_days"],
             "filter_effect_return": (None if b01["cum_return"] is None or b00n["cum_return"] is None
                                      else b01["cum_return"] - b00n["cum_return"]),
@@ -314,7 +334,7 @@ def summary(settings: Optional[S.AutoBuySettings] = None) -> dict:
         b01_closed = {m["profile"]: m["closed_trades"] for m in metrics if m["strategy"] == "B01"}
         out["validation"] = {**period, "b01_closed_trades": b01_closed,
                              "notes": "40건 확보만으로 LIVE 를 자동 승인하지 않는다. 표본 부족·시장 편중이면 기간을 연장한다."}
-        out["s5"] = s5_panel(db, metrics, out["b02"], period, out["health"].get("non_virtual_rows") or 0)
+        out["s5"] = s5_panel(db, metrics, out["b02"], period, safety_violations(db, out["health"]))
         out["days"] = [dict(d) | {"notes": _loads(d["notes"], [])} for d in days[-30:]]
         out["day_inputs"] = [dict(r) | {"account_snapshot": None} for r in db.execute(
             "SELECT day, decision_status, decision_scan_log_id, frozen_by, signal_set_hash, account_status, "

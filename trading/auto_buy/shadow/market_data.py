@@ -21,10 +21,52 @@ logger = logging.getLogger(__name__)
 YF_PROVIDER = "yfinance_daily_auto_adjust"
 
 
-def yfinance_bars(tickers: list, day: str) -> dict:
+OHLC = ("Open", "High", "Low", "Close")
+
+
+def ticker_frame(raw, ticker: str):
+    """yfinance download 결과에서 한 종목의 OHLC 프레임을 꺼낸다 (없으면 None).
+
+    단일·복수 종목 모두 처리한다. yfinance 버전에 따라 단일 종목도 ``(Ticker, Price)`` 또는 ``(Price, Ticker)``
+    다중 열로 오고, 예전 버전은 단일 종목이면 평평한 열(Open/High/...)로 온다.
+    """
+    if raw is None or getattr(raw, "empty", True):
+        return None
+    cols = raw.columns
+    if getattr(cols, "nlevels", 1) > 1:
+        for level in range(cols.nlevels):
+            if ticker in cols.get_level_values(level):
+                df = raw.xs(ticker, axis=1, level=level)
+                return df if all(c in df.columns for c in OHLC) else None
+        return None
+    return raw if all(c in cols for c in OHLC) else None
+
+
+def bars_from_download(raw, tickers: list, day: str) -> dict:
+    """download 결과 → {ticker: Bar | None}. 요청한 거래일과 날짜가 같은 봉만 쓴다 (순수 함수, 테스트 가능)."""
     out = {t: None for t in tickers}
+    uniq = sorted(set(tickers))
+    d = date.fromisoformat(day)
+    for t in uniq:
+        try:
+            df = ticker_frame(raw, t)
+            if df is None or (getattr(raw.columns, "nlevels", 1) == 1 and len(uniq) > 1):
+                continue
+            df = df[[ix.date() == d for ix in df.index]]
+            if df.empty:
+                continue
+            r = df.iloc[-1]
+            vals = [float(r[c]) for c in OHLC]
+            if all(math.isfinite(v) and v > 0 for v in vals):
+                out[t] = Bar(*vals)
+        except Exception:
+            continue
+    return out
+
+
+def yfinance_bars(tickers: list, day: str) -> dict:
     if not tickers:
-        return out
+        return {}
     try:
         import yfinance as yf
         d = date.fromisoformat(day)
@@ -32,20 +74,8 @@ def yfinance_bars(tickers: list, day: str) -> dict:
                           auto_adjust=True, group_by="ticker", progress=False, threads=False)
     except Exception as exc:
         logger.warning("자동매수 SHADOW 일봉 조회 실패: %s", type(exc).__name__)
-        return out
-    for t in set(tickers):
-        try:
-            df = raw[t] if len(set(tickers)) > 1 else raw
-            df = df[[ix.date() == date.fromisoformat(day) for ix in df.index]]
-            if df.empty:
-                continue
-            r = df.iloc[-1]
-            vals = [float(r[c].iloc[0]) if hasattr(r[c], "iloc") else float(r[c]) for c in ("Open", "High", "Low", "Close")]
-            if all(math.isfinite(v) and v > 0 for v in vals):
-                out[t] = Bar(*vals)
-        except Exception:
-            continue
-    return out
+        return {t: None for t in tickers}
+    return bars_from_download(raw, tickers, day)
 
 
 RECONCILE_ABS_USD = 5.0          # 보유 평가합 vs 원장 평가금액 허용 오차 (절대)

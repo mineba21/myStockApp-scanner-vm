@@ -472,6 +472,7 @@ def _run_scan_locked(market, universe, triggered_by):
     except BaseException:
         db.close()
         raise
+    scan_log_id = log.id  # 커밋 뒤 만료된 ORM 객체를 다시 읽지 않도록 미리 보관 (자동매수 SHADOW hook 용)
 
     buy_signals, total_scanned = [], 0
     funnels: dict = {}
@@ -564,7 +565,7 @@ def _run_scan_locked(market, universe, triggered_by):
         db.commit()
         if capture is not None:
             capture.safe('finish')
-        _auto_buy_snapshot_hook(log.id, market)
+        _auto_buy_snapshot_hook(scan_log_id, market)
 
         return {"status": "done", "total_scanned": total_scanned,
                 "signals_found": len(buy_signals),

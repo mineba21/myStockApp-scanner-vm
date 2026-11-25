@@ -72,10 +72,10 @@ def _j(x) -> str:
 
 # ── 계좌·run ─────────────────────────────────────────────────────────
 
-def ensure_accounts(db, start_day: str) -> int:
+def ensure_accounts(db, start_day: str, settings=None) -> int:
     """동결 설정·판정 로직 해시로 가상 계좌를 만든다. 같은 버전 계좌의 해시가 다르면 덮어쓰지 않고 중단한다."""
     from trading.auto_buy.version import logic_hash
-    h, lh, cfg, now, made = S.config_hash(), logic_hash(), _j(S.frozen_config()), time.time(), 0
+    h, lh, cfg, now, made = (S.config_hash(settings), logic_hash(), _j(S.frozen_config(settings)), time.time(), 0)
     with tx(db):
         for acc_id, prof, strat, seed in S.account_ids():
             row = db.execute("SELECT config_hash, logic_hash FROM ab_accounts WHERE id=?", (acc_id,)).fetchone()
@@ -97,11 +97,16 @@ def current_run(db) -> Optional[int]:
     return r[0] if r else None
 
 
-def create_run(db, reason: str, parent: Optional[int], status: str) -> int:
+def current_run_version(db) -> Optional[str]:
+    r = db.execute("SELECT strategy_version FROM ab_runs WHERE status='CURRENT'").fetchone()
+    return r[0] if r else None
+
+
+def create_run(db, reason: str, parent: Optional[int], status: str, settings=None) -> int:
     from trading.auto_buy.version import logic_hash
     cur = db.execute("INSERT INTO ab_runs(status, reason, parent_run, strategy_version, config_hash, logic_hash, "
                      "created_at) VALUES (?,?,?,?,?,?,?)",
-                     (status, reason, parent, S.STRATEGY_VERSION, S.config_hash(), logic_hash(), time.time()))
+                     (status, reason, parent, S.STRATEGY_VERSION, S.config_hash(settings), logic_hash(), time.time()))
     run = cur.lastrowid
     now = time.time()
     for acc_id, prof, *_ in S.account_ids():
@@ -111,15 +116,22 @@ def create_run(db, reason: str, parent: Optional[int], status: str) -> int:
     return run
 
 
-def ensure_run(db) -> int:
+def ensure_run(db, settings=None) -> int:
+    """현재 버전의 CURRENT run. 이전 버전 run 이 CURRENT 면 SUPERSEDED 로 남기고(삭제 없음) 새 버전 run 을 만든다.
+    이전 버전 run 에는 새 버전 계좌가 없으므로 재사용하지 않는다."""
     run = current_run(db)
-    if run is not None:
+    if run is not None and current_run_version(db) == S.STRATEGY_VERSION:
         return run
     with tx(db):
-        run = current_run(db)
-        if run is None:
-            run = create_run(db, "INITIAL", None, "CURRENT")
-            set_runtime(db, "current_run", run)
+        run, ver = current_run(db), current_run_version(db)
+        if run is not None and ver == S.STRATEGY_VERSION:
+            return run
+        if run is not None:
+            db.execute("UPDATE ab_runs SET status='SUPERSEDED', completed_at=? WHERE run_id=?", (time.time(), run))
+            event(db, "WARN", "version_switch", f"전략 버전 {ver} → {S.STRATEGY_VERSION}: run #{run} 보존(SUPERSEDED), "
+                  f"새 버전 계좌로 새 run 시작", old_run=run, old_version=ver, new_version=S.STRATEGY_VERSION)
+        run = create_run(db, "INITIAL" if ver is None else "VERSION_START", None, "CURRENT", settings)
+        set_runtime(db, "current_run", run)
     return run
 
 
@@ -157,6 +169,16 @@ def record_eligibility(db) -> int:
                                   lh, now))
                 n += cur.rowcount
     return n
+
+
+def eligibility_pending(db, decision_scan_log_id: Optional[int]) -> int:
+    """결정 스캔 스냅샷 중 현재 버전 적격 판정이 아직 없는 행 수. 0 이 아니면 그날 후보를 확정할 수 없다."""
+    if decision_scan_log_id is None:
+        return 0
+    return db.execute(
+        "SELECT COUNT(*) FROM ab_signal_snapshots s WHERE s.scan_log_id=? AND NOT EXISTS ("
+        "SELECT 1 FROM ab_eligibility e WHERE e.snapshot_id=s.id AND e.strategy_version=?)",
+        (decision_scan_log_id, S.STRATEGY_VERSION)).fetchone()[0]
 
 
 def candidates(db, decision_scan_log_id: Optional[int]) -> dict:

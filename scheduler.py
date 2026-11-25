@@ -81,7 +81,10 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
     _add_auto_stop_job(_sched)
-    _add_auto_buy_shadow_job(_sched)
+    try:
+        _add_auto_buy_shadow_job(_sched)
+    except Exception as exc:  # SHADOW 등록 실패가 공용 스케줄러(S01 포함) 시작을 막지 않게 한다
+        logger.error("자동매수 SHADOW 등록 실패 (S01·스캔 일정은 그대로 시작): %s", exc)
     _sched.start()
     logger.info("스케줄러 시작")
 
@@ -118,6 +121,12 @@ def _run_auto_buy_shadow():
     run_shadow_job()
 
 
+def _job_minute_expr(minutes: int) -> str:
+    """N분 간격의 cron minute 식. 60분은 매시 정각("0")이다 (APScheduler 는 ``*/60`` 을 거부한다)."""
+    minutes = min(max(int(minutes), 5), 60)
+    return "0" if minutes >= 60 else f"*/{minutes}"
+
+
 def _add_auto_buy_shadow_job(scheduler) -> bool:
     """자동매수 SHADOW (가상 계좌 전용, 실주문 없음). AUTO_BUY_US_MODE=SHADOW 일 때만 등록한다 (재시작해야 반영).
 
@@ -131,7 +140,7 @@ def _add_auto_buy_shadow_job(scheduler) -> bool:
         return False
     scheduler.add_job(
         _run_auto_buy_shadow,
-        CronTrigger(day_of_week="mon-sat", hour="17-23", minute=f"*/{s.job_minutes}", timezone=NEW_YORK),
+        CronTrigger(day_of_week="mon-sat", hour="17-23", minute=_job_minute_expr(s.job_minutes), timezone=NEW_YORK),
         id=AUTO_BUY_SHADOW_JOB_ID,
         name="미국 자동매수 SHADOW (가상 계좌)",
         replace_existing=True,

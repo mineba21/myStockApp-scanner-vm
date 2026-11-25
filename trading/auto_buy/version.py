@@ -1,6 +1,7 @@
 """판정 로직 버전 (4.2). 전략 설정 해시와 별도로, 매수 판정에 영향을 주는 코드의 정규화 해시를 보존한다.
 
 - 대상: 적격 판정, 위험·사이징, 가상 체결, 엔진, 신호 정규화·최초 통과 판정, 거래일·입력 확정, 시장 데이터 처리,
+  job 실행 순서(결정 대기·마감·계좌 스냅샷 시점을 정하는 ``runner``),
   그리고 의존하는 운영 ``scanner.sizing.calculate_position`` (호출하는 보조 함수·모듈 상수 포함).
 - 주석·docstring·공백 변경은 해시에 영향이 없다 (AST 기준). 화면·조회(report, API, 템플릿)·저널 접근은 대상이 아니다.
 - 기록된 해시와 다르면 SHADOW job 은 기존 평가 버전으로 계속 처리하지 않는다 (``STRATEGY_VERSION`` 을 올려 새 계좌로 시작).
@@ -25,6 +26,7 @@ LOGIC_FILES = (
     "trading/auto_buy/shadow/snapshot.py",
     "trading/auto_buy/shadow/calendar.py",
     "trading/auto_buy/shadow/market_data.py",
+    "trading/auto_buy/shadow/runner.py",
     "trading/auto_stop/us_calendar.py",
 )
 SIZING_FILE = "scanner/sizing.py"

@@ -12,8 +12,10 @@
   결측을 '손절 없음'·정상으로 보지 않는다 (엔진: 주문 FILL_UNKNOWN, 포지션 UNRESOLVED).
 
 결측 복구
-- 최근 ``RECOVERY_WINDOW_DAYS`` 거래일의 결측 일봉을 job 마다 다시 받아 본다. 하나라도 확인되면 새 리비전으로 저장하고
-  새 run 을 만들어 시작일부터 46 계좌 전체를 시간순으로 다시 계산한다 (현금·Heat·포지션·수량·신규 판단 모두).
+- 최근 ``RECOVERY_WINDOW_DAYS`` 거래일(마지막 마감 세션 포함)의 결측 일봉을 job 마다 다시 받아 본다. 대상이 많으면
+  job 마다 ``RECOVERY_MAX_DAYS_PER_RUN`` 일씩 순환한다. 하나라도 확인되면 새 리비전과 함께 ``replay_needed`` 를 같은
+  트랜잭션에 저장하고, 새 run 을 만들어 시작일부터 46 계좌 전체를 시간순으로 다시 계산한다 (현금·Heat·포지션·수량·신규 판단 모두).
+  replay 가 실패하면 현재 run 을 유지하고 ``replay_needed`` 도 남겨 다음 job 이 다시 시도한다.
   단일 손절 이벤트만 끼워 넣지 않는다. 이전 run 은 SUPERSEDED 로 남기고 결과 차이를 이벤트로 기록한다.
 - 재계산 중(BUILDING)에는 현재 run 이 그대로 보이며 결과 화면에 재계산 중으로 표시된다.
 """
@@ -61,14 +63,14 @@ def day_input(db, day: str):
     return db.execute("SELECT * FROM ab_day_inputs WHERE day=?", (day,)).fetchone()
 
 
-def freeze_no_decision(db, day: str, reason: str) -> None:
+def freeze_no_decision(db, day: str, reason: str, settings=None) -> None:
     from trading.auto_buy.version import logic_hash
     with tx(db):
         if day_input(db, day):
             return
         db.execute("INSERT INTO ab_day_inputs(day, decision_status, decision_scan_log_id, frozen_at, frozen_by, "
                    "signal_set_hash, strategy_version, config_hash, logic_hash) VALUES (?,?,NULL,?,?,NULL,?,?,?)",
-                   (day, "NO_DECISION_SCAN", time.time(), "JOB_CUTOFF", S.STRATEGY_VERSION, S.config_hash(),
+                   (day, "NO_DECISION_SCAN", time.time(), "JOB_CUTOFF", S.STRATEGY_VERSION, S.config_hash(settings),
                     logic_hash()))
         event(db, "WARN", "no_decision_scan", f"{day} 정규 스캔이 신호 마감까지 완전 수집되지 않아 신규 매수 판단 없음",
               day=day, reason=reason)
@@ -167,7 +169,11 @@ def required_tickers(db, run_id: int, day: str) -> list:
 
 def build_inputs(db, run_id: int, day: str, bars: dict, settings=None) -> EN.DayInputs:
     row = day_input(db, day)
-    cands = EN.candidates(db, row["decision_scan_log_id"] if row else None)
+    scan_id = row["decision_scan_log_id"] if row else None
+    pending = EN.eligibility_pending(db, scan_id)
+    if pending:          # 적격 기록 전 후보를 읽으면 후보 0건으로 그날이 확정된다 — 처리하지 않는다
+        raise RuntimeError(f"{day} 결정 스캔 #{scan_id} 적격 판정 미기록 {pending}건")
+    cands = EN.candidates(db, scan_id)
     nxt = CAL.next_trading_day(date.fromisoformat(day), settings)
     notes = []
     if row is None or row["decision_status"] != "FROZEN":
@@ -213,14 +219,20 @@ def recover_missing(db, provider: Callable, now: datetime, settings=None) -> lis
     for d, t in rows:
         by_day.setdefault(d, []).append(t)
     recovered = []
-    for d in sorted(by_day)[:S.RECOVERY_MAX_DAYS_PER_RUN]:
+    for d in recovery_targets(db, sorted(by_day)):
         got = provider(by_day[d], d)
         with tx(db):
+            found = []
             for t in by_day[d]:
                 b = got.get(t)
                 if isinstance(b, Bar) and b.valid():
                     _store_bar(db, d, t, b, DEFAULT_PROVIDER, "RECOVERY", True)
-                    recovered.append((d, t))
+                    found.append((d, t))
+            set_runtime(db, "recovery_cursor", d)
+            if found:
+                # 새 OK 리비전과 같은 트랜잭션에 '재계산 필요'를 남긴다. replay 가 run 교체를 끝낼 때만 지운다.
+                _mark_replay_needed(db, found)
+            recovered += found
     if recovered:
         with tx(db):
             event(db, "INFO", "bars_recovered", f"결측 일봉 {len(recovered)}건 확인 — 시작일부터 재계산",
@@ -228,12 +240,32 @@ def recover_missing(db, provider: Callable, now: datetime, settings=None) -> lis
     return recovered
 
 
+def recovery_targets(db, days: list) -> list:
+    """이번 job 에 재조회할 결측 거래일 (최대 ``RECOVERY_MAX_DAYS_PER_RUN``). 지난 job 이 마지막으로 본 날 다음부터
+    순환하므로, 앞쪽 결측이 계속 남아도 뒤쪽 날짜가 밀려나지 않는다."""
+    cur = get_runtime(db, "recovery_cursor")
+    order = days if not cur else [d for d in days if d > cur] + [d for d in days if d <= cur]
+    return order[:S.RECOVERY_MAX_DAYS_PER_RUN]
+
+
+def _mark_replay_needed(db, found: list) -> None:
+    prev = get_runtime(db, "replay_needed") or {}
+    bars = sorted(set(map(tuple, prev.get("bars") or [])) | set(found))
+    set_runtime(db, "replay_needed", {"reason": "BARS_RECOVERED", "since": prev.get("since") or time.time(),
+                                      "bars": bars[-200:]})
+
+
+def replay_needed(db) -> bool:
+    """복구된 일봉이 아직 현재 run 에 반영되지 않았는지 (이전 replay 실패 포함)."""
+    return bool(get_runtime(db, "replay_needed"))
+
+
 def recovery_floor(last, settings):
     """자동 복구 대상 기간의 첫 거래일. 이보다 이른 결측은 더 이상 재조회하지 않는다 (수동 검토 대상)."""
     if last is None:
         return None
     floor = last
-    for _ in range(S.RECOVERY_WINDOW_DAYS):
+    for _ in range(S.RECOVERY_WINDOW_DAYS - 1):          # last 포함 정확히 RECOVERY_WINDOW_DAYS 개 세션
         p = CAL.prev_trading_day(floor, settings)
         if p is None:
             break
@@ -269,7 +301,7 @@ def replay(db, provider: Callable, reason: str, settings=None) -> dict:
     parent = EN.current_run(db)
     days = [r[0] for r in db.execute("SELECT day FROM ab_days WHERE run_id=? ORDER BY day", (parent,))]
     with tx(db):
-        run = EN.create_run(db, reason, parent, "BUILDING")
+        run = EN.create_run(db, reason, parent, "BUILDING", settings)
     set_runtime_safe(db, "replay_in_progress", {"run_id": run, "reason": reason, "at": time.time()})
     try:
         for d in days:
@@ -288,6 +320,7 @@ def replay(db, provider: Callable, reason: str, settings=None) -> dict:
                        (time.time(), days[-1] if days else None, EN._j(diff), run))
             set_runtime(db, "current_run", run)
             set_runtime(db, "replay_in_progress", None)
+            set_runtime(db, "replay_needed", None)          # 교체가 끝났을 때만 재계산 필요 상태를 지운다
             event(db, "WARN", "run_replaced", f"재계산 run #{run} 이 #{parent} 를 대체 ({reason}). "
                   f"결과가 달라진 계좌 {diff['changed_accounts']}개", parent=parent, run=run, **diff)
         return {"run": run, "parent": parent, **diff}

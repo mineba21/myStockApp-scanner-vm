@@ -16,6 +16,11 @@ from typing import Optional
 from trading.auto_buy.settings import COSTS, MIN_R_PCT
 
 
+# OHLC 일관성 검사의 상대 허용 오차. 수정주가 계산의 부동소수점 오차(1e-14 수준)는 정상 봉으로 보고,
+# 이보다 큰 불일치(실제 비정상 봉)는 무효로 거부한다.
+OHLC_REL_TOL = 1e-9
+
+
 @dataclass(frozen=True)
 class Bar:
     open: float
@@ -25,8 +30,10 @@ class Bar:
 
     def valid(self) -> bool:
         vals = (self.open, self.high, self.low, self.close)
-        return all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in vals) \
-            and self.low <= min(self.open, self.close) and self.high >= max(self.open, self.close)
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in vals):
+            return False
+        tol = OHLC_REL_TOL * max(vals)
+        return self.low <= min(self.open, self.close) + tol and self.high >= max(self.open, self.close) - tol
 
 
 def try_buy(bar: Bar, limit: float, stop: float, min_r_pct: float = MIN_R_PCT) -> tuple[str, Optional[float], Optional[str]]:

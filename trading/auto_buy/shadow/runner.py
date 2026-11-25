@@ -18,10 +18,12 @@ import time
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
+from trading.auto_buy import settings as S
 from trading.auto_buy.settings import AutoBuySettings
 from trading.auto_buy.shadow import calendar as CAL
 from trading.auto_buy.shadow import engine as EN
 from trading.auto_buy.shadow import inputs as IN
+from trading.auto_buy.shadow import snapshot as SN
 from trading.auto_buy.shadow.schema import schema_status
 from trading.auto_buy.shadow.snapshot import catch_up
 from trading.auto_buy.shadow.store import connect_rw, event, get_runtime, set_runtime, tx
@@ -81,8 +83,9 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
                 return out
             start = max(row[0], settings.start_day) if settings.start_day else row[0]
             _rt(db, "shadow_start_day", start)
+        start = version_start(db, start, settings)
         try:
-            EN.ensure_accounts(db, start)
+            EN.ensure_accounts(db, start, settings)
         except EN.VersionMismatch as exc:
             with tx(db):
                 event(db, "ERROR", "version_mismatch", str(exc))
@@ -91,10 +94,11 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
             _rt(db, "last_job", {"at": time.time(), "blocked": "VersionMismatch"})
             return out
         _rt(db, "version_block", None)
-        run = EN.ensure_run(db)
+        run = EN.ensure_run(db, settings)
         EN.record_eligibility(db)
         # 결측 복구 → 재계산
-        if IN.recover_missing(db, bars_provider, now, settings):
+        recovered = IN.recover_missing(db, bars_provider, now, settings)
+        if recovered or IN.replay_needed(db):          # 이전 replay 가 실패했으면 교체될 때까지 다시 시도
             out["replay"] = IN.replay(db, bars_provider, "BARS_RECOVERED", settings)
             run = out["replay"]["run"]
         last = CAL.last_closed_session(now, settings)
@@ -106,10 +110,11 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
                 continue
             # (a) 결정 스캔 확정
             if IN.day_input(db, day) is None:
-                if now_u < IN.signal_cutoff(d, settings) or running():
+                if now_u < IN.signal_cutoff(d, settings) or SN.decision_scan_pending(
+                        db, d, settings, session_factory=session_factory, scan_running=running()):
                     out["waiting"] = f"{day} 정규 스캔 후보 확정 대기 (신호 마감 {settings_cut(d, settings)})"
                     break
-                IN.freeze_no_decision(db, day, "signal_cutoff_passed")
+                IN.freeze_no_decision(db, day, "signal_cutoff_passed", settings)
                 EN.record_eligibility(db)
             # (b) 일봉
             if now_u < IN.bars_earliest(d, settings):
@@ -133,6 +138,12 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
                     status = (snap or {}).get("status", "UNAVAILABLE")
                     IN.store_account(db, day, "OK" if status == "OK" else "UNAVAILABLE",
                                      snap if status == "OK" else None, (snap or {}).get("reason"))
+            # 결정 스캔은 job 의 앞선 적격 기록 이후 Scanner hook 이 확정했을 수 있다. 일 처리 직전에 다시 기록하고
+            # 결정 스캔의 적격 기록이 끝났을 때만 그날을 확정한다.
+            EN.record_eligibility(db)
+            if EN.eligibility_pending(db, row["decision_scan_log_id"]):
+                out["waiting"] = f"{day} 결정 스캔 적격 판정 기록 대기"
+                break
             res = IN.process_day(db, run, IN.build_inputs(db, run, day, got["bars"], settings), settings)
             if res["missing"]:
                 with tx(db):
@@ -156,6 +167,23 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
         return out
     finally:
         db.close()
+
+
+def version_start(db, base_start: str, settings) -> str:
+    """현재 전략 버전의 첫 처리 거래일. 첫 버전은 SHADOW 시작일, 버전을 올린 경우 이전 버전 run 이 마지막으로
+    처리한 거래일의 다음 거래일부터 새 계좌로 시작한다 (과거 구간을 새 버전으로 다시 채우지 않음)."""
+    key = f"version_start:{S.STRATEGY_VERSION}"
+    v = get_runtime(db, key)
+    if v:
+        return v
+    v = base_start
+    if EN.current_run_version(db) not in (None, S.STRATEGY_VERSION):
+        last = db.execute("SELECT MAX(day) FROM ab_days WHERE run_id=?", (EN.current_run(db),)).fetchone()[0]
+        nxt = CAL.next_trading_day(date.fromisoformat(last), settings) if last else None
+        if nxt is not None:
+            v = max(nxt.isoformat(), base_start)
+    _rt(db, key, v)
+    return v
 
 
 def settings_cut(d, settings) -> str:
