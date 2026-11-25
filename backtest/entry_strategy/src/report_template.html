@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>자동매수 진입 백테스트</title>
+<style>
+:root{--bg:#f7f7f5;--panel:#fff;--ink:#1d1d1b;--mute:#6b6b66;--line:#e2e1dc;--accent:#2f5d8a;--pos:#2e7d4f;--neg:#b23a32;--warn:#a36a00;
+--c1:#2f5d8a;--c2:#c2593f;--c3:#3d8b6e;--c4:#8a5ca8;--c5:#b08a1e;--c6:#5f7f91;--c7:#a8476f;--c8:#6b6b66;--chip:#eef1f4}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#151514;--panel:#1e1e1c;--ink:#ecebe6;--mute:#a09f98;--line:#33332f;--accent:#7fb0de;--pos:#6cc191;--neg:#ec7b72;--warn:#e0a84a;
+--c1:#7fb0de;--c2:#ec8f74;--c3:#6cc1a0;--c4:#bb98d6;--c5:#dcbb5a;--c6:#94b4c6;--c7:#e087ac;--c8:#a09f98;--chip:#2a2d31}}
+:root[data-theme="dark"]{--bg:#151514;--panel:#1e1e1c;--ink:#ecebe6;--mute:#a09f98;--line:#33332f;--accent:#7fb0de;--pos:#6cc191;--neg:#ec7b72;--warn:#e0a84a;
+--c1:#7fb0de;--c2:#ec8f74;--c3:#6cc1a0;--c4:#bb98d6;--c5:#dcbb5a;--c6:#94b4c6;--c7:#e087ac;--c8:#a09f98;--chip:#2a2d31}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif}
+header{padding:20px 16px 8px;max-width:1240px;margin:0 auto}h1{font-size:22px;margin:0 0 4px}header p{margin:0;color:var(--mute)}
+nav{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line)}
+nav .in{max-width:1240px;margin:0 auto;padding:0 12px;display:flex;gap:2px;overflow-x:auto}
+nav button{background:none;border:0;color:var(--mute);padding:10px 10px;font:inherit;cursor:pointer;white-space:nowrap;border-bottom:2px solid transparent}
+nav button.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+main{max-width:1240px;margin:0 auto;padding:12px 16px 60px}section{display:none}section.on{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin:12px 0}
+h2{font-size:17px;margin:0 0 8px}h3{font-size:15px;margin:16px 0 6px}h4,h5{margin:12px 0 4px}
+.mute{color:var(--mute)}.small{font-size:12px}.pos{color:var(--pos)}.neg{color:var(--neg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}.kpi b{display:block;font-size:20px}.kpi span{color:var(--mute);font-size:12px}
+.badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:13px}
+.b-no{background:color-mix(in srgb,var(--neg) 16%,transparent);color:var(--neg)}.b-need{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}.b-ok{background:color-mix(in srgb,var(--pos) 16%,transparent);color:var(--pos)}
+.tw{overflow-x:auto;margin:6px 0}table{border-collapse:collapse;width:100%;font-size:12.5px}th,td{padding:5px 7px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);color:var(--mute);font-weight:600}td:first-child,th:first-child{text-align:left}
+td.l,th.l{text-align:left}tr.hl td{background:color-mix(in srgb,var(--accent) 9%,transparent)}
+.bar{display:inline-block;height:8px;border-radius:2px;vertical-align:middle;margin-left:4px}
+.chart{width:100%;position:relative}.chart svg{width:100%;height:auto;display:block}.legend{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:12px;margin:6px 0}
+.legend span{cursor:pointer;user-select:none}.legend span.off{opacity:.35}.legend i{display:inline-block;width:10px;height:3px;margin-right:4px;vertical-align:middle}
+.tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;display:none;box-shadow:0 2px 8px rgba(0,0,0,.12);z-index:3;white-space:nowrap}
+.ctl{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}.ctl button,.ctl select{font:inherit;font-size:12.5px;padding:4px 10px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;cursor:pointer}
+.ctl button.on{border-color:var(--accent);color:var(--accent);font-weight:600}
+ul.tight li{margin:3px 0}code{background:var(--chip);padding:1px 4px;border-radius:4px;font-size:12px}pre{background:var(--chip);padding:10px;border-radius:6px;overflow-x:auto;font-size:12px}
+.note{border-left:3px solid var(--warn);padding:6px 10px;background:color-mix(in srgb,var(--warn) 8%,transparent);border-radius:0 6px 6px 0;margin:8px 0}
+.theme{position:absolute;right:16px;top:20px}.theme button{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:3px 8px;cursor:pointer}
+header{position:relative}
+@media (max-width:640px){h1{font-size:18px}.theme{position:static;margin-top:6px}}
+</style>
+</head>
+<body>
+<header>
+<h1>account1 미국 Scanner 자동매수 — 진입 전략 백테스트</h1>
+<p>매도 S01 Scanner Stop 고정 · 매수 조건만 비교 · RECONSTRUCTED 신호 (VERIFIED 0건) · 실주문·운영 DB·VM 변경 없음</p>
+<div class="theme"><button id="themeBtn">테마 전환</button></div>
+</header>
+<nav><div class="in" id="tabs"></div></nav>
+<main>
+<section id="s-sum"></section>
+<section id="s-eq"></section>
+<section id="s-cmp"></section>
+<section id="s-gq"></section>
+<section id="s-type"></section>
+<section id="s-topn"></section>
+<section id="s-sens"></section>
+<section id="s-time"></section>
+<section id="s-rec"></section>
+<section id="s-design"><div class="card"><h2>자동매수 ↔ S01 자동손절 연동 설계 (검토안, 코드 변경 없음)</h2><!--__DESIGN__--></div></section>
+<section id="s-p7"></section>
+<section id="s-p8"><div class="card"><h2>P8 자동매수 SHADOW 구현 Plan (검토안, 코드 변경 없음)</h2><!--__PLAN__--></div></section>
+<section id="s-meth"></section>
+</main>
+<script>
+const D=/*__DATA__*/null;
+const $=s=>document.querySelector(s);
+const TABS=[["s-sum","요약·판정"],["s-eq","자산·낙폭·Heat"],["s-cmp","기존 대비 비교"],["s-gq","Grade·Quality"],["s-type","유형·진입 조건"],["s-topn","Top-N·무작위"],["s-sens","위험·보유기간 민감도"],["s-time","진입 시점"],["s-rec","권장·금지 조건"],["s-p7","P7 위험 예산"],["s-p8","P8 SHADOW Plan"],["s-design","S01 연동 설계 v2"],["s-meth","방법·한계"]];
+const tabs=$("#tabs");TABS.forEach(([id,l],i)=>{const b=document.createElement("button");b.textContent=l;b.onclick=()=>show(id);b.dataset.id=id;tabs.appendChild(b)});
+function show(id){document.querySelectorAll("section").forEach(s=>s.classList.toggle("on",s.id===id));tabs.querySelectorAll("button").forEach(b=>b.classList.toggle("on",b.dataset.id===id));try{localStorage.setItem("eb_tab",id)}catch(e){}}
+let t0="s-sum";try{t0=localStorage.getItem("eb_tab")||t0}catch(e){}show(document.getElementById(t0)?t0:"s-sum");
+$("#themeBtn").onclick=()=>{const r=document.documentElement;const cur=r.dataset.theme||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");r.dataset.theme=cur==="dark"?"light":"dark";redraw()};
+
+const pct=(v,d=1)=>v==null||isNaN(v)?"–":(v*100).toFixed(d)+"%";
+const num=(v,d=2)=>v==null||isNaN(v)?"–":(+v).toFixed(d);
+const int=v=>v==null||isNaN(v)?"–":Math.round(v).toLocaleString();
+const sg=(v,f=pct)=>v==null||isNaN(v)?"–":`<span class="${v>0?"pos":v<0?"neg":""}">${f(v)}</span>`;
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const COLORS=["--c1","--c2","--c3","--c4","--c5","--c6","--c7","--c8"];
+const NLAB=n=>n>=999?"ALL":"Top-"+n;
+const POOL={F0:"Strict 전체",F1:"유형별 적격(F1)",HARD_EXCL:"명백 위험 제외"};
+const MK={M0:"시장필터 없음",M1:"BULL만",M2:"SPY>MA50",M3:"폭>50%"};
+const PROF={P_A:"$100k·1%·20%·Heat6%",P_B:"$50k·1%·20%·Heat6%",P_C:"$50k·0.5%·10%·Heat2%"};
+
+function table(rows,cols,opt={}){
+  let h="<div class='tw'><table><thead><tr>"+cols.map(c=>`<th class="${c.l?"l":""}">${c.t}</th>`).join("")+"</tr></thead><tbody>";
+  rows.forEach(r=>{h+=`<tr class="${opt.hl&&opt.hl(r)?"hl":""}">`+cols.map(c=>`<td class="${c.l?"l":""}">${c.f?c.f(r[c.k],r):(r[c.k]??"–")}</td>`).join("")+"</tr>"});
+  return h+"</tbody></table></div>";
+}
+function q(rows,flt){return rows.filter(r=>Object.entries(flt).every(([k,v])=>Array.isArray(v)?v.includes(r[k]):r[k]===v))}
+function bar(v,max,neg){if(v==null||isNaN(v))return"";const w=Math.min(60,Math.abs(v)/max*60);return `<span class="bar" style="width:${w}px;background:${v<0?css("--neg"):css("--pos")}"></span>`}
+
+// ── line chart ──
+const charts=[];
+function lineChart(host,list,opt){const i=charts.findIndex(c=>c[0]===host);if(i>=0)charts[i]=[host,list,opt];else charts.push([host,list,opt]);drawLine(host,list,opt)}
+function redraw(){charts.forEach(([h,l,o])=>drawLine(h,l,o));hists.forEach(([h,v,m,o])=>drawHist(h,v,m,o))}
+function drawLine(host,list,opt){
+  host.innerHTML="";const W=900,H=opt.h||300,P={l:58,r:12,t:12,b:26};
+  const vis=list.filter(s=>!s.off);
+  let xs=[],ymin=Infinity,ymax=-Infinity;
+  vis.forEach(s=>{s.ys.forEach((y,i)=>{if(y==null)return;ymin=Math.min(ymin,y);ymax=Math.max(ymax,y)})});
+  if(opt.zero){ymin=Math.min(ymin,0);ymax=Math.max(ymax,0)}
+  if(!isFinite(ymin)){ymin=0;ymax=1}if(ymin===ymax){ymax=ymin+1}
+  const pad=(ymax-ymin)*.05;ymin-=pad;ymax+=pad;
+  const N=D.dates.length,x=i=>P.l+(i/(N-1))*(W-P.l-P.r),y=v=>P.t+(1-(v-ymin)/(ymax-ymin))*(H-P.t-P.b);
+  const ink=css("--mute"),line=css("--line");
+  let s=`<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  for(let k=0;k<=4;k++){const v=ymin+(ymax-ymin)*k/4;s+=`<line x1="${P.l}" x2="${W-P.r}" y1="${y(v)}" y2="${y(v)}" stroke="${line}"/><text x="${P.l-6}" y="${y(v)+4}" font-size="11" text-anchor="end" fill="${ink}">${opt.fmt(v)}</text>`}
+  let lastYear="";D.dates.forEach((d,i)=>{const yr=d.slice(0,4);if(yr!==lastYear&&d>=D.dates[0]){lastYear=yr;s+=`<line x1="${x(i)}" x2="${x(i)}" y1="${P.t}" y2="${H-P.b}" stroke="${line}" stroke-dasharray="2,3"/><text x="${x(i)+3}" y="${H-8}" font-size="11" fill="${ink}">${yr}</text>`}});
+  vis.forEach(sr=>{let p="";sr.ys.forEach((v,j)=>{if(v==null)return;const i=sr.i0+j;p+=(p?"L":"M")+x(i).toFixed(1)+","+y(v).toFixed(1)});s+=`<path d="${p}" fill="none" stroke="${css(sr.c)}" stroke-width="${sr.w||1.6}" ${sr.dash?'stroke-dasharray="5,4"':""}/>`});
+  s+=`<line id="xh" x1="0" x2="0" y1="${P.t}" y2="${H-P.b}" stroke="${ink}" stroke-width=".6" style="display:none"/></svg>`;
+  const wrap=document.createElement("div");wrap.className="chart";wrap.innerHTML=s;const tip=document.createElement("div");tip.className="tip";wrap.appendChild(tip);
+  const leg=document.createElement("div");leg.className="legend";
+  list.forEach(sr=>{const sp=document.createElement("span");sp.className=sr.off?"off":"";sp.innerHTML=`<i style="background:${css(sr.c)}"></i>${sr.name}`;sp.onclick=()=>{sr.off=!sr.off;drawLine(host,list,opt)};leg.appendChild(sp)});
+  host.appendChild(leg);host.appendChild(wrap);
+  const svg=wrap.querySelector("svg"),xh=svg.querySelector("#xh");
+  svg.addEventListener("mousemove",e=>{const r=svg.getBoundingClientRect();const px=(e.clientX-r.left)/r.width*W;const i=Math.round((px-P.l)/(W-P.l-P.r)*(N-1));if(i<0||i>=N)return;
+    xh.setAttribute("x1",x(i));xh.setAttribute("x2",x(i));xh.style.display="";
+    let t=`<b>${D.dates[i]}</b>`;vis.forEach(sr=>{const v=sr.ys[i-sr.i0];if(v!=null)t+=`<br><i style="display:inline-block;width:8px;height:3px;background:${css(sr.c)}"></i> ${sr.name}: ${opt.fmt(v)}`});
+    tip.innerHTML=t;tip.style.display="block";const tx=(e.clientX-r.left);tip.style.left=Math.min(tx+12,r.width-220)+"px";tip.style.top="10px"});
+  svg.addEventListener("mouseleave",()=>{tip.style.display="none";xh.style.display="none"});
+}
+const hists=[];
+function hist(host,vals,marks,opt={}){hists.push([host,vals,marks,opt]);drawHist(host,vals,marks,opt)}
+function drawHist(host,vals,marks,opt){
+  const W=420,H=150,P={l:8,r:8,t:10,b:24};vals=vals.filter(v=>v!=null);if(!vals.length){host.innerHTML="";return}
+  let lo=Math.min(...vals,...marks.map(m=>m.v)),hi=Math.max(...vals,...marks.map(m=>m.v));if(lo===hi)hi=lo+1e-3;const B=30,w=(hi-lo)/B;const cnt=Array(B).fill(0);
+  vals.forEach(v=>cnt[Math.min(B-1,Math.floor((v-lo)/w))]++);const mx=Math.max(...cnt);const x=v=>P.l+(v-lo)/(hi-lo)*(W-P.l-P.r);
+  let s=`<svg viewBox="0 0 ${W} ${H}">`;cnt.forEach((c,i)=>{const h=(c/mx)*(H-P.t-P.b);s+=`<rect x="${x(lo+i*w)+.5}" y="${H-P.b-h}" width="${Math.max(1,(W-P.l-P.r)/B-1)}" height="${h}" fill="${css("--c6")}" opacity=".55"/>`});
+  marks.forEach((m,k)=>{s+=`<line x1="${x(m.v)}" x2="${x(m.v)}" y1="${P.t}" y2="${H-P.b}" stroke="${css(m.c)}" stroke-width="2"/><text x="${x(m.v)+3}" y="${P.t+10+k*12}" font-size="10.5" fill="${css(m.c)}">${m.l} ${pct(m.v)}</text>`});
+  s+=`<text x="${P.l}" y="${H-6}" font-size="10.5" fill="${css("--mute")}">${pct(lo)}</text><text x="${W-P.r}" y="${H-6}" font-size="10.5" text-anchor="end" fill="${css("--mute")}">${pct(hi)}</text></svg>`;
+  host.innerHTML=(opt.title?`<div class="small mute">${opt.title}</div>`:"")+s;
+}
+const S=D.summary, V=D.verdict, R=D.rec;
+const sel=V.selected, base=V.baseline;
+const statusBadge=st=>`<span class="badge ${st==="RECOMMENDED_FOR_SHADOW"?"b-ok":st==="NEED_MORE_DATA"?"b-need":"b-no"}">${st}</span>`;
+const specLab=s=>`${POOL[s.pool]||s.pool} · ${MK[s.market]} · ${s.rank==="GRADE"?"Grade 순위":s.rank} · ${NLAB(s.topn)}`;
+const MCOLS=[{k:"total_return",t:"수익률",f:v=>sg(v)},{k:"cagr",t:"CAGR",f:v=>sg(v)},{k:"mdd",t:"MDD",f:v=>pct(v)},{k:"profit_factor",t:"PF",f:v=>num(v)},{k:"stop_rate",t:"손절률",f:v=>pct(v,0)},{k:"trades",t:"거래",f:int},{k:"avg_R",t:"평균 R",f:v=>sg(v,x=>num(x))},{k:"pnl_per_risk",t:"손익/위험",f:v=>num(v)},{k:"capital_utilization",t:"자금활용",f:v=>pct(v,0)},{k:"opportunity_reduction",t:"기회감소",f:v=>pct(v,0)},{k:"max_consec_stops",t:"연속손절",f:int},{k:"heat_current_avg",t:"Heat평균",f:v=>pct(v,1)}];
+
+// ── 요약 ──
+(function(){
+  const t=V.test, f=V.full, u=V.operational_unl_full, ph=R.posthoc_candidate;
+  const ck=Object.entries(V.checks).map(([k,v])=>`<tr><td class="l">${({test_cagr_ge_baseline:"Test CAGR ≥ 기준선",test_pf_ge_baseline:"Test PF ≥ 기준선",test_mdd_within_tolerance:"Test MDD 악화 ≤ 2%p",random_percentile_test_ge_min:"무작위 대비 백분위 ≥ 75 (Test)",trades_per_year_ge_min:"연 거래 ≥ 20",years_better_ge_min:"6개 연도 중 4개 이상 우위",walk_forward_share_better:"Walk-forward 우위 창 ≥ 50%",operational_unl_cagr_gt:"운영형(UNL) CAGR > 0",operational_unl_pf_gt:"운영형 PF(미청산 포함) > 1",operational_unl_mdd_within_tolerance:"운영형 MDD 악화 ≤ 2%p"})[k]||k}</td><td class="l">${V.hard_checks.includes(k)?"필수":"보조"}</td><td>${v?'<span class="pos">통과</span>':'<span class="neg">미달</span>'}</td></tr>`).join("");
+  const K7=D.p7&&D.p7.concl;
+  $("#s-sum").innerHTML=(K7?`<div class="card"><h2>P7 추가 검증 후 판정 ${statusBadge(K7.verdict_maintained)} 유지 · B01 ${statusBadge("NEED_MORE_DATA")}</h2>
+  <p>위험 예산 추가 검증(P7)은 판정을 뒤집기 위한 최적화가 아니라 구조 확인입니다. 결론: 운영형 S01에서 매수가 멈추는 원인은 <b>현재가 기준 Heat</b>이며(6년 ${K7.unl_current_heat_trades.join("~")}건), Entry Heat로 바꾸면 매수는 회복되지만 자금 포화·섹터 집중을 막는 별도 장치가 필요합니다. B01 순위는 같은 후보군 무작위보다 낫지 않았습니다. 자세한 내용은 <b>P7 위험 예산</b> 탭, SHADOW 구현 계획은 <b>P8 SHADOW Plan</b> 탭에 있습니다.</p></div>`:"")+`
+  <div class="card"><h2>P0~P6 최종 판정 ${statusBadge(V.status)}</h2>
+  <p>Validation(2024-08~2025-09)에서 사전 등록 후보 48개 중 선택된 규칙: <b>${specLab(sel)}</b> (P_C 보수 설정, 종가+1% 지정가, S01+60일).<br>
+  Test(2025-09~2026-11) 1회 평가에서 기준선(Strict 전체 · Grade 순위 · 같은 Top-N)보다 CAGR·PF가 낮아 필수 기준을 통과하지 못했습니다.</p>
+  <div class="grid">
+   <div class="kpi"><span>Test 수익률 (선택 / 기준선)</span><b>${pct(t.selected.total_return)} / ${pct(t.baseline.total_return)}</b></div>
+   <div class="kpi"><span>Test PF (선택 / 기준선)</span><b>${num(t.selected.profit_factor)} / ${num(t.baseline.profit_factor)}</b></div>
+   <div class="kpi"><span>Test MDD (선택 / 기준선)</span><b>${pct(t.selected.mdd)} / ${pct(t.baseline.mdd)}</b></div>
+   <div class="kpi"><span>무작위 대비 백분위 (Test / 전체)</span><b>${num(V.random_percentile_test,0)} / ${num(V.random_percentile_full,0)}</b></div>
+   <div class="kpi"><span>연도별 우위 (6년 중)</span><b>${V.years_better}</b></div>
+   <div class="kpi"><span>Bootstrap 개선 확률 (Test)</span><b>${pct(V.bootstrap_test_daily_diff_annualized.prob_positive,0)}</b></div>
+  </div>
+  <h3>채택 기준 점검 (사전 고정)</h3>${"<div class='tw'><table><thead><tr><th>기준</th><th class='l'>구분</th><th>결과</th></tr></thead><tbody>"+ck+"</tbody></table></div>"}
+  </div>
+  <div class="card"><h2>핵심 결론</h2><ol class="tight">
+   <li><b>사전 등록한 선별 규칙은 채택하지 않습니다 (NOT_RECOMMENDED).</b> 필터·시장필터·점수제 48개 조합 어느 것도 Test에서 기준선과 무작위 선택을 안정적으로 이기지 못했고, 같은 조합도 N이나 구간이 바뀌면 무작위 대비 백분위가 1~97로 흔들렸습니다.</li>
+   <li><b>Auto Buy Score는 도입 근거가 없습니다.</b> Train에서 고른 요소(SC1: 손절폭+, ATR%−, 52주 고가 근접+)와 단일 요소(SC3)는 Test 무작위 대비 백분위 12~23. 이론 방향 고정(SC2)도 일관되지 않았습니다.</li>
+   <li><b>Grade A와 B, STRONG과 MODERATE는 신호 유형·시장 상태를 통제하면 차이가 없습니다</b> (A−B = −0.00R, STRONG−MODERATE = −0.02R, 90% CI 모두 0 포함). A가 좋아 보인 것은 Grade 점수에 들어 있는 <b>시장 BULL 가점</b> 때문입니다. Grade S는 전부 BREAKOUT이며 전체 기간 −0.12R이지만 Train에서는 +0.12R로 일관되지 않습니다(n=52).</li>
+   <li><b>가장 일관된 신호 단위 요인은 시장 상태입니다.</b> 유형 통제 후 NEUTRAL −0.29R, CAUTION −0.72R (CI 0 미포함). 늦게 Strict를 통과한 신호(n=47, −0.36R), 피벗 아래 매수(n=33~39, −0.23R)도 전체·Train 모두 나빴습니다.</li>
+   <li><b>손절폭 과대(>12%) 제외는 효과가 없습니다.</b> 12~15% 구간은 H60에서 평균 이상이고, 운영형(UNL)에서는 가장 좋았습니다. 반대로 손절폭 ≤7%는 손절률이 56~60%로 가장 나빴습니다. 15% 초과만 일관되게 나쁩니다(n=27).</li>
+   <li><b>성과를 가장 크게 좌우한 것은 신호 선별이 아니라 위험 예산과 보유 구조입니다.</b> 위험 기반 수량(Heat 2~6%)에서 자금 활용률은 16~46%로, 고정 10%×10종목(86%)보다 훨씬 낮았습니다. P_C 설정에서는 Heat 2%가 거의 항상 차 있어서 Top-1/2/3 차이가 작았습니다.</li>
+   <li><b>운영형 S01(기간 제한 없음) + 운영 Heat 정의(현재가−손절가)의 조합에서는 6년간 신규 매수가 10~20건으로 줄어듭니다.</b> 오른 종목이 Heat를 차지한 채 수년간 보유되기 때문입니다(미청산 평균 보유 1,100~1,450일, 기회 감소 99%+). Heat를 진입 위험 기준으로 바꾸면 거래가 97~117건으로 회복됩니다. 자동매수 전에 정해야 할 <b>구조적 정책 문제</b>입니다.</li>
+   <li><b>사후 탐색 후보 (${ph?ph.status:""}, 채택 근거 아님):</b> Strict + 시장 BULL + 명백 위험 구간 제외 + Grade 순위 Top-2. Test 수익률 ${ph&&ph.segments_H60_P_C.test?pct(ph.segments_H60_P_C.test.total_return):"–"} / PF ${ph&&ph.segments_H60_P_C.test?num(ph.segments_H60_P_C.test.profit_factor):"–"}로 기준선보다 나았지만, 결과를 본 뒤 정의한 규칙이고 같은 후보군 무작위 대비로는 중앙값 수준입니다. 전향적 SHADOW로만 검증할 대상입니다.</li>
+  </ol>
+  <div class="note">한계: 현재 S&P500+Nasdaq100 구성종목이라 생존 편향이 있습니다(특히 UNL 절대수익). 기존 전체 기간 결과를 본 뒤 설계했으므로 Test도 완전한 미관측 데이터가 아닙니다. 비용은 가정값이고, 일봉만으로 시뮬레이션했습니다.</div></div>`;
+})();
+
+// ── 자산·낙폭 ──
+(function(){
+  const sec=$("#s-eq");
+  const groups={
+    "기준선 vs 선택 (P_C, H60)":[["SELECTED","선택 규칙","--c2"],["BASE_E00_N1","기준선 Top-1","--c1"],["BASE_E00_N2","기준선 Top-2","--c3"],["BASE_E00_N3","기준선 Top-3","--c4"],["BASE_E00_ALL","기준선 ALL","--c5"],["POSTHOC_BULL_HARDEXCL_N2","사후 후보 Top-2","--c7"]],
+    "F1 Grade Top-N (P_C)":[["F1_GRADE_N1","F1 Top-1","--c1"],["F1_GRADE_N2","F1 Top-2","--c2"],["F1_GRADE_N3","F1 Top-3","--c3"],["BASE_E00_N1","기준선 Top-1","--c8"]],
+    "보유기간 (H60·H120·운영형)":[["SELECTED","선택 H60","--c2"],["SELECTED_H120","선택 H120","--c4"],["SELECTED_UNL","선택 UNL","--c7"],["BASE_E00_N1","기준선 H60","--c1"],["BASE_H120","기준선 H120","--c3"],["BASE_UNL","기준선 UNL","--c5"]],
+    "운영형 Heat 정의 (UNL)":[["BASE_UNL","현재가 기준 Heat (운영)","--c5"],["BASE_UNL_HEAT_ENTRY","진입 위험 기준 Heat","--c3"],["POSTHOC_BULL_HARDEXCL_N2_UNL","사후 후보 UNL","--c7"]],
+    "사이징 방식 (고정 10%×10 vs 위험 기반)":[["E01_FIXED10x10","고정 10%×10 ($50k)","--c2"],["BASE_E00_ALL","위험 기반 P_C ALL","--c1"],["BENCH_SPY","SPY (참고)","--c8"]],
+  };
+  sec.innerHTML=`<div class="card"><h2>전체 자산 추이 · Drawdown · 계좌 Heat</h2><p class="mute small">초기자금 $50,000 (P_C: 위험 0.5% · 비중 10% · Heat 2%) · 전체 기간 2021-01~2026-11 · 범례를 누르면 숨기거나 표시합니다. 구간별 재시작이 아닌 전체 기간 1회 실행입니다.</p><div class="ctl" id="eqctl"></div><h3>평가금액</h3><div id="eqc"></div><h3>Drawdown</h3><div id="ddc"></div><h3>계좌 Heat (현재가−손절가 합 / 평가금액)</h3><div id="htc"></div><h3>보유 종목 수</h3><div id="psc"></div></div>`;
+  const ctl=$("#eqctl");let cur=Object.keys(groups)[0];
+  function render(){
+    const g=groups[cur].filter(([k])=>D.series[k]);
+    const mk=(fld)=>g.map(([k,l,c])=>({name:l,c,i0:D.series[k].i0,ys:D.series[k][fld],dash:k==="BENCH_SPY"}));
+    lineChart($("#eqc"),mk("eq"),{fmt:v=>"$"+Math.round(v).toLocaleString(),h:300});
+    lineChart($("#ddc"),mk("dd"),{fmt:v=>pct(v,1),h:200,zero:true});
+    lineChart($("#htc"),mk("heat").filter(s=>s.ys.some(v=>v!=null)),{fmt:v=>pct(v,1),h:180,zero:true});
+    lineChart($("#psc"),mk("pos").filter(s=>s.ys.some(v=>v!=null)),{fmt:v=>num(v,0),h:160,zero:true});
+    ctl.querySelectorAll("button").forEach(b=>b.classList.toggle("on",b.textContent===cur));
+  }
+  Object.keys(groups).forEach(k=>{const b=document.createElement("button");b.textContent=k;b.onclick=()=>{cur=k;render();hists.forEach(([h,v,m,o])=>drawHist(h,v,m,o))};ctl.appendChild(b)});
+  render();
+})();
+
+// ── 기존 대비 비교 ──
+(function(){
+  const rows=[];
+  const add=(lab,flt,role)=>["full","test"].forEach(seg=>{const r=q(S,{...flt,segment:seg})[0];if(r)rows.push({...r,lab,seg})});
+  [1,2,3,999].forEach(n=>add(`기준선 E00 Strict 전체·Grade ${NLAB(n)}`,{role:"baseline_E00",profile:"P_C",topn:n,horizon:"H60"}));
+  add("E01 고정 10%×10 (연속성)",{role:"baseline_E01_fixed10x10",profile:"P_C",horizon:"H60"});
+  add(`선택: ${specLab(sel)}`,{role:"eligible",profile:"P_C",pool:sel.pool,market:sel.market,rank:sel.rank,topn:sel.topn,horizon:"H60"});
+  [1,2,3].forEach(n=>add(`F1·Grade ${NLAB(n)}`,{role:"eligible",profile:"P_C",pool:"F1",market:"M0",rank:"GRADE",topn:n,horizon:"H60"}));
+  [1,2,3].forEach(n=>{const r=D.posthoc.filter(x=>x.pool==="HARD_EXCL"&&x.market==="M1"&&x.topn===n&&x.horizon==="H60");r.filter(x=>["full","test"].includes(x.segment)).forEach(x=>rows.push({...x,lab:`사후 후보: BULL+위험제외·Grade ${NLAB(n)}`,seg:x.segment}))});
+  const cols=[{k:"lab",t:"전략 (P_C, H60)",l:1},{k:"seg",t:"구간",l:1}].concat(MCOLS);
+  const hl=r=>r.lab.startsWith("선택");
+  $("#s-cmp").innerHTML=`<div class="card"><h2>기존 전략 대비 비교 (같은 자금·위험 예산: P_C)</h2><p class="mute small">full = 2021-01~2026-11 전체(점수제는 Train 포함 → 참고용), test = 2025-09~2026-11 (채택 판단 구간). 기회감소 = 1 − 매수 건수 / 해당 후보군 신호 수.</p>${table(rows.filter(r=>r.seg==="test"),cols,{hl})}<h3>전체 기간</h3>${table(rows.filter(r=>r.seg==="full"),cols,{hl})}</div>
+  <div class="card"><h2>연도별 수익률 (선택 vs 기준선, P_C·H60 전체 기간 실행)</h2>${table(Object.keys(V.yearly_selected).map(y=>({y,s:V.yearly_selected[y],b:V.yearly_baseline[y]})),[{k:"y",t:"연도",l:1},{k:"s",t:"선택",f:v=>sg(v)},{k:"b",t:"기준선",f:v=>sg(v)},{k:"d",t:"차이",f:(v,r)=>sg(r.s-r.b)}])}</div>
+  <div class="card"><h2>시장 환경별 거래 성과</h2>${table(D.regime.filter(r=>["SELECTED","BASELINE"].includes(r.series)),[{k:"series",t:"전략",l:1},{k:"dimension",t:"기준",l:1},{k:"bucket",t:"구간",l:1},{k:"trades",t:"거래",f:int},{k:"avg_R",t:"평균 R",f:v=>sg(v,x=>num(x))},{k:"profit_factor",t:"PF",f:v=>num(v)},{k:"stop_rate",t:"손절률",f:v=>pct(v,0)},{k:"pnl",t:"손익($)",f:v=>sg(v,x=>int(x))}])}</div>`;
+})();
+
+// ── Grade·Quality ──
+(function(){
+  const F=D.factor;
+  const ft=(a,hz="H60")=>{const rr=F.filter(r=>r.analysis===a&&r.horizon===hz&&["full","train_truncated"].includes(r.period));
+    const keys=[...new Set(rr.map(r=>r.bucket))];return keys.map(k=>{const f=rr.find(r=>r.bucket===k&&r.period==="full")||{},t=rr.find(r=>r.bucket===k&&r.period==="train_truncated")||{};const u=F.find(r=>r.analysis===a&&r.horizon==="UNL"&&r.bucket===k)||{};const h2=F.find(r=>r.analysis===a&&r.horizon==="H120"&&r.bucket===k)||{};
+    return {b:k,n:f.n,R:f.avg_R,pf:f.profit_factor,st:f.stop_rate,ret:f.avg_ret,nt:t.n,Rt:t.avg_R,R120:h2.avg_R,Ru:u.avg_R}})};
+  const fc=[{k:"b",t:"구간",l:1},{k:"n",t:"표본",f:int},{k:"R",t:"평균 R (H60)",f:v=>sg(v,x=>num(x))+bar(v,.6)},{k:"pf",t:"PF",f:v=>num(v)},{k:"st",t:"손절률",f:v=>pct(v,0)},{k:"ret",t:"평균 수익률",f:v=>sg(v)},{k:"nt",t:"Train 표본",f:int},{k:"Rt",t:"Train R",f:v=>sg(v,x=>num(x))},{k:"R120",t:"H120 R",f:v=>sg(v,x=>num(x))},{k:"Ru",t:"UNL R*",f:v=>sg(v,x=>num(x))}];
+  const cgc=[{k:"model",t:"모형",l:1},{k:"term",t:"항",l:1},{k:"coef_R",t:"계수 (R)",f:v=>sg(v,x=>num(x,3))},{k:"ci05",t:"5%",f:v=>num(v,3)},{k:"ci95",t:"95%",f:v=>num(v,3)},{k:"n",t:"n",f:int}];
+  $("#s-gq").innerHTML=`<div class="card"><h2>Grade · Signal Quality 실제 성과 (신호 단위, 포트폴리오 제약 없음)</h2>
+  <p class="mute small">1주 기준, T1_100 지정가 체결, S01. Train R = Train 구간 신호를 Train 끝에서 잘라 평가(이후 가격 미참조). *UNL R은 데이터 끝까지 보유한 미청산 평가가 많아 생존 편향이 크므로 참고만 합니다.</p>
+  <h3>Grade</h3>${table(ft("grade"),fc)}<h3>Signal Quality</h3>${table(ft("quality"),fc)}
+  <h3>신호 유형 × Grade (Grade S = BREAKOUT 전용 → 혼재 분리)</h3>${table(ft("type×grade"),fc)}
+  <h3>신호 유형 × Quality</h3>${table(ft("type×quality"),fc)}
+  <h3>신호 유형 × 시장 상태 × Grade</h3>${table(ft("type×market×grade").filter(r=>r.n>=10),fc)}
+  <h3>통제 회귀: R ~ 신호 유형 + 시장 상태 + Grade(또는 Quality)</h3><p class="mute small">OLS, 주 단위 블록 bootstrap 500회 90% 구간. 기준 범주: RE_BREAKOUT · BULL · Grade B / MODERATE. Grade S 계수는 BREAKOUT/A(n=13)와의 대비라 불안정합니다.</p>${table(D.controlled,cgc)}
+  <div class="note">기존 Grade·Signal Quality 계산 로직은 바꾸지 않았습니다. 이 결과는 "자동매수 우선순위로 쓸 근거가 약하다"는 뜻이지, 표시용 등급을 바꾸자는 제안이 아닙니다.</div></div>`;
+})();
+
+// ── 유형·진입 조건 ──
+(function(){
+  const F=D.factor;
+  const ft=(a)=>{const rr=F.filter(r=>r.analysis===a&&r.horizon==="H60");const keys=[...new Set(rr.map(r=>r.bucket))];
+    return keys.map(k=>{const f=rr.find(r=>r.bucket===k&&r.period==="full")||{},t=rr.find(r=>r.bucket===k&&r.period==="train_truncated")||{};const u=F.find(r=>r.analysis===a&&r.horizon==="UNL"&&r.bucket===k)||{};return {b:k,n:f.n,R:f.avg_R,pf:f.profit_factor,st:f.stop_rate,l10:f.loss_10_rate,nt:t.n,Rt:t.avg_R,Ru:u.avg_R}})};
+  const fc=[{k:"b",t:"구간",l:1},{k:"n",t:"표본",f:int},{k:"R",t:"평균 R",f:v=>sg(v,x=>num(x))+bar(v,.6)},{k:"pf",t:"PF",f:v=>num(v)},{k:"st",t:"손절률",f:v=>pct(v,0)},{k:"l10",t:"−10%↓",f:v=>pct(v,0)},{k:"nt",t:"Train n",f:int},{k:"Rt",t:"Train R",f:v=>sg(v,x=>num(x))},{k:"Ru",t:"UNL R*",f:v=>sg(v,x=>num(x))}];
+  const pr=q(S,{role:"diagnostic_pool",profile:"P_C",topn:999});
+  const pcols=[{k:"pool",t:"후보군",l:1},{k:"segment",t:"구간",l:1},{k:"pool_size",t:"신호 수",f:int}].concat(MCOLS.slice(0,8));
+  const stopPools=["STOP_LE_7","STOP_LE_10","STOP_LE_12","STOP_LE_15"],extPools=["EXT_LE_3","EXT_LE_5","EXT_LE_7"],warnPools=["NO_HOLD","NO_WEEKLY_VOL","NO_STOP_WIDE","NO_CHASE","NO_BELOW_PIVOT","NO_UPTHRUST_FAIL","NO_CRITICAL_WARN"],typePools=["T_RE_BREAKOUT","T_BREAKOUT","T_REBOUND","T_NO_BREAKOUT","F1"];
+  const base=q(S,{role:"baseline_E00",profile:"P_C",topn:999,horizon:"H60"}).filter(r=>["full","test"].includes(r.segment)).map(r=>({...r,pool:"F0 (Strict 전체)"}));
+  const sub=list=>base.concat(pr.filter(r=>list.includes(r.pool))).sort((a,b)=>a.segment<b.segment?-1:1);
+  const warnRows=[];Object.entries({w_hold:"돌파 실패 판정 보류",w_weekly_vol:"주봉 거래량 미달",w_stop_wide:"손절폭 과대(>12%)",w_chase:"추격(>5%)",w_below_pivot:"피벗 하회",w_upthrust_fail:"돌파 실패 확정"}).forEach(([w,l])=>{["RE_BREAKOUT","BREAKOUT","REBOUND"].forEach(t=>{const rr=F.filter(r=>r.analysis===`warn:${w}|${t}`&&r.horizon==="H60"&&r.period==="full");const y=rr.find(r=>r.bucket==="True"),n=rr.find(r=>r.bucket==="False");if(y||n)warnRows.push({w:l,t,ny:y?y.n:0,Ry:y?y.avg_R:null,nn:n?n.n:0,Rn:n?n.avg_R:null})})});
+  $("#s-type").innerHTML=`<div class="card"><h2>신호 유형별 성과와 표본 수</h2>${table(ft("type"),fc)}
+  <p class="mute small">BREAKOUT은 미국 6년간 69건(체결 65)뿐이며, 운영 주봉 거래량 2x 기준 때문에 대부분 RE_BREAKOUT으로 분류됩니다. 유형별 결론은 RE_BREAKOUT에서만 표본이 충분합니다.</p>
+  <h3>포트폴리오: 유형 제한 (P_C, ALL)</h3>${table(sub(typePools),pcols)}</div>
+  <div class="card"><h2>손절폭 7% · 10% · 12% · 15%</h2><h3>신호 단위 (결정일 종가 대비 손절폭)</h3>${table(ft("stop_pct"),fc)}<h3>유형 × 손절폭</h3>${table(ft("type×stop_pct"),fc)}<h3>포트폴리오: 손절폭 상한 (P_C, ALL)</h3>${table(sub(stopPools),pcols)}</div>
+  <div class="card"><h2>급등 추격 (피벗 대비 확장)</h2>${table(ft("ext_pct"),fc)}<h3>유형 × 확장</h3>${table(ft("type×ext_pct"),fc)}<h3>포트폴리오: 확장 상한</h3>${table(sub(extPools),pcols)}</div>
+  <div class="card"><h2>매수 경고 유형별 성과 (경고 있음 vs 없음, H60 전체)</h2>
+  <p class="mute small">"돌파 실패 판정 보류"는 탐지 당일에는 항상 붙는 상태 표시이고, "주봉 거래량 미달"은 RE_BREAKOUT의 정의상 붙는 문구입니다. 둘 다 제외 사유로 쓰지 않았습니다.</p>
+  ${table(warnRows,[{k:"w",t:"경고",l:1},{k:"t",t:"유형",l:1},{k:"ny",t:"있음 n",f:int},{k:"Ry",t:"있음 R",f:v=>sg(v,x=>num(x))},{k:"nn",t:"없음 n",f:int},{k:"Rn",t:"없음 R",f:v=>sg(v,x=>num(x))}])}
+  <h3>포트폴리오: 경고 제외 (P_C, ALL)</h3>${table(sub(warnPools),pcols)}</div>
+  <div class="card"><h2>최초 탐지 vs 최초 Strict 통과 스냅샷</h2>${table(ft("strict_pass_is_first_detection"),fc)}<p class="mute small">True = 최초 탐지일에 바로 Strict 통과(매수 후보 스냅샷 = 최초 탐지 스냅샷). False = 처음엔 미통과였다가 나중에 통과한 신호.</p>
+  <h3>시장 상태 (결정일)</h3>${table(ft("market_condition"),fc)}<h3>F1 적격 여부</h3>${table(ft("F1_eligible"),fc)}</div>`;
+})();
+
+// ── Top-N·무작위 ──
+(function(){
+  const rows=[];["P_A","P_B","P_C"].forEach(p=>[1,2,3,999].forEach(n=>["full","test"].forEach(seg=>{const r=q(S,{role:"baseline_E00",profile:p,topn:n,horizon:"H60",segment:seg})[0];if(r)rows.push({...r,pl:PROF[p]})})));
+  const f1=[];["F1"].forEach(()=>[1,2,3].forEach(n=>["M0","M1","M2","M3"].forEach(m=>["full","test"].forEach(seg=>{const r=q(S,{role:"eligible",profile:"P_C",pool:"F1",market:m,rank:"GRADE",topn:n,horizon:"H60",segment:seg})[0];if(r)f1.push(r)}))));
+  const rk=D.rank.filter(r=>["test","full"].includes(r.segment)).sort((a,b)=>(a.pool+a.market+a.rank+a.topn+a.segment)<(b.pool+b.market+b.rank+b.topn+b.segment)?-1:1);
+  $("#s-topn").innerHTML=`<div class="card"><h2>하루 신규 매수 Top-1 · Top-2 · Top-3 · 제한 없음</h2><p class="mute small">기준선(Strict 전체 · Grade 순위). 같은 프로필 안에서만 비교합니다. P_C(Heat 2%)는 대부분의 날에 Heat가 차 있어서 N의 영향이 작습니다.</p>
+  ${table(rows,[{k:"pl",t:"위험 설정",l:1},{k:"topn",t:"N",f:NLAB},{k:"segment",t:"구간",l:1}].concat(MCOLS))}
+  <h3>F1 · Grade 순위 · 시장필터별 Top-N (P_C)</h3>${table(f1,[{k:"market",t:"시장필터",f:v=>MK[v],l:1},{k:"topn",t:"N",f:NLAB},{k:"segment",t:"구간",l:1}].concat(MCOLS.slice(0,8)))}</div>
+  <div class="card"><h2>순위 선정 능력: 같은 후보군·시점·자금·위험에서 무작위 1,000회와 비교</h2><p class="mute small">백분위 = 무작위 순위 1,000회 중 해당 전략보다 수익률이 낮은 비율. 75 이상을 채택 기준으로 고정했습니다.</p>
+  <div class="grid" id="hists"></div>
+  ${table(rk,[{k:"pool",t:"후보군",l:1,f:v=>POOL[v]||v},{k:"market",t:"시장",f:v=>MK[v],l:1},{k:"rank",t:"순위",l:1},{k:"topn",t:"N",f:NLAB},{k:"segment",t:"구간",l:1},{k:"total_return",t:"수익률",f:v=>sg(v)},{k:"random_median",t:"무작위 중앙",f:v=>sg(v)},{k:"random_p25",t:"p25",f:v=>pct(v)},{k:"random_p75",t:"p75",f:v=>pct(v)},{k:"random_percentile",t:"백분위",f:v=>`<b class="${v>=75?"pos":v<25?"neg":""}">${num(v,0)}</b>`}],{hl:r=>r.pool===sel.pool&&r.market===sel.market&&r.rank===sel.rank&&r.topn===sel.topn})}</div>
+  <div class="card"><h2>Walk-forward (24개월 학습 / 6개월 평가, 선택 규칙 vs 기준선)</h2>${table(D.wf,[{k:"window_start",t:"시작",l:1},{k:"window_end",t:"끝",l:1},{k:"sel_return",t:"선택",f:v=>sg(v)},{k:"base_return",t:"기준선",f:v=>sg(v)},{k:"sel_mdd",t:"선택 MDD",f:v=>pct(v)},{k:"base_mdd",t:"기준 MDD",f:v=>pct(v)},{k:"sel_trades",t:"선택 거래",f:int},{k:"base_trades",t:"기준 거래",f:int},{k:"random_percentile",t:"무작위 백분위",f:v=>num(v,0)}])}
+  <p class="small">우위 창 비율 ${pct(V.walk_forward_share_better,0)} · Test 일별 수익률 차이 블록 bootstrap(연율) p05 ${pct(V.bootstrap_test_daily_diff_annualized.p05)} / p50 ${pct(V.bootstrap_test_daily_diff_annualized.p50)} / p95 ${pct(V.bootstrap_test_daily_diff_annualized.p95)}</p></div>`;
+  const hs=$("#hists");
+  [[`${sel.pool}|${sel.market}|${sel.topn}|test|H60`,"선택 규칙 후보군 (Test)",V.test.selected.total_return],[`F0|M0|${sel.topn}|test|H60`,"Strict 전체 (Test)",V.test.baseline.total_return],[`${sel.pool}|${sel.market}|${sel.topn}|full|H60`,"선택 규칙 후보군 (전체)",V.full.selected.total_return],[`F0|M0|${sel.topn}|full|H60`,"Strict 전체 (전체)",V.full.baseline.total_return]].forEach(([k,t,v])=>{const d=document.createElement("div");d.className="kpi";hs.appendChild(d);hist(d,D.rdist[k]||[],[{v,l:"전략",c:"--c2"}],{title:t+" — 무작위 1,000회 분포"})});
+})();
+
+// ── 민감도 ──
+(function(){
+  const hz=[];["P_A","P_B","P_C"].forEach(p=>["H60","H120","UNL"].forEach(h=>{const r=q(S,{role:"baseline_E00",profile:p,topn:1,horizon:h,segment:"full"})[0];if(r)hz.push({...r,pl:PROF[p]})}));
+  const ss=q(S,{role:["sensitivity_selected","sensitivity_baseline"]});
+  const ucols=[{k:"open_at_end",t:"미청산",f:int},{k:"open_capital_share",t:"미청산 비중",f:v=>pct(v,0)},{k:"open_unrealized_pnl",t:"미청산 평가손익($)",f:v=>sg(v,x=>int(x))},{k:"open_avg_age_days",t:"미청산 평균 보유(일)",f:int},{k:"avg_hold_days",t:"평균 보유(일)",f:int}];
+  $("#s-sens").innerHTML=`<div class="card"><h2>위험 설정 × 보유기간 (기준선 Top-1, 전체 기간)</h2>
+  <p class="mute small">UNL = 운영형 S01 (손절만, 시간 청산 없음). 운영 S01에 시간 청산을 추가하자는 제안이 아니라, 운영형에서도 성과와 위험을 감당할 수 있는지 확인하는 표입니다. UNL의 PF는 청산 거래가 모두 손절이라 0으로 표시되므로, 미청산 포함 PF와 미청산 평가손익을 함께 봅니다.</p>
+  ${table(hz,[{k:"pl",t:"위험 설정",l:1},{k:"horizon",t:"보유",l:1}].concat(MCOLS).concat([{k:"profit_factor_incl_open",t:"PF(미청산 포함)",f:v=>num(v)}]).concat(ucols))}
+  <div class="note">운영형(UNL)에서 거래가 6년간 10~20건으로 줄어드는 이유: 운영 Heat 계산(<code>calculate_open_risk</code> = 현재가 − 손절가)은 오른 종목의 평가이익을 위험으로 셉니다. 그런데 S01 손절가는 고정이고 시간 청산도 없어서, 크게 오른 1~3종목이 Heat 한도를 수년간 차지합니다. 절대 수익률은 그 1~3종목(현재 구성종목 → 생존 편향)에 좌우되므로 전략 비교 근거로 쓰지 않습니다.</div></div>
+  <div class="card"><h2>선택 규칙 vs 기준선: Heat 정의 · 같은 봉 손절 가정 · 슬리피지 · 자금 규모</h2>
+  ${table(ss,[{k:"role",t:"대상",l:1,f:v=>v==="sensitivity_selected"?"선택":"기준선"},{k:"profile",t:"설정",l:1},{k:"horizon",t:"보유",l:1},{k:"heat",t:"Heat 정의",l:1,f:v=>v==="entry"?"진입 위험":"현재가(운영)"},{k:"scenario",t:"같은 봉 손절",l:1,f:v=>v==="next_day"?"다음 날부터 감시":"보수(즉시)"},{k:"slip_bp",t:"슬리피지bp",f:int},{k:"segment",t:"구간",l:1}].concat(MCOLS.slice(0,9)).concat(ucols.slice(0,2)))}
+  <p class="mute small">같은 봉에서 매수 체결 후 손절이 나는 경우는 전체의 0.1~0.3%라, 보수 가정과 대안 가정(등록 지연)의 차이가 작습니다. 슬리피지 25·50bp에서는 모든 전략의 PF가 0.1~0.2 정도 떨어집니다.</p></div>`;
+})();
+
+// ── 진입 시점 ──
+(function(){
+  $("#s-time").innerHTML=`<div class="card"><h2>신호 최초 탐지 이후 매수 시점</h2>
+  <ul class="tight small"><li>T0: 탐지 다음 날 시가 (연속성용, 운영은 지정가만 씀)</li><li>T1_050 / T1_100: 탐지일 종가 +0.5% / +1% 지정가 1일, 미체결 시 취소 (추격 없음)</li><li>T2: 돌파 유지 확인 — D+1~D+3 종가가 피벗을 지키면 D+4에 지정가 (REBOUND는 T1)</li><li>T3: 눌림 — 피벗 +1% 이내(종가 +1% 상한) 지정가를 최대 5일 유지</li><li>모든 시점 공통: 시가 ≤ 손절가 또는 (시가−손절)/시가 &lt; 3%이면 전송하지 않음</li></ul>
+  ${table(D.timing,[{k:"timing",t:"시점",l:1},{k:"pool",t:"후보군",l:1},{k:"candidates",t:"후보",f:int},{k:"filled",t:"체결",f:int},{k:"unfilled",t:"미체결",f:int},{k:"skip_open_stop",t:"시가 확인 제외",f:int},{k:"skip_upthrust",t:"돌파 실패 제외",f:int},{k:"fill_rate",t:"체결률",f:v=>pct(v,0)},{k:"fill_at_open_share",t:"시가 체결 비중",f:v=>pct(v,0)},{k:"day0_stop_rate",t:"당일 손절",f:v=>pct(v,1)},{k:"H60_avg_R",t:"평균 R",f:v=>sg(v,x=>num(x,3))},{k:"H60_profit_factor",t:"PF",f:v=>num(v)},{k:"H60_stop_rate",t:"손절률",f:v=>pct(v,0)},{k:"H60_loss_10_rate",t:"−10%↓",f:v=>pct(v,0)}])}
+  <h3>포트폴리오 (F1 · Grade · P_C)</h3>${table(q(S,{role:"diagnostic_timing"}),[{k:"timing",t:"시점",l:1},{k:"topn",t:"N",f:NLAB},{k:"horizon",t:"보유",l:1},{k:"segment",t:"구간",l:1}].concat(MCOLS.slice(0,10)))}
+  <div class="note">T2(돌파 유지 확인)는 신호의 약 1/3을 제외하는데 Test 성과가 가장 나빴습니다. T3(눌림)은 체결률이 79~85%로 낮아지고 개선 효과가 없었습니다. T1_100은 체결률 96%, 시가 체결 90%로 T0와 거의 같은 결과를 내면서 지정가 상한으로 급등 추격을 막아 주므로, 운영 주문 방식으로 가장 적합합니다.</div></div>`;
+})();
+
+// ── 권장·금지 ──
+(function(){
+  const sr=R.selected_rule, ph=R.posthoc_candidate;
+  const ev=R.do_not_buy.evidence_based;
+  $("#s-rec").innerHTML=`<div class="card"><h2>추천 자동매수 조건</h2>
+  <p>${statusBadge(R.status)} 사전 등록 선택 규칙: ${sr.pool_text} · ${sr.market_text} · ${sr.rank_text} · 하루 Top-${sr.daily_top_n} → <b>채택하지 않음</b></p>
+  ${ph?`<h3>전향적 SHADOW 검증 후보 ${statusBadge(ph.status)}</h3><p class="small">${ph.label}</p><p><b>${ph.rule}</b></p><p class="small mute">${ph.why}</p>${table(Object.entries(ph.segments_H60_P_C).map(([k,v])=>({seg:k,...v})),[{k:"seg",t:"구간",l:1},{k:"total_return",t:"수익률",f:v=>sg(v)},{k:"cagr",t:"CAGR",f:v=>sg(v)},{k:"mdd",t:"MDD",f:v=>pct(v)},{k:"profit_factor",t:"PF",f:v=>num(v)},{k:"trades",t:"거래",f:int},{k:"avg_R",t:"평균 R",f:v=>num(v)},{k:"random_percentile",t:"무작위 백분위",f:v=>num(v,0)},{k:"random_median",t:"무작위 중앙",f:v=>pct(v)}])}`:""}
+  <h3>주문·수량 방식 (어느 규칙이든 공통)</h3><ul class="tight"><li>${sr.order}</li><li>${sr.sizing}</li><li>운영형 S01에서는 Heat를 현재가 기준으로 계산하면 신규 매수가 사실상 멈춥니다. 자동매수용 Heat 정의(진입 위험 기준, 또는 자동매수 전용 노출 한도)를 구현 전에 정해야 합니다.</li></ul></div>
+  <div class="card"><h2>매수하지 않아야 할 조건</h2><h3>운영 규칙 (백테스트에 반영)</h3><ul class="tight">${R.do_not_buy.hard_rules.map(x=>`<li>${x}</li>`).join("")}</ul>
+  <h3>데이터 근거 (전체 기간 H60 평균 R&lt;0 · PF&lt;1 · 표본 ≥30)</h3>
+  ${table(ev,[{k:"dimension",t:"기준",l:1},{k:"bucket",t:"구간",l:1},{k:"n_full",t:"표본",f:int},{k:"avg_R_full_H60",t:"평균 R",f:v=>sg(v,x=>num(x))},{k:"pf_full_H60",t:"PF",f:v=>num(v)},{k:"n_train",t:"Train n",f:int},{k:"avg_R_train",t:"Train R",f:v=>sg(v,x=>num(x))},{k:"avg_R_UNL",t:"UNL R",f:v=>sg(v,x=>num(x))},{k:"evidence",t:"근거",l:1,f:v=>v==="CONSISTENT"?'<span class="pos">전체·Train 일관</span>':'<span class="mute">전체 기간만</span>'}])}
+  <p class="small mute">표본 기준(≥30) 밖이지만 일관되게 나빴던 구간: 손절폭 15% 초과 (n=27, 전체 −0.12R · Train −0.26R).</p>
+  <h3>제외하면 안 되는 조건 (효과 없음 또는 역효과)</h3><ul class="tight"><li>돌파 실패 판정 보류 (탐지 당일에는 항상 붙음)</li><li>RE_BREAKOUT의 주봉 거래량 미달 (신호 정의)</li><li>손절폭 10~12% 초과를 일괄 제외 (12~15% 구간은 평균 이상)</li><li>Signal Quality STRONG만 매수 (MODERATE와 차이 없음)</li></ul></div>`;
+})();
+
+// ── P7 위험 예산 ──
+(function(){
+  const P=D.p7; if(!P||!P.summary){$("#s-p7").innerHTML="<div class='card'>P7 결과 없음</div>";return}
+  const X=P.summary, K=P.concl, PR=P.cfg.profiles, ST=P.cfg.strategies;
+  const PL=p=>(PR[p]||{}).label||p, SL=s=>s==="B02"?"B02 무작위 Top-2":s+" "+((ST[s]||{}).label||"");
+  const HZ={H60:"S01+60일",H120:"S01+120일",UNL:"운영형(기간 제한 없음)"};
+  const main=q(X,{group:"main",segment:"full"});
+  const rng=(a,f=pct)=>`${f(a[0])}~${f(a[1])}`;
+  const pc=[{k:"total_return",t:"수익률",f:v=>sg(v)},{k:"cagr",t:"CAGR",f:v=>sg(v)},{k:"mdd",t:"MDD",f:v=>pct(v)},{k:"calmar",t:"Calmar",f:v=>num(v)},{k:"profit_factor_incl_open",t:"PF(미청산 포함)",f:v=>num(v)},{k:"trades",t:"거래",f:int},{k:"stop_rate",t:"손절률",f:v=>pct(v,0)},{k:"avg_R",t:"평균 R",f:v=>sg(v,x=>num(x))},{k:"auto_capital_utilization",t:"자금활용",f:v=>pct(v,0)},{k:"heat_entry_avg",t:"Entry Heat",f:v=>pct(v,1)},{k:"heat_current_avg",t:"Current Heat",f:v=>pct(v,1)},{k:"open_capital_share",t:"미청산 비중",f:v=>pct(v,0)},{k:"max_sector_weight_max",t:"최대 섹터",f:v=>pct(v,0)},{k:"opportunity_reduction",t:"기회감소",f:v=>pct(v,0)}];
+  const blocks=["block_heat_limit_exceeded","block_duplicate_holding_or_order","block_r_band","block_daily_top_n","block_min_cash_reserve","block_current_heat_block","block_risk_budget_too_small","block_position_cap_too_small","block_insufficient_cash","block_stop_breached_open_position"];
+  const BL={block_heat_limit_exceeded:"Heat 한도",block_duplicate_holding_or_order:"보유·대기 중복",block_r_band:"R 3~15% 밖",block_daily_top_n:"하루 Top-N",block_min_cash_reserve:"현금 하한",block_current_heat_block:"Current Heat 차단",block_risk_budget_too_small:"위험예산 부족",block_position_cap_too_small:"비중 상한",block_insufficient_cash:"현금 부족",block_stop_breached_open_position:"손절선 이탈 보유"};
+  const oat=(g,k,lab)=>table(q(X,{group:g}),[{k:"strategy",t:"전략",l:1},{k:"horizon",t:"보유",l:1,f:v=>HZ[v]},{k:k,t:lab,f:v=>k==="MIN_CASH"?pct(v,0):num(v,2)+"%"}].concat(pc.filter(c=>["cagr","mdd","calmar","profit_factor_incl_open","trades","auto_capital_utilization","heat_entry_avg","open_capital_share","max_sector_weight_max"].includes(c.k))).concat([{k:"block_heat_limit_exceeded",t:"Heat 차단",f:int},{k:"block_min_cash_reserve",t:"현금하한 차단",f:int}]));
+  $("#s-p7").innerHTML=`
+  <div class="card"><h2>P7 결론 — 기존 판정 유지 ${statusBadge(K.verdict_maintained)} · B01 ${statusBadge("NEED_MORE_DATA")}</h2>
+  <p class="mute small">목적: 위험 예산의 구조 문제 확인. 사전 등록 그리드 ${int(P.meta.registry_runs)}회 + B02 무작위 ${int(P.meta.random_runs)}회. 새 점수제·새 사후 탐색 없음. 전체 기간(2021-01~2026-11) 1회 실행 기준. Test 구간은 P6 에서 이미 본 구간이라 독립 근거가 아닙니다.</p>
+  <ol class="tight">
+   <li><b>운영형 S01에서 매수가 멈추는 원인은 Heat 정의입니다.</b> 현재가 기준 Heat(운영 <code>calculate_open_risk</code>)로 예산을 판단하면 6년간 신규 매수가 ${K.unl_current_heat_trades.join("~")}건뿐입니다. 평균 Current Heat 중 ${rng(K.unl_current_heat_gain_share,v=>pct(v,0))}가 손절 위험이 아니라 <b>평가이익</b>입니다. 시간 청산이 없고 손절가가 고정이라, 오른 종목의 이익이 Heat 한도를 수년간 차지합니다.</li>
+   <li><b>Entry Heat로 바꾸면 매수는 회복되지만(${K.unl_entry_heat_trades.join("~")}건), 운영형에서는 자금이 포화됩니다.</b> 손절되지 않은 포지션의 진입 위험이 계속 남아 Entry Heat가 한도에 붙고, 미청산 자금 비중 ${rng(K.unl_entry_open_capital_share,v=>pct(v,0))}, 최대 섹터 비중 ${rng(K.unl_entry_max_sector,v=>pct(v,0))}, MDD ${pct(K.unl_entry_mdd[0])}~${pct(K.unl_entry_mdd[1])}까지 갑니다. 자동매수 sleeve 상한과 섹터 상한 같은 별도 안전장치가 필요합니다(최적화하지 않은 제안).</li>
+   <li><b>Current Heat는 경고로 쓰는 것이 맞습니다.</b> 운영형에서 Current Heat 차단 한도를 10%로 두면 거래가 ${K.current_block_unl_trades.none}건에서 ${K.current_block_unl_trades["0.1"]}건으로 줄고, 15%는 ${K.current_block_unl_trades["0.15"]}건, 20%는 ${K.current_block_unl_trades["0.2"]}건입니다.</li>
+   <li><b>손절가 없는 수동 보유가 첫날부터 결정적입니다.</b> 순자산 30%를 손절가 없이 보유하고 그 위험을 평가금액×15%로 계좌 Heat에 합치면 균형형(4%) 한도를 넘어 자동매수 ${K.manual30_risk15_trades}건입니다. 실제 account1 보유는 순자산의 약 28%입니다(2026-11-25 조회). → 자동매수 위험은 sleeve로 분리하고 계좌 전체 한도를 따로 두는 정책을 제안합니다.</li>
+   <li><b>B01의 Grade 순위는 같은 후보군 무작위(B02)보다 낫지 않습니다.</b> 전체 기간 무작위 대비 백분위: H60 ${["CONS","BAL","AGG"].map(p=>num(K.b01_vs_b02_full_pct[p+"|H60"],0)).join("/")} (보수/균형/적극), 운영형 ${["CONS","BAL","AGG"].map(p=>num(K.b01_vs_b02_full_pct[p+"|UNL"],0)).join("/")}. 필터 효과를 순위가 만들지 못합니다.</li>
+   <li><b>운영형 결과는 경로 의존이 매우 큽니다.</b> 추격 제외 하나(86건)만 다른 B01과 B01HX의 균형형 운영형 수익률이 ${pct(K.b01_vs_b01hx_unl_bal[0])} vs ${pct(K.b01_vs_b01hx_unl_bal[1])}입니다. 초기에 잡은 소수 종목이 결과를 좌우하므로 운영형 절대 수익률로 전략을 고르면 안 됩니다.</li>
+   <li><b>종목 비중 상한(10/15/20%)은 결과에 거의 영향이 없고, 현금 하한 20%는 운영형에서만 작동합니다.</b> 성과를 가장 크게 바꾸는 변수는 Heat 상한입니다. 위험 비율을 0.5%로 낮추면 H60 Calmar가 오히려 좋아졌습니다(분산 효과).</li>
+  </ol>
+  <p><b>권장 SHADOW 설정:</b> ${K.recommended_shadow_profile}. Current Heat 경고 10%·차단 없음(A10 결정 전), 손절가 없는 보유는 평가금액×15%를 계좌 한도 10%에 반영.</p>
+  <div class="note">한계: 일봉 데이터로는 주문 직전 실시간 확인(장중 시장 상태, 시세 나이·급변, 호가)을 재현할 수 없습니다. 시장 상태는 전일 확정값, 매수 위치·손절가 검증은 다음 날 시가로 대신했습니다. 섹터는 현재 GICS 분류입니다. 수동 보유 스트레스는 SPY로 대리했습니다.</div></div>
+
+  <div class="card"><h2>Heat 정의 비교 (기존형 위험 설정: 1% · 6% · 20%, 현금 하한 없음)</h2>
+  ${table(main.filter(r=>["LEG_CUR","LEG_ENT"].includes(r.profile)).sort((a,b)=>(a.strategy+a.horizon+a.profile)<(b.strategy+b.horizon+b.profile)?-1:1),[{k:"strategy",t:"전략",l:1},{k:"horizon",t:"보유",l:1,f:v=>HZ[v]},{k:"profile",t:"Heat",l:1,f:v=>v==="LEG_CUR"?"현재가(운영)":"Entry"}].concat(pc).concat([{k:"heat_current_gain_share",t:"Current Heat 중 평가이익",f:v=>pct(v,0)}]))}</div>
+
+  <div class="card"><h2>위험 설정 묶음 비교 ($50,000, 전체 기간)</h2>
+  <p class="mute small">보수형 0.5%·Entry Heat 2%·종목 10% / 균형형 0.75%·4%·15% / 적극형 1%·5%·15% (셋 다 현금 하한 20%) / 기존형 1%·6%·20%. 같은 프로필 안에서만 전략을 비교합니다.</p>
+  <div class="ctl" id="p7hz"></div><div id="p7tab"></div></div>
+
+  <div class="card"><h2>자산 · Drawdown · Entry/Current Heat · 자금 활용 · 섹터 집중</h2><div class="ctl" id="p7ctl"></div>
+  <h3>평가금액</h3><div id="p7eq"></div><h3>Drawdown</h3><div id="p7dd"></div><h3>Entry Heat</h3><div id="p7he"></div><h3>Current Heat</h3><div id="p7hc"></div><h3>자금 활용률 (평가금액 중 보유 비중)</h3><div id="p7ut"></div><h3>최대 섹터 비중</h3><div id="p7sc"></div></div>
+
+  <div class="card"><h2>신규 매수 차단 사유 (전체 기간 결정 건수 기준)</h2><p class="mute small">결정 = 해당 전략 후보군의 신호. 한 신호는 첫 번째로 걸린 사유 하나로 집계합니다. Heat 한도는 운영 <code>calculate_position</code>의 heat_limit_exceeded.</p>
+  ${table(main.slice().sort((a,b)=>(a.strategy+a.profile+a.horizon)<(b.strategy+b.profile+b.horizon)?-1:1),[{k:"strategy",t:"전략",l:1},{k:"profile",t:"설정",l:1,f:v=>PL(v)},{k:"horizon",t:"보유",l:1},{k:"decided",t:"결정",f:int},{k:"orders",t:"주문",f:int}].concat(blocks.map(b=>({k:b,t:BL[b],f:v=>v?int(v):"·"}))))}</div>
+
+  <div class="card"><h2>하나씩 변경 (기준: 균형형, Entry Heat, 현금 하한 20%)</h2>
+  <h3>거래당 위험</h3>${oat("oat_RISK_PCT","RISK_PCT","위험")}<h3>Entry Heat 상한</h3>${oat("oat_MAX_TOTAL_HEAT_PCT","HEAT_PCT","Heat")}<h3>종목 비중 상한</h3>${oat("oat_MAX_POSITION_PCT","POS_PCT","비중")}<h3>현금 최소 유지</h3>${oat("oat_min_cash_pct","MIN_CASH","현금 하한")}
+  <h3>현금 하한 20% vs 0% (보수·균형·적극)</h3>${table(q(X,{group:"min_cash0"}).concat(q(X,{group:"main",segment:"full",strategy:["B00N","B01"],profile:["CONS","BAL","AGG"]})).sort((a,b)=>(a.strategy+a.profile+a.horizon+a.MIN_CASH)<(b.strategy+b.profile+b.horizon+b.MIN_CASH)?-1:1),[{k:"strategy",t:"전략",l:1},{k:"profile",t:"설정",l:1,f:v=>PL(v)},{k:"horizon",t:"보유",l:1},{k:"MIN_CASH",t:"현금 하한",f:v=>pct(v,0)},{k:"cagr",t:"CAGR",f:v=>sg(v)},{k:"mdd",t:"MDD",f:v=>pct(v)},{k:"trades",t:"거래",f:int},{k:"open_capital_share",t:"미청산 비중",f:v=>pct(v,0)},{k:"cash_ratio_min",t:"최저 현금",f:v=>pct(v,0)},{k:"block_min_cash_reserve",t:"현금하한 차단",f:int}])}</div>
+
+  <div class="card"><h2>Current Heat 별도 차단 한도 (균형형)</h2>${table(q(X,{group:"current_block"}),[{k:"strategy",t:"전략",l:1},{k:"horizon",t:"보유",l:1,f:v=>HZ[v]},{k:"current_block",t:"차단 한도",f:v=>v==null?"없음":pct(v,0)}].concat(pc.filter(c=>["cagr","mdd","profit_factor_incl_open","trades","auto_capital_utilization","heat_current_avg","open_capital_share"].includes(c.k))).concat([{k:"current_warn_day_share",t:"경고(≥10%) 일수",f:v=>pct(v,0)},{k:"block_current_heat_block",t:"차단 건수",f:int}]))}</div>
+
+  <div class="card"><h2>손절가 없는 수동 보유 스트레스 (균형형, 순자산 30% 를 SPY 로 대리)</h2>
+  ${table(q(X,{group:"manual"}),[{k:"strategy",t:"전략",l:1},{k:"horizon",t:"보유",l:1},{k:"manual_pct",t:"수동 보유",f:v=>pct(v,0)},{k:"manual_risk",t:"가정 위험률",f:v=>v+"%"},{k:"trades",t:"자동 거래",f:int},{k:"cagr",t:"계좌 CAGR",f:v=>sg(v)},{k:"mdd",t:"MDD",f:v=>pct(v)},{k:"heat_entry_avg",t:"Entry Heat",f:v=>pct(v,1)},{k:"block_heat_limit_exceeded",t:"Heat 차단",f:int},{k:"block_min_cash_reserve",t:"현금하한 차단",f:int}])}
+  <p class="small">가정 위험률 0% = 현행 운영(손절가 없으면 위험 0). 15% = MAX_R 가정 → 4.5% 로 균형형 한도 4% 초과, 자동매수 0건. 100% = 전액 위험. 계좌 CAGR 에는 SPY 수익이 포함됩니다.</p></div>
+
+  <div class="card"><h2>B01 vs B02 (같은 후보군 무작위 Top-2 × 1,000회)</h2>
+  ${table(P.b02.slice().sort((a,b)=>(a.segment+a.profile+a.horizon)<(b.segment+b.profile+b.horizon)?-1:1),[{k:"segment",t:"구간",l:1},{k:"profile",t:"설정",l:1,f:v=>PL(v)},{k:"horizon",t:"보유",l:1},{k:"B01_total_return",t:"B01 수익률",f:v=>sg(v)},{k:"B02_total_return_p05",t:"B02 p5",f:v=>pct(v)},{k:"B02_total_return_p50",t:"B02 중앙",f:v=>pct(v)},{k:"B02_total_return_p95",t:"B02 p95",f:v=>pct(v)},{k:"B01_total_return_pct",t:"백분위",f:v=>`<b class="${v>=75?"pos":v<25?"neg":""}">${num(v,0)}</b>`},{k:"B01_profit_factor",t:"B01 PF",f:v=>num(v)},{k:"B02_profit_factor_p50",t:"B02 PF 중앙",f:v=>num(v)},{k:"B01_mdd",t:"B01 MDD",f:v=>pct(v)},{k:"B02_mdd_p50",t:"B02 MDD 중앙",f:v=>pct(v)}])}
+  <p class="mute small">운영형(UNL)의 PF 는 청산 거래가 모두 손절이라 0 으로 표시됩니다. test 구간은 P6 에서 이미 본 구간입니다.</p></div>
+
+  <div class="card"><h2>R 분포 · 갭 하락 · 연속 손절 · 집중도</h2>
+  ${table(main.slice().sort((a,b)=>(a.strategy+a.profile+a.horizon)<(b.strategy+b.profile+b.horizon)?-1:1),[{k:"strategy",t:"전략",l:1},{k:"profile",t:"설정",l:1,f:v=>PL(v)},{k:"horizon",t:"보유",l:1},{k:"R_p10",t:"R p10",f:v=>num(v)},{k:"R_p50",t:"R 중앙",f:v=>num(v)},{k:"R_p90",t:"R p90",f:v=>num(v)},{k:"top3_pnl_share",t:"상위3 손익 비중",f:v=>v==null?"–":pct(v,0)},{k:"gap_stops",t:"갭 손절",f:int},{k:"gap_avg_R",t:"갭 평균 R",f:v=>num(v)},{k:"gap_worst_R",t:"갭 최악 R",f:v=>num(v)},{k:"max_consec_stops",t:"연속 손절",f:int},{k:"worst_day",t:"최악 일",f:v=>pct(v)},{k:"max_pos_weight_max",t:"최대 종목",f:v=>pct(v,0)},{k:"max_sector_weight_max",t:"최대 섹터",f:v=>pct(v,0)}])}
+  <p class="mute small">운영형의 연속 손절은 청산 거래가 손절뿐이라 크게 나옵니다(미청산은 연속 계산에서 제외). 상위3 손익 비중 &gt;100% 는 나머지 거래의 합이 손실이라는 뜻입니다.</p></div>
+
+  <div class="card"><h2>거래비용 민감도 (슬리피지 10 · 25 · 50bp, 편도 수수료 0.25% 별도)</h2>
+  ${table(q(X,{group:"slippage"}).sort((a,b)=>(a.strategy+a.profile+a.horizon+String(a.slip_bp).padStart(3,"0"))<(b.strategy+b.profile+b.horizon+String(b.slip_bp).padStart(3,"0"))?-1:1),[{k:"strategy",t:"전략",l:1},{k:"profile",t:"설정",l:1,f:v=>PL(v)},{k:"horizon",t:"보유",l:1},{k:"slip_bp",t:"슬리피지",f:v=>v+"bp"},{k:"cagr",t:"CAGR",f:v=>sg(v)},{k:"mdd",t:"MDD",f:v=>pct(v)},{k:"profit_factor_incl_open",t:"PF(미청산 포함)",f:v=>num(v)},{k:"avg_R",t:"평균 R",f:v=>num(v)},{k:"trades",t:"거래",f:int}])}</div>
+
+  <div class="card"><h2>운영형 데이터 끝 미청산 포지션 (Heat 점유)</h2>
+  ${table(P.open.slice().sort((a,b)=>b.weight-a.weight),[{k:"strategy",t:"전략",l:1},{k:"profile",t:"설정",l:1,f:v=>PL(v)},{k:"ticker",t:"종목",l:1},{k:"sector",t:"섹터",l:1},{k:"entry_date",t:"매수일",l:1},{k:"hold_days",t:"보유(일)",f:int},{k:"R_now",t:"현재 R",f:v=>num(v,1)},{k:"weight",t:"비중",f:v=>pct(v,1)},{k:"current_risk_pct",t:"Current 위험",f:v=>pct(v,1)},{k:"entry_risk_pct",t:"Entry 위험",f:v=>pct(v,1)}])}
+  <p class="mute small">현재 S&P500·Nasdaq100 구성종목이라 오래 보유한 승자 종목에 생존 편향이 가장 크게 작용합니다.</p></div>`;
+  // controls
+  const hzc=$("#p7hz");let hz="UNL";
+  function drawTab(){$("#p7tab").innerHTML=table(main.filter(r=>r.horizon===hz).sort((a,b)=>(a.profile+a.strategy)<(b.profile+b.strategy)?-1:1),[{k:"profile",t:"설정",l:1,f:v=>PL(v)},{k:"strategy",t:"전략",l:1}].concat(pc),{hl:r=>r.strategy==="B01"});hzc.querySelectorAll("button").forEach(b=>b.classList.toggle("on",b.dataset.h===hz))}
+  ["H60","H120","UNL"].forEach(h=>{const b=document.createElement("button");b.textContent=HZ[h];b.dataset.h=h;b.onclick=()=>{hz=h;drawTab()};hzc.appendChild(b)});drawTab();
+  const ctl=$("#p7ctl");let st="B01",ch="UNL";const di0=d=>D.dates.indexOf(d);
+  const cols={CONS:"--c3",BAL:"--c1",AGG:"--c2",LEG_CUR:"--c5",LEG_ENT:"--c4"};
+  function drawCh(){const L=Object.keys(PR).map(p=>[p,P.daily[`${st}|${p}|${ch}`]]).filter(x=>x[1]);
+    const mk=f=>L.map(([p,s])=>({name:PL(p),c:cols[p],i0:Math.max(0,di0(s.d0)),ys:s[f]}));
+    lineChart($("#p7eq"),mk("equity"),{fmt:v=>"$"+Math.round(v).toLocaleString(),h:260});
+    lineChart($("#p7dd"),mk("drawdown"),{fmt:v=>pct(v,1),h:180,zero:true});
+    lineChart($("#p7he"),mk("heat_entry"),{fmt:v=>pct(v,1),h:170,zero:true});
+    lineChart($("#p7hc"),mk("heat_current"),{fmt:v=>pct(v,1),h:170,zero:true});
+    lineChart($("#p7ut"),mk("utilization"),{fmt:v=>pct(v,0),h:160,zero:true});
+    lineChart($("#p7sc"),mk("max_sector_w"),{fmt:v=>pct(v,0),h:160,zero:true});
+    ctl.querySelectorAll("button").forEach(b=>b.classList.toggle("on",b.dataset.v===st||b.dataset.v===ch))}
+  [["B00N","B00-N"],["B01","B01"]].forEach(([v,l])=>{const b=document.createElement("button");b.textContent=l;b.dataset.v=v;b.onclick=()=>{st=v;drawCh()};ctl.appendChild(b)});
+  [["H60",HZ.H60],["UNL",HZ.UNL]].forEach(([v,l])=>{const b=document.createElement("button");b.textContent=l;b.dataset.v=v;b.onclick=()=>{ch=v;drawCh()};ctl.appendChild(b)});
+  drawCh();
+})();
+
+// ── 방법·한계 ──
+(function(){
+  const A=D.audit,E=V.experiment_counts;
+  $("#s-meth").innerHTML=`<div class="card"><h2>데이터</h2>${table([
+   ["신호 출처",A.data_quality],["미국 replay 행 / Strict 통과",`${int(A.source_signals.rows_us)} / ${int(A.source_signals.strict_passed)}`],["매수 후보 (Strict 통과 스냅샷)",`${int(A.candidates)} (최초 탐지 = Strict 통과 ${A.candidate_snapshot.strict_pass_equals_first_detection}, 이후 통과 ${A.candidate_snapshot.strict_pass_after_first_detection})`],
+   ["탐지 기간",A.detect_range.join(" ~ ")+` · 가격 끝 ${A.calendar_end}`],["유형",JSON.stringify(A.by_type)],["Grade / Quality",JSON.stringify(A.by_grade)+" / "+JSON.stringify(A.by_quality)],["시장 상태",JSON.stringify(A.by_market_condition)],["연도별",JSON.stringify(A.by_year)],["하루 후보",`신호일 ${A.per_day.days} · 중앙 ${A.per_day.median} · 최대 ${A.per_day.max} · 3개 이상 ${A.per_day.days_ge3}일`],
+   ["분할 (탐지일 고유값 60/20/20)",Object.entries(A.split_cuts).map(([k,v])=>`${k} ${v[0]}~${v[1]} (${A.split_counts[k]})`).join(" · ")],["미래 정보 점검",JSON.stringify(A.lookahead_checks)]].map(([a,b])=>({a,b})),[{k:"a",t:"항목",l:1},{k:"b",t:"값",l:1}])}</div>
+  <div class="card"><h2>방법</h2><ul class="tight small">
+   <li>매수 결정: 탐지일 장 마감 후 그 종가까지의 정보만 사용. 체결은 다음 정규장 이후. 결정 스냅샷의 Scanner 손절가를 고정 (재스캔 값 미사용).</li>
+   <li>S01 경로: 기존 <code>exit_strategy.execution_simulator</code>와 300건 대조 결과 손절·기간 청산 모두 일치. 유일한 차이는 기존 코드가 60일 미청산 평가 시 매도비용을 빼지 않았다는 점이며, 여기서는 포트폴리오 시뮬레이터와 같이 매도비용을 반영했습니다.</li>
+   <li>수량: 운영 <code>scanner.sizing.calculate_position</code>을 그대로 호출 (계획가 = 지정가 상한). 보유·대기 주문 종목 중복 매수 금지, 같은 신호 재주문 금지, 정수 주식, 체결가 기준 실제 위험 기록.</li>
+   <li>구간 평가: 각 구간은 초기자금에서 새로 시작하고, 구간 끝 미청산은 그날 종가로 평가합니다. 따라서 Train 성과와 선택은 Validation·Test 가격을 참조하지 않습니다 (H60·H120·UNL 모두 동일).</li>
+   <li>점수제 적합: Train 신호만 사용하고 결과는 Train 끝에서 절단. 신호 유형별 평균을 뺀 R과 Spearman p&lt;0.05인 요소만 사용. Walk-forward에서는 창마다 직전 24개월로 다시 적합.</li>
+   <li>선택: P_C · H60 · Validation 목적함수 = 수익률 / max(|MDD|, 5%), 거래 ≥15. 선택된 1개만 Test 평가.</li>
+  </ul></div>
+  <div class="card"><h2>실험 수 (사전 등록)</h2><p>등록부 실행 ${int(E.registry_runs)}회 (역할별 ${Object.entries(E.by_role).map(([k,v])=>k+" "+v).join(" · ")}) · 채택 후보 조합 ${E.eligible_combinations}개 · 무작위 기준선 ${int(E.random_runs)}회 · Walk-forward ${E.walk_forward_windows}개 창 × 무작위 1,000회 · 사후 탐색 ${D.posthoc.length}행 (채택 근거 아님, 결과 확인 후 추가)</p>
+  <h3>Train 점수 요소 적합 (유형 보정 R과의 Spearman)</h3>${table(D.scorefit,[{k:"feature",t:"요소",l:1},{k:"rho",t:"rho",f:v=>num(v,3)},{k:"p",t:"p",f:v=>num(v,4)},{k:"n",t:"n",f:int}])}
+  <p class="small">SC1 = ${JSON.stringify(V.score_fit_train.SC1)} · SC2 = ${JSON.stringify(V.score_fit_train.SC2)} · SC3 = ${JSON.stringify(V.score_fit_train.SC3)}</p>
+  <h3>Validation 선택표 (목적함수 순)</h3>${table(D.valsel,[{k:"pool",t:"후보군",l:1},{k:"market",t:"시장",l:1,f:v=>MK[v]},{k:"rank",t:"순위",l:1},{k:"topn",t:"N",f:NLAB},{k:"total_return",t:"수익률",f:v=>sg(v)},{k:"mdd",t:"MDD",f:v=>pct(v)},{k:"profit_factor",t:"PF",f:v=>num(v)},{k:"trades",t:"거래",f:int},{k:"objective",t:"목적함수",f:v=>num(v,3)}],{hl:r=>r.pool===sel.pool&&r.market===sel.market&&r.rank===sel.rank&&r.topn===sel.topn})}</div>
+  <div class="card"><h2>한계</h2><ul class="tight">${A.limitations.map(x=>`<li>${x}</li>`).join("")}<li>Validation 구간 거래가 23~38건으로 적어 선택 자체의 노이즈가 큽니다 (같은 규칙도 N에 따라 순위가 크게 바뀜).</li><li>UNL(운영형)의 절대 성과는 수년간 보유한 소수 종목에 좌우되며, 그 종목들이 현재 구성종목이라는 생존 편향이 가장 크게 작용합니다.</li></ul></div>`;
+})();
+</script>
+</body>
+</html>
