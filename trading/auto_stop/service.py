@@ -303,6 +303,11 @@ def health(store, settings=None, now=None) -> dict:
         "last_quote_issue": store.runtime_get("last_quote_issue"),
         "consecutive_errors": store.runtime_get("consecutive_api_errors", 0),
         "last_api_error": store.runtime_get("last_api_error"),
+        "api_errors": store.runtime_get("api_errors", {}) or {},
+        "global_hold": store.runtime_get("global_hold_state") or {"reasons": [], "since": None},
+        "quote_global_hold": store.runtime_get("quote_global_hold"),
+        "quote_health": _quote_health_view(store, settings.mode),
+        "recent_quote_errors": (store.runtime_get("quote_errors_recent", []) or [])[-10:],
         "unresolved_orders": len(unresolved),
         "unknown_orders": sum(o["state"] in ("UNKNOWN", "CANCEL_UNKNOWN") for o in unresolved),
         "needs_review": sum(p["state"] == "NEEDS_REVIEW" for p in live_positions)
@@ -314,6 +319,15 @@ def health(store, settings=None, now=None) -> dict:
                     "event_replace_count": e["event_replace_count"],
                     "carry_over_count": e["carry_over_count"]} for e in events],
     }
+
+
+def _quote_health_view(store, mode) -> list:
+    if mode not in ("SHADOW", "LIVE"):
+        return []
+    health = store.runtime_get(f"quote_health:{mode}", {}) or {}
+    keys = ("position_id", "ticker", "state", "consecutive_errors", "last_ok_at", "last_ok_as_of", "next_due_at",
+            "fault_started_at", "fault_reason", "recovered_at", "confirm_as_of", "last_error", "first_error")
+    return [{k: rec.get(k) for k in keys} for _, rec in sorted(health.items(), key=lambda kv: int(kv[0]))]
 
 
 KILL_ON_PHRASE, KILL_OFF_PHRASE = "STOP", "RESUME"
@@ -360,6 +374,10 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     events = [e for e in store.events(mode=mode) if ny_date(e["triggered_at"]) == d]
     positions = []
     total_expected = total_ok = 0
+    health = store.runtime_get(f"quote_health:{mode}", {}) or {}
+    day_start = datetime.combine(d, datetime.min.time(), tzinfo=NEW_YORK).timestamp()
+    fault_audits = store.audits("quote_fault", day_start, day_start + 86400) + \
+        store.audits("quote_recovered", day_start, day_start + 86400)
     for p in store.positions(mode=mode):
         if p["created_at"] >= end:
             continue
@@ -371,15 +389,42 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         if window <= 0 and not p_events:
             continue
         expected = int(window // max(1, settings.price_interval_sec))
-        ok = int(stat("quote_ok", p["ticker"]))
+        t = p["ticker"]
+        ok = int(stat("quote_ok", t))
+        held = int(stat("slot_held", t))
+        paused = int(stat("slot_paused", t))
+        failed_slots = int(stat("slot_failed", t))
+        missed = max(0, expected - ok)            # 누락 합계 (아래 보류·실패·스케줄 지연으로 분해)
         total_expected += expected
         total_ok += ok
-        positions.append({"id": p["id"], "ticker": p["ticker"], "state": p["state"], "expected_checks": expected,
-                          "ok_checks": ok, "missed_checks": max(0, expected - ok),
-                          "quote_fail": int(stat("quote_fail", p["ticker"])),
-                          "quote_invalid": int(stat("quote_invalid", p["ticker"])),
-                          "max_quote_age_sec": maxstat("max_quote_age_sec", p["ticker"]),
-                          "last_quote_at": p["last_quote_at"], "last_check_at": p["last_price_check_at"]})
+        rec = health.get(str(p["id"])) or {}
+        target = f"{mode}:{t}"
+        faults = [{"at": a["at"], "kind": "fault" if a["action"] == "quote_fault" else "recovered",
+                   "category": a["details"].get("category")}
+                  for a in sorted(fault_audits, key=lambda a: a["at"])
+                  if a["target"] == target and a["details"].get("position_id") in (None, p["id"])]
+        positions.append({
+            "id": p["id"], "ticker": t, "state": p["state"], "expected_checks": expected,
+            # 슬롯 기준 (감시 슬롯 = 감시 주기 1칸, 성공은 슬롯당 1회만 센다)
+            "ok_checks": ok, "missed_checks": missed, "held_slots": held, "paused_slots": paused,
+            "failed_slots": failed_slots, "schedule_missed": max(0, missed - held - paused - failed_slots),
+            "deferred": int(stat("slot_deferred", t)),
+            "normal_rate_pct": round(ok / expected * 100, 1) if expected else None,
+            # 시도 기준 (일반 감시 1회 = 증권사 시세 조회 1회 + 검증. HTTP 요청 수와 다를 수 있다)
+            "watch_attempts": int(stat("watch_attempt", t)),
+            "quote_fail": int(stat("quote_fail", t)), "quote_invalid": int(stat("quote_invalid", t)),
+            "recovery": {"attempts": int(stat("recovery_attempt", t)), "ok": int(stat("recovery_ok", t)),
+                         "fail": int(stat("recovery_fail", t)), "invalid": int(stat("recovery_invalid", t)),
+                         "stale_repeat": int(stat("recovery_stale", t))},
+            "order_quote": {"ok": int(stat("order_quote_ok", t)), "fail": int(stat("order_quote_fail", t)),
+                            "invalid": int(stat("order_quote_invalid", t)),
+                            "held": int(stat("order_held_symbol", t))},
+            "held_triggers": int(stat("held_trigger", t)),
+            "max_quote_age_sec": maxstat("max_quote_age_sec", t),
+            "last_quote_at": p["last_quote_at"], "last_check_at": p["last_price_check_at"],
+            "health_state": rec.get("state"), "fault_started_at": rec.get("fault_started_at"),
+            "recovered_at": rec.get("recovered_at"), "faults": faults,
+            "first_error": rec.get("first_error") if (rec.get("first_error") or {}).get("day") == day else None})
     orders = [o for o in store.orders(mode=mode) if ny_date(o["created_at"]) == d]
     fills = []
     for o in orders:
@@ -399,18 +444,35 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     alerts = [a for a in store.recent_alerts(2000) if ny_date(a["created_at"]) == d]
     expected_ticks = int((end - start) // max(1, settings.tick_sec))
     max_gap = maxstat("max_tick_gap_sec")
+    holds = _hold_periods(store, start, end)
+    sum_pos = lambda key: sum(int(p[key]) for p in positions)       # noqa: E731
+    recovery_tot = {k: sum(int(p["recovery"][k]) for p in positions)
+                    for k in ("attempts", "ok", "fail", "invalid", "stale_repeat")}
     heartbeat = store.runtime_get("heartbeat_at")
     unresolved_orders = store.orders(mode=mode, states=UNRESOLVED)
     return {
         **base,
         "session": {"open_at": start, "close_at": session.close_ts, "early_close": session.early_close},
         "watched_positions": len(positions),
-        "watch": {"expected": total_expected, "ok": total_ok, "missed": max(0, total_expected - total_ok),
+        "watch": {"expected": total_expected, "ok": total_ok, "missed": sum_pos("missed_checks"),
+                  "held_slots": sum_pos("held_slots"), "failed_slots": sum_pos("failed_slots"),
+                  "schedule_missed": sum_pos("schedule_missed"), "attempts": sum_pos("watch_attempts"),
+                  "api_errors": sum_pos("quote_fail"), "invalid": sum_pos("quote_invalid"),
+                  "normal_rate_pct": round(total_ok / total_expected * 100, 1) if total_expected else None,
                   "positions": positions},
+        # 일반 감시와 따로 센다. 회복 확정에 쓴 시세는 정상 감시 성공(watch.ok)에 넣지 않는다.
+        "recovery": recovery_tot,
+        "holds": {**holds, "held_triggers": int(stat("held_trigger"))},
+        # Scheduler heartbeat (tick) 은 종목별 시세 감시와 별개로 평가한다.
         "ticks": {"expected": expected_ticks, "actual": int(stat("ticks")), "max_gap_sec": max_gap},
         "api": {"errors": int(stat("api_error")), "by_category": {r["key"]: int(r["value"]) for r in stats
                                                                    if r["metric"] == "api_error"},
-                "http_429": int(stat("http_429"))},
+                "quote_errors": {r["key"]: int(r["value"]) for r in stats if r["metric"] == "quote_error"},
+                "http_429": int(stat("http_429")), "http_requests": int(stat("http_requests")),
+                "http_requests_by_api": {r["key"]: int(r["value"]) for r in stats if r["metric"] == "http_requests"},
+                "other_recovery": {k: {"attempts": int(stat("recovery_attempt", k)),
+                                       "ok": int(stat("recovery_ok", k)), "fail": int(stat("recovery_fail", k))}
+                                   for k in ("balance", "orders")}},
         "triggers": len(events),
         "orders": {"total": len(orders), "by_kind": {k: sum(o["kind"] == k for o in orders)
                                                      for k in ("ORIGINAL", "REPLACE", "CARRY_OVER")},
@@ -427,6 +489,31 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         "heartbeat": {"last_at": heartbeat, "max_tick_gap_sec": max_gap,
                       "ok": bool(heartbeat) and (max_gap is None or max_gap <= 3 * settings.tick_sec)},
     }
+
+
+def _hold_periods(store, start, end) -> dict:
+    """전체 보류 구간 (global_hold 감사 기록). 정규장 [start, end] 로 자른다."""
+    rows = sorted(store.audits("global_hold", 0, end + 1), key=lambda a: a["at"])
+    periods, cur, reasons = [], None, []
+    for a in rows:
+        to = a["details"].get("to") or []
+        if to and cur is None:
+            cur, reasons = a["at"], to
+        elif to and cur is not None:
+            reasons = sorted(set(reasons) | set(to))
+        elif not to and cur is not None:
+            periods.append((cur, a["at"], reasons))
+            cur, reasons = None, []
+    if cur is not None:
+        periods.append((cur, None, reasons))
+    out, total = [], 0.0
+    for a, b, why in periods:
+        lo, hi = max(a, start), min(b if b is not None else end, end)
+        if hi <= lo:
+            continue
+        total += hi - lo
+        out.append({"from": lo, "to": b, "reasons": why})
+    return {"global_seconds": round(total, 1), "periods": out}
 
 
 def _order_shadow_config(o) -> dict:
@@ -468,10 +555,21 @@ def report_text(rep: dict) -> str:
     if not rep["trading_day"]:
         return f"[자동손절 일일 보고 {rep['day']} {rep['mode']}] 휴장일"
     w, o = rep["watch"], rep["orders"]
+    r, hd = rep.get("recovery") or {}, rep.get("holds") or {}
+    per = " · ".join(f"{p['ticker']} {p['ok_checks']}/{p['expected_checks']}"
+                     + (f" 장애 {p['health_state']}" if p.get("health_state") not in (None, "OK") else "")
+                     for p in w.get("positions", []))
     return (f"[자동손절 일일 보고 {rep['day']} {rep['mode']}] 감시 {rep['watched_positions']}종목 · "
-            f"정상 감시 {w['ok']}/{w['expected']} (누락 {w['missed']}) · tick {rep['ticks']['actual']}/"
-            f"{rep['ticks']['expected']} (최대 간격 {rep['ticks']['max_gap_sec']}초) · API 오류 {rep['api']['errors']} "
-            f"(429 {rep['api']['http_429']}) · 손절 {rep['triggers']} · 주문 {o['total']} (재주문 {o['by_kind']['REPLACE']}, "
+            f"정상 감시 {w['ok']}/{w['expected']} (누락 {w['missed']} = 보류 미실행 {w.get('held_slots', 0)} + 감시 실패 "
+            f"{w.get('failed_slots', 0)} + 스케줄 지연 {w.get('schedule_missed', 0)}) · 일반 감시 시도 {w.get('attempts', 0)} "
+            f"(API 오류 {w.get('api_errors', 0)}, 무효 {w.get('invalid', 0)}) · 회복 조회 {r.get('ok', 0)}/"
+            f"{r.get('attempts', 0)} (실패 {r.get('fail', 0)}, 무효 {r.get('invalid', 0)}, 동일시세 "
+            f"{r.get('stale_repeat', 0)}) · 전체 보류 {int(hd.get('global_seconds', 0))}초"
+            + (f" · 종목별 {per}" if per else "")
+            + f" · tick {rep['ticks']['actual']}/"
+            f"{rep['ticks']['expected']} (최대 간격 {rep['ticks']['max_gap_sec']}초) · API 오류 합계 {rep['api']['errors']} "
+            f"(HTTP 요청 {rep['api'].get('http_requests', 0)}, 429 {rep['api']['http_429']}) · 손절 {rep['triggers']} · "
+            f"주문 {o['total']} (재주문 {o['by_kind']['REPLACE']}, "
             f"체결 {o['filled']}, 미체결 {o['partial_or_open']}) · 미해결 이벤트 {rep['unresolved_events']} · "
             f"알림 실패 {rep['alerts']['failed']}" + _shadow_text(rep.get("shadow"))
             + (f" · {rep['note']}" if rep["note"] else ""))

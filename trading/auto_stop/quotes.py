@@ -11,7 +11,16 @@ MIN_AUTO_PRICE = Decimal("1.00")   # $1 미만 호가 단위는 주문 클라이
 
 
 class QuoteUnavailable(Exception):
-    """시세를 주문 근거로 쓸 수 없음."""
+    """시세를 주문 근거로 쓸 수 없음.
+
+    ``info`` 는 원인 분류용 구조화 정보다 (quote_health.classify 가 읽는다): category, http_status,
+    return_code, 요청·응답 종목·거래소, 실패 필드, retry·429 횟수 등. 실제 응답에 없는 값은 넣지 않는다.
+    원본 응답 전체·토큰·계좌 식별자는 넣지 않는다.
+    """
+
+    def __init__(self, message="", *, info=None):
+        super().__init__(message)
+        self.info = dict(info or {})
 
 
 @dataclass(frozen=True)
@@ -24,25 +33,41 @@ class Quote:
     bid: Decimal | None = None   # 1호가 필드가 검증·설정된 경우만
 
 
-def validate(quote: Quote, now: float, clock, settings) -> str | None:
-    """주문 근거로 쓸 수 없으면 사유를 돌려준다. bid_tm 만으로 실시간·거래 가능을 확정하지 않는다."""
+def validate_detail(quote: Quote, now: float, clock, settings, expect=None) -> tuple[str, str] | None:
+    """주문 근거로 쓸 수 없으면 (코드, 사유). 일반 감시·회복 조회·주문 직전이 모두 이 함수를 쓴다.
+
+    expect=(ticker, exchange) 이면 응답 종목·거래소 일치도 확인한다. bid_tm 만으로 실시간·거래 가능을
+    확정하지 않는다 (거래정지·서킷브레이커 필드는 API 에서 미확인 → 시세 나이로만 감지).
+    """
+    if expect is not None:
+        ticker, exchange = expect
+        if str(quote.ticker or "").upper() != str(ticker).upper():
+            return "symbol_mismatch", "시세 응답의 종목이 요청과 다릅니다."
+        if str(quote.exchange or "").upper() != str(exchange).upper():
+            return "exchange_mismatch", "시세 응답의 거래소가 요청과 다릅니다."
     if not isinstance(quote.price, Decimal) or not quote.price.is_finite() or quote.price <= 0:
-        return "시세 가격이 유효하지 않습니다."
+        return "price_invalid", "시세 가격이 유효하지 않습니다."
     if quote.as_of is None:
-        return "증권사 시세 시각이 없습니다 (usa20100 대체 응답 등)."
+        return "no_quote_time", "증권사 시세 시각이 없습니다 (usa20100 대체 응답 등)."
     if clock.session is None:
-        return "정규장 거래일이 아닙니다."
+        return "not_trading_day", "정규장 거래일이 아닙니다."
     if ny_date(quote.as_of) != clock.session.day:
-        return "당일 정규장 시세가 아닙니다."
+        return "not_today", "당일 정규장 시세가 아닙니다."
     # 분 단위 시각이므로 개장 직전 1분까지는 허용하지 않는다: 개장 시각 이전 시세는 프리마켓.
     if quote.as_of < clock.session.open_ts:
-        return "정규장 개장 이전 시세입니다."
+        return "pre_open", "정규장 개장 이전 시세입니다."
     age = now - quote.as_of
     if age < -60:
-        return "시세 시각이 현재보다 앞섭니다."
+        return "future_time", "시세 시각이 현재보다 앞섭니다."
     if age > settings.quote_max_age_sec:
-        return f"시세가 {int(age)}초 지났습니다 (한도 {settings.quote_max_age_sec}초)."
+        return "stale", f"시세가 {int(age)}초 지났습니다 (한도 {settings.quote_max_age_sec}초)."
     return None
+
+
+def validate(quote: Quote, now: float, clock, settings) -> str | None:
+    """주문 근거로 쓸 수 없으면 사유를 돌려준다 (validate_detail 의 사유 문구)."""
+    found = validate_detail(quote, now, clock, settings)
+    return found[1] if found else None
 
 
 def is_jump(prev: Decimal | None, price: Decimal, settings) -> bool:

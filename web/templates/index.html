@@ -810,6 +810,12 @@
               · 확인 필요 <strong :class="health.needs_review ? 'text-red-700' : ''" x-text="health.needs_review"></strong></div>
             <div x-show="health.last_api_error" class="text-amber-700" data-testid="last-api-error">최근 API 오류: <span x-text="health.last_api_error?.where"></span> (<span x-text="health.last_api_error?.type"></span>, <span x-text="fmt(health.last_api_error?.at)"></span>)</div>
             <div x-show="health.last_quote_issue" class="text-amber-700">최근 시세 경고: <span x-text="health.last_quote_issue?.ticker"></span> — <span x-text="health.last_quote_issue?.reason"></span></div>
+            <div x-show="(health.global_hold?.reasons || []).length" class="text-red-700" data-testid="global-hold">전체 신규 진입 보류: <span x-text="(health.global_hold?.reasons || []).join(', ')"></span> (시작 <span x-text="fmt(health.global_hold?.since)"></span>) — 회복 조회·주문 대조는 계속</div>
+            <template x-for="q in (health.quote_health || [])" :key="q.position_id"><div class="text-xs" data-testid="quote-health">
+              시세 <span x-text="q.ticker"></span>: <span :class="q.state === 'OK' ? '' : 'text-red-700 font-semibold'" x-text="q.state"></span>
+              · 연속 오류 <span x-text="q.consecutive_errors"></span> · 마지막 정상 <span x-text="fmt(q.last_ok_at)"></span>
+              <span x-show="q.state !== 'OK'"> · 장애 시작 <span x-text="fmt(q.fault_started_at)"></span> (<span x-text="q.fault_reason"></span>) · 회복 확인 <span x-text="(q.confirm_as_of || []).length"></span>/2</span>
+              <span x-show="q.last_error"> · 최근 오류 <span x-text="q.last_error?.category"></span></span></div></template>
           </div>
         </template>
         <p x-show="!health.journal" class="text-amber-700">주문 저널(SCANNER_ORDER_JOURNAL_PATH)이 설정되지 않아 자동 손절을 쓸 수 없습니다.</p>
@@ -917,14 +923,19 @@
         <div class="font-semibold">운영 보고 <span x-text="report.day + ' ' + report.mode"></span></div>
         <template x-if="!report.trading_day"><p>휴장일입니다.</p></template>
         <template x-if="report.trading_day"><div class="space-y-1">
-          <div>감시 <span x-text="report.watched_positions"></span>종목 · 정상 감시 <strong x-text="report.watch.ok + '/' + report.watch.expected"></strong> (누락 <span x-text="report.watch.missed"></span>)
+          <div>감시 <span x-text="report.watched_positions"></span>종목 · 정상 감시 <strong x-text="report.watch.ok + '/' + report.watch.expected"></strong> (누락 <span x-text="report.watch.missed"></span> = 보류 미실행 <span x-text="report.watch.held_slots ?? 0"></span> + 감시 실패 <span x-text="report.watch.failed_slots ?? 0"></span> + 스케줄 지연 <span x-text="report.watch.schedule_missed ?? 0"></span>)
             · tick <span x-text="report.ticks.actual + '/' + report.ticks.expected"></span> (최대 간격 <span x-text="report.ticks.max_gap_sec ?? '-'"></span>초)</div>
+          <div x-show="report.recovery" data-testid="report-recovery">일반 감시 시도 <span x-text="report.watch.attempts ?? 0"></span> (API 오류 <span x-text="report.watch.api_errors ?? 0"></span>, 무효 <span x-text="report.watch.invalid ?? 0"></span>)
+            · 회복 조회 <span x-text="(report.recovery?.ok ?? 0) + '/' + (report.recovery?.attempts ?? 0)"></span> (실패 <span x-text="report.recovery?.fail ?? 0"></span>, 무효 <span x-text="report.recovery?.invalid ?? 0"></span>, 동일 시세 <span x-text="report.recovery?.stale_repeat ?? 0"></span>)
+            · 전체 보류 <span x-text="Math.round(report.holds?.global_seconds ?? 0)"></span>초 · 보류 중 손절가 이하 관측 <span x-text="report.holds?.held_triggers ?? 0"></span> · HTTP 요청 <span x-text="report.api.http_requests ?? 0"></span></div>
           <div>API 오류 <span x-text="report.api.errors"></span> · HTTP 429 <span x-text="report.api.http_429"></span> · 손절 <span x-text="report.triggers"></span>
             · 주문 <span x-text="report.orders.total"></span> (재주문 <span x-text="report.orders.by_kind.REPLACE"></span>, 체결 <span x-text="report.orders.filled"></span>, 미체결 <span x-text="report.orders.partial_or_open"></span>)
             · 미해결 이벤트 <span x-text="report.unresolved_events"></span> · 알림 성공/실패 <span x-text="report.alerts.sent + '/' + report.alerts.failed"></span>
             · heartbeat <span x-text="report.heartbeat.ok ? '정상' : '이상'"></span></div>
           <template x-for="w in report.watch.positions" :key="w.id"><div class="text-xs">
-            <span x-text="w.ticker"></span>: 정상 <span x-text="w.ok_checks + '/' + w.expected_checks"></span>, 실패 <span x-text="w.quote_fail"></span>, 무효 <span x-text="w.quote_invalid"></span>, 최대 시세 지연 <span x-text="w.max_quote_age_sec ?? '-'"></span>초, 마지막 정상 <span x-text="fmt(w.last_check_at)"></span></div></template>
+            <span x-text="w.ticker"></span>: 정상 <span x-text="w.ok_checks + '/' + w.expected_checks"></span> (<span x-text="w.normal_rate_pct ?? '-'"></span>%), 실패 <span x-text="w.quote_fail"></span>, 무효 <span x-text="w.quote_invalid"></span>, 보류 <span x-text="w.held_slots ?? 0"></span>, 회복 <span x-text="w.recovery ? (w.recovery.ok + '/' + w.recovery.attempts) : '-'"></span>, 최대 시세 지연 <span x-text="w.max_quote_age_sec ?? '-'"></span>초, 마지막 정상 <span x-text="fmt(w.last_check_at)"></span>
+            <span x-show="w.health_state && w.health_state !== 'OK'" class="text-red-700"> · 시세 <span x-text="w.health_state"></span> (장애 시작 <span x-text="fmt(w.fault_started_at)"></span>)</span>
+            <span x-show="w.recovered_at" class="text-green-700"> · 복구 <span x-text="fmt(w.recovered_at)"></span></span></div></template>
           <template x-for="f in report.fills_vs_stop" :key="f.order_id"><div class="text-xs"><span x-text="f.ticker"></span> 가상 체결 <span x-text="f.filled_qty"></span>주 @ <span x-text="f.fill_price"></span> (손절가 대비 <span x-text="f.vs_stop_pct"></span>%)</div></template>
           <template x-if="report.shadow && report.shadow.by_model"><div class="text-xs space-y-1" data-testid="report-by-model">
             <div>현재 모델 <span x-text="report.shadow.current?.fill_model"></span> · SHADOW 재주문 <span x-text="report.shadow.current?.shadow_replace_enabled ? '켜짐' : '꺼짐'"></span>

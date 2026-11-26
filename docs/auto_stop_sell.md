@@ -29,7 +29,8 @@
 |---|---|
 | `trading/auto_stop/settings.py` | 환경변수, 실거래 게이트(`live_order_block_reason`, `live_cancel_block_reason`) |
 | `trading/auto_stop/us_calendar.py` | 규칙 기반 NYSE 캘린더: 휴장일, 13:00 조기폐장, 서머타임, env 임시휴장. 2020~2040 밖이면 닫힘 |
-| `trading/auto_stop/quotes.py` | 시세 검증, 기준가와 지정가 계산(Decimal) |
+| `trading/auto_stop/quotes.py` | 시세 검증(`validate_detail`: 일반 감시·회복 조회·주문 직전 공용), 기준가와 지정가 계산(Decimal) |
+| `trading/auto_stop/quote_health.py` | 시세 오류 분류(SYSTEM/SYMBOL/UNKNOWN), 민감정보 제거, 종목별 장애 상태 머신, 감시 슬롯 (순수 함수) |
 | `trading/auto_stop/store.py` | `SCANNER_ORDER_JOURNAL_PATH` SQLite 접근(DDL 없음, `mode=rw`), 조건부 전이, 선점, fill ledger, lease, 알림 outbox |
 | `trading/auto_stop/schema.py` | 런타임 스키마 검증(읽기 전용), 저널 전용 Migration 진입점 |
 | `trading/auto_stop/journal_migrations/` | 저널 전용 Alembic 환경 (`as0001`, 버전 표 `auto_stop_alembic_version`) |
@@ -54,10 +55,12 @@
    - LIVE 주문은 OFF나 SHADOW 모드에서도 실계좌 주문내역으로 대조한다.
    - SHADOW 주문은 가상 브로커로만 대조한다.
 4. 세션을 이월한다. 이월 횟수는 현재 모드의 이벤트에만 센다.
-5. SHADOW/LIVE 모드이고 정규장 시간이면 아래를 실행한다. 연속 오류 보류 중이면 조회 회복 확인만 한다.
-   - 잔고 동기화
-   - 손절 감시
-   - 청산 진행(신규 주문, 취소, 재주문)
+5. SHADOW/LIVE 모드이고 정규장 시간이면 아래를 실행한다 (상세: "시세 장애 격리와 복구").
+   - 전체 보류 사유를 계산한다 (잔고·주문상태·주문내역 연속 오류, 시세 공통 오류, 광범위 조회 실패).
+   - 잔고 동기화 (잔고 보류 중이면 잔고 회복 조회만)
+   - 시세 감시: 종목마다 예정 시각에 조회한다. 정상 종목은 일반 감시(트리거 가능), 장애 종목과 전체 보류 중인 종목은
+     회복 조회(같은 검증, 트리거·주문 없음). 한 종목의 예외는 다음 종목 조회를 막지 않는다.
+   - 청산 진행(신규 주문, 취소, 재주문): 전체 보류가 없을 때만. 시세 장애 종목은 주문·취소하지 않는다.
 6. 종료를 판정한다. 관리 잔여가 0이고 미확정 주문이 없으면 SOLD로 바꾼다. NEEDS_REVIEW 상태에서도 같다.
 7. 장 종료 후 마감 요약을 보내고, heartbeat를 기록하고, 알림 outbox를 전송한 뒤 lease를 해제한다.
 
@@ -65,7 +68,8 @@
 
 | 작업 | 주기 |
 |---|---|
-| 시세 | 60초 |
+| 시세 | 60초 (종목별 예정 시각 슬롯. 실패하면 같은 슬롯에서 다음 tick 1회 재시도) |
+| 시세 회복 조회 | 60초 (종목별. 429 반복 시 120·240초) |
 | 주문 상태 | 30초 |
 | 재주문 판단 | 주문 후 300초 |
 | 잔고 | 300초, 그리고 매 전송 직전 |
@@ -204,7 +208,7 @@ UNKNOWN/CANCEL_UNKNOWN ─(주문번호 없음)→ 사람이 주문번호를 입
 | `AUTO_STOP_US_SLIP_BPS` | 50 | 지정가 = 기준가 × (1 − bps) |
 | `AUTO_STOP_US_SESSION_START_OFFSET_MIN` / `_CUTOFF_MIN` | 0 / 5 | |
 | `AUTO_STOP_US_QUOTE_MAX_AGE_SEC` / `_QUOTE_JUMP_PCT` | 120 / 25 | |
-| `AUTO_STOP_US_MAX_CONSECUTIVE_ERRORS` | 5 | 종류별(시세/잔고/주문상태/주문내역) 연속 오류. 초과하면 신규 진입을 보류한다 |
+| `AUTO_STOP_US_MAX_CONSECUTIVE_ERRORS` | 5 | 연속 오류 임계값. 잔고/주문상태/주문내역/시세 공통 카운터는 도달하면 전체 신규 진입 보류, 종목별 시세 카운터는 도달하면 그 종목만 장애(FAULT) |
 | `AUTO_STOP_US_LEASE_SEC` | 90 | |
 | `AUTO_STOP_US_MAX_ORDER_QTY` / `_MAX_ORDER_NOTIONAL_USD` | 1000 / 20000 | 초과하면 NEEDS_REVIEW |
 | `AUTO_STOP_US_MAX_ACTIVE_POSITIONS` | 20 | |
@@ -313,6 +317,89 @@ python -m scripts.auto_stop_journal_migrate --backup-dir /var/backups/mystockapp
 - **실패해도 백업으로 자동 복원하지 않는다.** 실제 주문 기록이 있을 수 있는 저널을 과거 사본으로 덮지 않는다. 원인을 확인하고 사람이 판단한다.
 - 기존 `scanner_buy_orders` 테이블은 이전과 같이 Scanner 매수 모듈이 처음 쓸 때 스스로 만든다 (이번 변경 범위 밖, 정의 불변).
 
+## 시세 장애 격리와 복구 (2026-11-26)
+
+### 배경: 2026-11-25 SHADOW 첫날 FAIL
+
+- 미국 정규장 tick 780/780(최대 간격 30.8초)은 정상이었지만 유효 시세 감시는 73/734회였다 (CINF 53/390, EVRG 20/344). 일반 감시 시세 실패 6회 뒤 00:46:57 KST부터 전체 신규 손절 진입이 보류됐고 장 종료까지 풀리지 않았다 (회복 확인 실패 246회). 자동 손절 주문·이벤트는 0건.
+- 재현된 코드 문제 (배포 커밋 `6f196f5`):
+  1. 시세 연속 오류 카운터가 종목 공통이었다. 두 종목의 실패가 합쳐져 임계값에 도달했다.
+  2. 회복 확인(`_probe`)이 ID 기준 첫 포지션(CINF)만 반복 조회했다. CINF가 계속 실패하면 EVRG의 정상화를 확인할 방법이 없었다.
+  3. 회복 확인은 `broker.quote()` 반환만으로 카운터를 0으로 만들었다 (시각·나이·종목 검증 없음).
+  4. 시세 감시 다음 시각이 '마지막 성공 완료 시각 + 60초'라 30초 tick·응답 지연과 겹치면 간격이 약 90초로 늘었다.
+  5. `QuoteUnavailable` 로그에 예외 이름만 남아 최초 원인을 알 수 없었다. 예외로 끝난 호출의 HTTP 429 는 집계되지 않을 수 있었다. 회복 확인 실패는 일일 보고에 들어가지 않아 장애 규모가 작게 보였다.
+- **최초 키움 API 장애의 원인은 아직 확인되지 않았다.** 그래서 모든 오류를 종목별 장애로 보지 않는다.
+  - 코드 경로로 좁힌 범위 (원인 확정 아님): 기록된 예외 이름이 `QuoteUnavailable` 이므로 `LiveStopSellBroker.quote()` 안에서 났다. 키움 HTTP 오류·응답 코드 오류·JSON 오류를 감싼 '시세 조회 실패'이거나, 응답 해석 실패(종목·거래소 불일치, 현재가, 1호가 필드)다. 당시 코드에서 requests 네트워크 예외와 브로커 생성(토큰 발급) 실패는 다른 예외 이름으로 남으므로 해당하지 않는다.
+  - 후보 중 하나: 자동 손절 조회 경로(`runner.live_reader`)는 응답 코드 8005(토큰 무효)를 받아도 캐시 토큰을 강제 재발급하지 않는다 (보유 화면 경로 `web/kiwoom_holdings` 는 재발급한다). 이번 수정은 8005 를 `auth`(SYSTEM)로 분류·기록만 하고 재발급 동작은 바꾸지 않았다. SHADOW 재검증의 `return_code` 기록으로 확인한 뒤 별도로 결정한다.
+
+### 오류 범위 분류 (`quote_health.classify`)
+
+| 범위 | 분류(category) | 종목 카운터 | 전체(공통) 카운터 |
+|---|---|---|---|
+| SYSTEM | `auth`(HTTP 401/403, 키움 응답 코드 8005 '토큰 무효'), `rate_limit`(429 재시도 소진), `http_5xx`, `network`, `timeout`, `response_format`(JSON 아님·형식 오류), `broker_init`(토큰 발급 등 브로커 생성 실패) | +1 | +1 |
+| UNKNOWN | `kiwoom_api_error`(return_code≠0, 코드 기록), `http_error`(그 밖의 HTTP 상태), `quote_unavailable`(원인 정보 없음), `unexpected` | +1 | +1 (범위 미확정) |
+| SYMBOL | `symbol_mismatch`, `exchange_mismatch`, `price_parse`, `orderbook_field`, 검증 실패 `price_invalid`·`no_quote_time`·`not_trading_day`·`not_today`·`pre_open`·`future_time`·`stale` | +1 | 0, 응답이 왔으므로 공통 카운터를 0으로 (보류 중 제외) |
+
+- 공통 카운터는 기존 `auto_stop_runtime.api_errors.quote` 를 그대로 쓴다. 유효 시세나 종목 단위 응답(검증 실패 포함)이 오면 0이 되므로, 다른 종목이 정상 응답하는 동안의 한 종목 반복 실패는 전체 장애로 번지지 않는다. 연속 5회면 전체 시세 보류(`quote_global_hold`)에 들어간다.
+- 실제 응답에 없는 정보는 만들지 않는다. 키움 오류의 HTTP 상태·응답 코드는 `KiwoomError` 속성(`kind`, `http_status`, `return_code`)으로 전달된다 (메시지 형식은 기존과 같다).
+
+### 전체 보류 (Global Safety Gate)
+
+다음 중 하나면 모든 종목의 신규 손절 진입·주문·취소·재주문을 보류한다. 기존 주문 대조, 잔고 동기화(잔고 보류가 아니면), 모든 종목의 회복 조회는 계속한다. Kill Switch·API 계약 게이트·LIVE 차단은 이와 별개로 그대로 동작한다.
+
+| 사유 | 조건 | 해제 |
+|---|---|---|
+| `balance` / `status` / `orders` | 잔고·주문 상태·주문내역 연속 오류 5회 | 해당 조회 성공 (잔고·주문내역은 주기 60초 회복 조회, 주문내역은 종목 순환) |
+| `quote_system` | 시세 공통 카운터 5회 (SYSTEM/UNKNOWN) | 서로 다른 tick **2회 연속**, 각 tick 에 새 유효 시세(포지션·시세 시각 쌍)가 1건 이상 있고 SYSTEM 오류가 없을 때. 실패만 있는 tick 은 처음부터 다시, 같은 시세 반복만 있는 tick 은 중립. 특정 종목의 정상 응답 1건으로는 해제하지 않는다 |
+| `quote_broad` | 감시 종목(일시중지 제외) 중 장애(FAULT·RECOVERING) 종목이 2개 이상이면서 절반 이상 | 종목별 회복으로 조건이 풀릴 때 |
+
+보류 구간은 감사 기록(`global_hold`)으로 남기고 일일 보고에서 합계 시간을 보여 준다.
+
+### 종목별 상태 머신 (`auto_stop_runtime.quote_health:{mode}`, 포지션 ID 기준)
+
+```
+OK ──(이 종목 연속 오류 5회)──> FAULT ──(유효 시세 1회)──> RECOVERING ──(더 새로운 시세 시각의 유효 시세)──> OK
+RECOVERING ──(오류)──> FAULT          RECOVERING ──(같은·더 오래된 시세 시각)──> RECOVERING (복구 근거 아님)
+```
+
+- 일반 감시·회복 조회·주문 직전 시세는 모두 `_confirmed_quote` 하나로 검증한다: 종목·거래소 일치, 양수 가격, 당일 정규장, 개장 이후, 120초 이내, 급변(±25%) 재조회·잔고 확인. `bid_tm` 갱신만으로 거래 가능을 확정하지 않는다 (거래정지 필드 미확인 → 시세 나이로 감지).
+- 시세를 얻지 못했거나 검증에 실패한 tick 에서는 임계값 전이라도 그 종목 시세를 트리거·주문에 쓰지 않는다.
+- FAULT·RECOVERING 종목: 트리거, 신규 주문, 자동 취소(재주문 목적)를 하지 않는다. 이미 걸린 주문은 대조만 한다 (취소하면 재주문 근거 시세가 없어 보호를 잃는다).
+- 회복을 확정한 시세는 정상 감시 성공으로 세지 않고 손절 판단에도 쓰지 않는다. 다음 감시 슬롯부터 일반 감시로 판단한다.
+- 감시 공백 동안의 과거 가격으로 소급 주문하지 않는다. 보류 중 손절가 이하 시세가 관측되면 `held_trigger` 로 세고 WARN 알림만 보낸 뒤, 보류가 풀리면 최신 시세로 다시 판단한다.
+- 기존 손절 이벤트(OPEN/CARRY_OVER)는 장애·복구 과정에서 삭제하거나 초기화하지 않는다. EXITING 종목이 장애면 회복 조회만 하고, 회복 후 `_send` 가 최신 시세로 진행한다.
+- 레코드는 프로세스 재시작 후에도 유지된다 (저널 SQLite).
+
+### 감시 슬롯 (P2)
+
+- 종목마다 `next_due_at` 을 둔다. 다음 예정 시각 = 현재 슬롯 시작 + 60초로, 조회 시작·완료 시각(응답 지연)과 분리한다. 30초 tick 에서 응답이 2~12초 걸려도 간격은 60초 근처로 유지된다.
+- 일반 감시가 실패하면 같은 슬롯에서 다음 tick 에 한 번 더 시도한다 (tick 당 종목별 최대 1회). 놓친 슬롯은 만회하지 않는다: tick 이 늦게 오면 현재 슬롯 1회만 조회하고 다음은 미래 슬롯이다.
+- 처리 순서는 예정 시각 순(가장 밀린 종목 먼저)이다. tick 처리 시간이 tick 주기의 1.5배를 넘으면 남은 종목은 다음 tick 으로 미룬다(`slot_deferred`). API timeout(주문 30초 상한), 429 백오프, lease(90초, 호출 전후 갱신) 정책은 그대로다.
+
+### 오류 기록
+
+- 일반·회복·주문 직전 시세 오류마다 다음을 구조화해 로그(JSON)와 `auto_stop_runtime.quote_errors_recent`(최근 50건), 종목 레코드 `last_error`·그날 `first_error` 에 남긴다: ticker, 요청·응답 거래소(응답 값이 있을 때), 목적(watch/recovery/order), 시작·완료 시각, 소요 시간, HTTP 상태, 키움 응답 코드, 민감정보를 지운 메시지·원인 메시지, 시세 시각·지연, 검증 실패 코드·필드, 시도·retry 횟수, 그 호출의 429 횟수.
+- 원본 응답 전체, 토큰, 계좌 식별자는 남기지 않는다 (`quote_health.sanitize`: Bearer·긴 토큰·8자리 이상 숫자 제거, 200자 제한).
+- HTTP 429 와 HTTP 요청 수는 브로커 세션 단계에서 세고 tick 종료 시 모든 브로커에서 거둔다. 예외로 끝난 호출의 429 도 빠지지 않는다. 호출별 `http_429_in_call` 은 기록용이며 합계에 다시 더하지 않는다.
+
+### 저널 호환성과 기존 카운터 이행
+
+- **스키마 변경 없음**: 새 상태는 기존 `auto_stop_runtime`(key/JSON), 통계는 `auto_stop_daily_stats`(metric/key), 장애·복구·보류 전이는 `auto_stop_audit` 행으로만 쓴다. 저널 Migration `as0001` 은 그대로이며 새 revision 이 필요 없다. 운영 DB·운영 Alembic 변경 없음, 런타임 DDL 없음.
+- 첫 tick 에서 한 번 이행한다 (`quote_health_version=1`, 감사 기록 `quote_health_migrate`).
+  - 기존 공통 카운터 `api_errors.quote`(첫날 운영 저널: 6)는 **0으로 바꾸지 않는다**. 임계값 이상이면 전체 시세 보류 레코드(`reason=legacy_common_counter`, `legacy_count`)를 만들고, 위 해제 규칙(서로 다른 tick 2회 연속 새 유효 시세)을 통과할 때 0이 된다 (감사 기록 `quote_hold_off.counter_before`).
+  - 어느 종목의 오류였는지 알 수 없으므로 감시 중인 모든 종목을 FAULT(`legacy_unattributed`)로 두고 종목별 회복 확인(서로 다른 시세 시각 2회)을 요구한다.
+  - 포지션, 등록 손절가, 주문 이력, 감사 기록, 일일 통계는 건드리지 않는다.
+
+### SHADOW 재검증 절차
+
+1. 배포 전: `git log` 로 대상 커밋 확인, `.venv/bin/python -m pytest -q` 전체 통과, 저널 Migration 상태 `as0001` 그대로(새 Migration 없음), 운영 DB Alembic head 불변 확인.
+2. 장외에 재시작한다. 첫 tick 뒤 `GET /api/auto-stop/health` 에서 `quote_global_hold.reason=legacy_common_counter`, `api_errors.quote=6`(유지), `quote_health` 의 CINF·EVRG 가 `FAULT`(legacy_unattributed)인지 본다. 감사 기록 `quote_health_migrate` 1건.
+3. 다음 정규장 첫 2~3분: 두 종목 모두 회복 조회가 번갈아 일어나고(`recent_quote_errors` 또는 로그), 정상이면 `RECOVERING` → `OK`, `quote_global_hold=null`, `api_errors.quote=0` 이 되는지 확인한다. 실패하면 `first_error`·`recent_quote_errors` 의 category·http_status·return_code 를 기록한다 (최초 원인 확인용).
+4. 장중: `global_hold.reasons` 가 비어 있고 종목별 `last_ok_at` 이 약 60초 간격으로 갱신되는지 본다.
+5. 장 마감 후 일일 보고: 종목별 정상 감시율, 누락 분해(보류·실패·스케줄 지연), 회복 조회 시도·성공·실패, 전체 보류 시간, HTTP 요청·429, 오류 원인별 횟수를 확인한다. 스케줄 지연 누락이 0에 가깝고 tick 과 감시를 따로 평가한다.
+6. 판정 (제안 기준, 운영자가 확정): 장애가 없던 날은 정상 감시율 ≥ 95%, 전체 보류 0초. 장애가 있던 날은 원인 분류가 기록되고, 한 종목 장애가 다른 종목 감시를 막지 않았으며, 회복 후 감시가 재개됐는지로 판단한다. NEXT_QUOTE 5거래일 기준은 이 수정 배포일부터 다시 센다.
+7. 실주문·실취소·LIVE 전환·운영 저널 수동 수정은 이 절차에 없다.
+
 ## 운영 절차
 
 VM에서 실행하는 단계별 명령과 승인 지점은 `docs/vm_shadow_runbook.md`를 따른다.
@@ -347,9 +434,11 @@ VM에서 실행하는 단계별 명령과 승인 지점은 `docs/vm_shadow_runbo
 
 | 항목 | 내용 |
 |---|---|
-| 감시 | 종목 수, 종목별 기대 감시 횟수 대비 정상 시세 횟수, 누락, 시세 실패·무효, 최대 시세 지연, 마지막 정상 시세 |
-| tick | 기대 tick 수 대비 실제, 최대 tick 간격 |
-| API | 오류 종류별 횟수, HTTP 429 횟수 |
+| 감시 | 종목 수, 종목별 기대 감시 슬롯 대비 유효 시세 감시 성공(정상 감시율), 누락 = 보류 미실행 + 감시 실패 + 스케줄 지연, 일반 감시 시도·API 오류·검증 실패, 최대 시세 지연, 마지막 정상 감시 |
+| 회복 조회 | 종목별·합계 시도/성공/실패/무효/동일 시세 반복. 일반 감시와 따로 센다 |
+| 장애·보류 | 종목별 장애 발생·복구 시각과 그날 최초 오류, 현재 시세 상태, 전체 보류 구간과 합계 시간, 보류 중 손절가 이하 관측 수 |
+| tick | 기대 tick 수 대비 실제, 최대 tick 간격 (Scheduler heartbeat. 종목별 시세 감시와 따로 평가) |
+| API | 오류 합계(일반 감시·회복 조회·주문 직전·잔고·주문상태 모두 포함)와 종류별 횟수, 시세 오류 원인별 횟수, 실제 HTTP 요청 수(api-id별), HTTP 429 횟수 |
 | 손절·주문 | 트리거 수, 주문 수(원주문/재주문/이월), 체결·미체결·취소 |
 | 가상 체결 | 체결가(지정가 기준) vs 손절가 % |
 | 미해결 | 열린 이벤트, 미확정 주문, 확인 필요 |
@@ -364,7 +453,9 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
 | `config_changes` | 그날 모델·스위치 변경 시각과 값 |
 | `mixed_models` | 하루에 모델이 둘 이상이면 true. 이 경우 합산 수치로 평가하지 않는다 |
 
-누락·오류·미해결이 있으면 WARN, 없으면 INFO로 보낸다. 휴장일은 `trading_day=false`.
+누락·오류·회복 조회 실패·전체 보류·미해결이 있으면 WARN, 없으면 INFO로 보낸다. 휴장일은 `trading_day=false`.
+
+감시 슬롯·조회 시도·HTTP 요청은 서로 다른 단위다. 슬롯은 감시 주기 1칸(성공은 슬롯당 1회만 센다), 시도는 증권사 시세 조회 1회와 검증, HTTP 요청은 실제 요청(429 재시도 포함)이다. 기대 감시 횟수는 장중 등록·트리거 시점을 반영하는 기존 기준을 유지한다.
 
 ## 저널 백업
 
@@ -415,7 +506,8 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
 | 장 마감 후 미체결 지정가 처리 | 미확인 | 전날 주문이 있던 이월은 NEEDS_REVIEW (`POST_CLOSE_EXPIRY`) | **실주문 필요** |
 | 주문번호의 날짜별 재사용 | 미확인 | 유니크 키에 NY 주문일 포함 | 주문내역 장기 관찰 |
 | 거래정지·서킷브레이커 신호 | API 필드 미확인 | 시세 나이로만 감지. 주문 거부 → NEEDS_REVIEW | 발생 시 관찰 |
-| 키움 호출 한도 | 문서 없음 | 조회만 429 백오프(2/4/8/16초), 종목 수 상한 20, 일일 보고에 429 집계 | SHADOW 관찰 |
+| 키움 호출 한도 | 문서 없음 | 조회만 429 백오프(2/4/8초 재시도), 종목 수 상한 20, 회복 조회 429 반복 시 간격 2·4배, 일일 보고에 429·HTTP 요청 수 집계 (예외로 끝난 호출 포함) | SHADOW 관찰 |
+| 2026-11-25 최초 `QuoteUnavailable` 원인 | **미확인** (당시 로그에 예외 이름만 남음) | 원인 정보를 `QuoteUnavailable.info`/`__cause__`로 보존하고 구조화 기록. 범위 미확정 오류는 전체 카운터에도 센다 | SHADOW 재검증 시 `first_error`·`recent_quote_errors` 확인 |
 
 ### 조회 전용 확인 (VM, 정규장 중, 주문 없음)
 

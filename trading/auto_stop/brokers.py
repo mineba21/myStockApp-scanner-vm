@@ -40,13 +40,21 @@ def _dec(value) -> Decimal:
 
 
 def _parse_orderbook(raw, ticker, exchange) -> Quote:
-    if (str(raw.get("stk_cd") or "").strip().upper() != ticker
-            or str(raw.get("stex_tp") or "").strip().upper() != exchange):
-        raise QuoteUnavailable(f"{ticker}: 시세 응답의 종목·거래소가 일치하지 않습니다.")
+    got_ticker = str(raw.get("stk_cd") or "").strip().upper()
+    got_exchange = str(raw.get("stex_tp") or "").strip().upper()
+    # 응답 종목코드·거래소 값은 민감정보가 아니므로 원인 분류용으로 남긴다 (응답 전문은 남기지 않는다).
+    seen = {"response_ticker": got_ticker[:12] or None, "response_exchange": got_exchange[:4] or None}
+    if got_ticker != ticker:
+        raise QuoteUnavailable(f"{ticker}: 시세 응답의 종목이 일치하지 않습니다.",
+                               info={"category": "symbol_mismatch", "field": "stk_cd", **seen})
+    if got_exchange != exchange:
+        raise QuoteUnavailable(f"{ticker}: 시세 응답의 거래소가 일치하지 않습니다.",
+                               info={"category": "exchange_mismatch", "field": "stex_tp", **seen})
     try:
         price = _dec(raw.get("cur_prc")).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
     except Exception as exc:
-        raise QuoteUnavailable(f"{ticker}: 현재가를 해석할 수 없습니다.") from exc
+        raise QuoteUnavailable(f"{ticker}: 현재가를 해석할 수 없습니다.",
+                               info={"category": "price_parse", "field": "cur_prc", **seen}) from exc
     try:
         as_of = datetime.strptime(f"{raw['dt']} {raw['bid_tm']}", "%Y%m%d %H:%M").replace(
             tzinfo=NEW_YORK).timestamp()
@@ -59,7 +67,8 @@ def _parse_orderbook(raw, ticker, exchange) -> Quote:
             bid = Decimal(str(sell_limit))
     except KiwoomError as exc:
         # 1호가 필드를 설정했는데 응답이 비정상이면 주문 근거로 쓰지 않는다 (fail-closed)
-        raise QuoteUnavailable(f"{ticker}: {exc}") from exc
+        raise QuoteUnavailable(f"{ticker}: {exc}", info={"category": "orderbook_field", "field": "orderbook",
+                                                         **seen}) from exc
     return Quote(ticker, exchange, price, as_of, "KIWOOM_USA20101", bid)
 
 
@@ -74,12 +83,18 @@ class LiveStopSellBroker:
             raise KiwoomError(f"주문 HTTP timeout 은 {MAX_ORDER_HTTP_TIMEOUT_SEC:.0f}초 이하여야 합니다 (KIWOOM_TIMEOUT_SECONDS).")
         self.client = client or KiwoomReadOnlyClient(config)
         self.http_429 = 0
+        self.http_requests = {}          # api-id → 실제 HTTP 요청 수 (감시 슬롯·조회 시도와 구분)
+        self.last_quote_diag = None
+        self.sleep = time.sleep
         session = getattr(self.client, "session", None)
         if session is not None and not getattr(session, "_auto_stop_counting", False):
             post = session.post
 
             def counting_post(*a, **k):
+                api = str((k.get("headers") or {}).get("api-id") or "token")[:16]
+                self.http_requests[api] = self.http_requests.get(api, 0) + 1
                 response = post(*a, **k)
+                # 예외로 끝나는 호출(429 재시도 소진 등)의 429 도 응답 단계에서 센다.
                 if getattr(response, "status_code", None) == 429:
                     self.http_429 += 1
                 return response
@@ -96,13 +111,50 @@ class LiveStopSellBroker:
         n, self.http_429 = self.http_429, 0
         return n
 
+    def pop_http(self) -> dict:
+        out, self.http_requests = dict(self.http_requests), {}
+        return out
+
     def quote(self, ticker, exchange) -> Quote:
+        """usa20101 1회 조회 (429 만 2/4/8초 백오프 재시도). 실패는 원인 정보를 담은 QuoteUnavailable."""
+        diag = {"ticker": ticker, "request_exchange": exchange, "started_at": self.clock(), "attempts": 0,
+                "retries": 0, "http_429": 0}
+        self.last_quote_diag = diag
         try:
-            raw = self._retry(lambda: self.client.get_overseas_orderbook(
-                self.token, exchange=exchange, ticker=ticker))["quote"]
-        except KiwoomError as exc:
-            raise QuoteUnavailable(f"{ticker}: 시세 조회 실패") from exc
-        return _parse_orderbook(raw, ticker, exchange)
+            raw, last = None, None
+            for delay in (0, 2, 4, 8):
+                if delay:
+                    self.sleep(delay)
+                    diag["retries"] += 1
+                diag["attempts"] += 1
+                try:
+                    raw = self.client.get_overseas_orderbook(self.token, exchange=exchange, ticker=ticker)["quote"]
+                    break
+                except KiwoomError as exc:
+                    if getattr(exc, "http_status", None) == 429 or "HTTP 오류: 429" in str(exc):
+                        diag["http_429"] += 1
+                        last = exc
+                        continue
+                    raise QuoteUnavailable(f"{ticker}: 시세 조회 실패", info=self._diag_info(diag)) from exc
+                except Exception as exc:      # requests 네트워크·timeout 등 (KiwoomError 로 감싸지지 않음)
+                    raise QuoteUnavailable(f"{ticker}: 시세 조회 실패", info=self._diag_info(diag)) from exc
+            if raw is None:
+                info = self._diag_info(diag)
+                info["category"] = "rate_limit"
+                raise QuoteUnavailable(f"{ticker}: 시세 조회 호출 제한(429) 재시도 소진", info=info) from last
+            try:
+                return _parse_orderbook(raw, ticker, exchange)
+            except QuoteUnavailable as exc:
+                exc.info = {**self._diag_info(diag), **exc.info}
+                raise
+        finally:
+            diag["finished_at"] = self.clock()
+            diag["duration_sec"] = round(diag["finished_at"] - diag["started_at"], 3)
+
+    @staticmethod
+    def _diag_info(diag) -> dict:
+        return {"request_exchange": diag["request_exchange"], "attempts": diag["attempts"],
+                "retries": diag["retries"], "http_429_in_call": diag["http_429"]}
 
     def probe_exchange(self, ticker) -> Quote:
         """등록 시 거래소를 확정한다: 세 거래소 중 정확히 하나만 일치해야 한다."""
@@ -190,6 +242,14 @@ class ShadowBroker:
     def pop_429(self):
         pop = getattr(self.reader, "pop_429", None)
         return pop() if pop else 0
+
+    def pop_http(self):
+        pop = getattr(self.reader, "pop_http", None)
+        return pop() if pop else {}
+
+    @property
+    def last_quote_diag(self):
+        return getattr(self.reader, "last_quote_diag", None)
 
     def quote(self, ticker, exchange):
         return self.reader.quote(ticker, exchange)
