@@ -127,6 +127,12 @@ def health(settings: Optional[S.AutoBuySettings] = None) -> dict:
             out["recorded_logic_hashes"] = [r[0] for r in db.execute(
                 "SELECT DISTINCT logic_hash FROM ab_accounts WHERE strategy_version=?", (S.STRATEGY_VERSION,))]
             out["building_runs"] = db.execute("SELECT COUNT(*) FROM ab_runs WHERE status='BUILDING'").fetchone()[0]
+            from trading.auto_buy.shadow.inputs import replay_state
+            # RUNNING = 실행권이 살아 있는 재계산, ABANDONED_SUSPECTED = 작업자가 비정상 종료한 것으로 보이는 잔존 BUILDING
+            # (다음 job 이 FAILED 로 정리). 잔존 BUILDING 을 '재계산 중'으로 계속 표시하지 않는다.
+            out["replay_state"] = replay_state(db)
+            out["abandoned_replays"] = db.execute(
+                "SELECT COUNT(*) FROM ab_runs WHERE status='FAILED' AND summary LIKE '%ABANDONED_BUILD%'").fetchone()[0]
         finally:
             db.close()
     return out
@@ -228,16 +234,41 @@ def _ci95(vals: list) -> Optional[list]:
     return [m - h, m + h]
 
 
+OPERATIONAL_SAFETY_KEYS = ("non_virtual_rows", "error_events", "heartbeat_stale", "version_block",
+                           "replay_abandoned_suspected")
+DATA_INTEGRITY_KEYS = ("abandoned_scans", "unrecoverable_scans", "uncaptured_scans", "data_incomplete_days",
+                       "fill_unknown_orders", "unresolved_positions")
+
+
 def safety_violations(db, health: dict) -> dict:
-    """S5 안전 위반 집계. 실제 행 혼입뿐 아니라 job·스냅샷·재계산 오류, 미수집 스캔, heartbeat 지연, 버전 차단도 센다."""
+    """S5 안전 위반 집계 (기준: 0건. 완화하지 않는다). 운영 안전 오류와 데이터 완전성 오류를 나눠 센다.
+
+    운영 안전: 실제(비가상) 행 혼입, ERROR 이벤트(job 실패·스냅샷 실패·재계산 실패·재계산 비정상 종료 등, 종류별),
+      heartbeat 지연, 버전 차단, 정리 전 잔존 재계산(BUILDING, 작업자 비정상 종료 의심).
+    데이터 완전성: 중단 스캔(ABANDONED), 복구 불가 수집(UNRECOVERABLE, ABANDONED 제외), 미수집 스캔(수집 누락),
+      현재 run 의 미해결 DATA_INCOMPLETE 거래일, 미확정 FILL_UNKNOWN 주문, 가격 미확정(미평가) 포지션.
+    한 건이라도 있으면 안전 통과로 보지 않는다 (5거래일 검증 중 중단·복구 불가 건수 포함)."""
     errors = {r[0]: r[1] for r in db.execute("SELECT kind, COUNT(*) FROM ab_events WHERE severity='ERROR' GROUP BY kind")}
     rec = health.get("scan_reconciliation") or {}
-    out = {"non_virtual_rows": int(health.get("non_virtual_rows") or 0),
-           "error_events": int(sum(errors.values())), "error_kinds": errors,
-           "uncaptured_scans": int(rec.get("uncaptured") or 0),
-           "heartbeat_stale": int((health.get("heartbeat") or {}).get("status") == "STALE"),
-           "version_block": int(bool(health.get("version_block")))}
-    out["total"] = sum(v for k, v in out.items() if k != "error_kinds")
+    run = _current_run(db)
+    one = lambda q, *a: int(db.execute(q, a).fetchone()[0] or 0)  # noqa: E731
+    op = {"non_virtual_rows": int(health.get("non_virtual_rows") or 0),
+          "error_events": int(sum(errors.values())),
+          "heartbeat_stale": int((health.get("heartbeat") or {}).get("status") == "STALE"),
+          "version_block": int(bool(health.get("version_block"))),
+          "replay_abandoned_suspected": int((health.get("replay_state") or {}).get("status") == "ABANDONED_SUSPECTED")}
+    di = {"abandoned_scans": one("SELECT COUNT(*) FROM ab_scan_captures WHERE scan_status='ABANDONED'"),
+          "unrecoverable_scans": one("SELECT COUNT(*) FROM ab_scan_captures WHERE recoverability='UNRECOVERABLE' "
+                                     "AND scan_status!='ABANDONED'"),
+          "uncaptured_scans": int(rec.get("uncaptured") or 0),
+          "data_incomplete_days": one("SELECT COUNT(*) FROM ab_days WHERE run_id=? AND status!='COMPLETE'", run),
+          "fill_unknown_orders": one("SELECT COUNT(*) FROM ab_orders WHERE run_id=? AND state='FILL_UNKNOWN'", run),
+          "unresolved_positions": one("SELECT COUNT(*) FROM ab_positions WHERE run_id=? AND state='OPEN' "
+                                      "AND price_status='UNRESOLVED'", run)}
+    out = {**op, **di, "error_kinds": errors, "operational": op, "data_integrity": di,
+           "operational_total": sum(op.values()), "data_integrity_total": sum(di.values())}
+    out["total"] = out["operational_total"] + out["data_integrity_total"]
+    out["pass"] = out["total"] == 0
     return out
 
 
@@ -283,6 +314,9 @@ def s5_panel(db, metrics: list, b02: dict, period: dict, safety: dict) -> dict:
                                b02[prof]["b01_percentile"] >= crit["performance"]["b02_percentile_rank_review"]),
             "avg_r_ci95": _ci95(b01["r_values_incl_open"]),
             "safety_violations": safety["total"],
+            "safety_operational": safety["operational_total"],
+            "safety_data_integrity": safety["data_integrity_total"],
+            "safety_pass": safety["pass"],
             "safety_breakdown": safety,
             "data_incomplete_days": period["data_incomplete_days"],
             "filter_effect_return": (None if b01["cum_return"] is None or b00n["cum_return"] is None
@@ -326,9 +360,11 @@ def summary(settings: Optional[S.AutoBuySettings] = None) -> dict:
                   "last_day": days[-1]["day"] if days else None,
                   "data_incomplete_days": sum(1 for d in days if d["status"] != "COMPLETE"),
                   "no_decision_days": sum(1 for d in days if d["decision_status"] != "FROZEN"),
-                  "replay_in_progress": out["health"].get("replay_in_progress") is not None
-                  or out["health"].get("building_runs", 0) > 0}
+                  "replay_in_progress": (out["health"].get("replay_state") or {}).get("status") == "RUNNING",
+                  "replay_abandoned_suspected":
+                      (out["health"].get("replay_state") or {}).get("status") == "ABANDONED_SUSPECTED"}
         period["complete"] = (period["data_incomplete_days"] == 0 and not period["replay_in_progress"]
+                              and not period["replay_abandoned_suspected"]
                               and not any(m["unresolved_positions"] or m["unresolved_orders"] for m in metrics))
         period["basis"] = "모든 전략 동일 기준: 같은 거래일 입력(결정 스캔·일봉·계좌 스냅샷)을 공유한다"
         b01_closed = {m["profile"]: m["closed_trades"] for m in metrics if m["strategy"] == "B01"}

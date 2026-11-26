@@ -12,7 +12,8 @@ import sqlite3
 from functools import lru_cache
 from pathlib import Path
 
-EXPECTED_SCHEMA_VERSION = "ab0001"
+EXPECTED_SCHEMA_VERSION = "ab0002"
+SCHEMA_VERSIONS = ("ab0001", "ab0002")          # 순서대로 적용. 공개된 리비전은 바꾸지 않고 새 리비전만 더한다
 VERSION_TABLE = "ab_alembic_version"
 MIGRATIONS_DIR = Path(__file__).with_name("journal_migrations")
 OWNED_PREFIX = "ab_"
@@ -22,12 +23,22 @@ def _norm(sql: str) -> str:
     return re.sub(r"\s+", " ", sql or "").strip()
 
 
-@lru_cache(maxsize=1)
-def expected_objects() -> dict:
+def _ddl(version: str) -> tuple:
     from trading.auto_buy.shadow.journal_migrations.ddl_v1 import DDL_V1
+    from trading.auto_buy.shadow.journal_migrations.ddl_v2 import DDL_V2
+    parts = {"ab0001": DDL_V1, "ab0002": DDL_V2}
+    out = ()
+    for v in SCHEMA_VERSIONS[:SCHEMA_VERSIONS.index(version) + 1]:
+        out += parts[v]
+    return out
+
+
+@lru_cache(maxsize=4)
+def expected_objects(version: str = EXPECTED_SCHEMA_VERSION) -> dict:
+    """리비전 ``version`` 까지 적용했을 때의 ab_* 객체 정의 (메모리 DB 에서 같은 DDL 을 실행해 만든다)."""
     db = sqlite3.connect(":memory:")
     try:
-        for stmt in DDL_V1:
+        for stmt in _ddl(version):
             db.execute(stmt)
         return {n: (k, _norm(s)) for k, n, s in db.execute(
             "SELECT type, name, sql FROM sqlite_master WHERE name LIKE 'ab\\_%' ESCAPE '\\' AND sql IS NOT NULL")}
@@ -47,8 +58,8 @@ def foreign_objects(db) -> set:
     return {n for _, n, _ in _objects(db) if not n.startswith(OWNED_PREFIX) and not n.startswith("sqlite_")}
 
 
-def structure_diff(db) -> list[str]:
-    have, want = owned_objects(db), expected_objects()
+def structure_diff(db, version: str = EXPECTED_SCHEMA_VERSION) -> list[str]:
+    have, want = owned_objects(db), expected_objects(version)
     diff = [f"없음: {n}" for n in sorted(set(want) - set(have))]
     diff += [f"예상 밖 객체: {n}" for n in sorted(set(have) - set(want))]
     diff += [f"정의 다름: {n}" for n in sorted(set(want) & set(have)) if have[n] != want[n]]
@@ -92,7 +103,7 @@ def schema_status(path: str | None) -> dict:
         elif st["schema_version"] != EXPECTED_SCHEMA_VERSION:
             st["schema_error"] = f"스키마 버전 {st['schema_version']} ≠ 기대 {EXPECTED_SCHEMA_VERSION}."
         else:
-            st["schema_error"] = "스키마 구조가 v1 과 다릅니다: " + "; ".join(diff[:5])
+            st["schema_error"] = f"스키마 구조가 {EXPECTED_SCHEMA_VERSION} 정의와 다릅니다: " + "; ".join(diff[:5])
     except sqlite3.Error as exc:
         st["schema_error"] = f"스키마를 확인하지 못했습니다: {exc}"
     finally:

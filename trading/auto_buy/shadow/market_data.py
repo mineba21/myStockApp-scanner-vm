@@ -2,6 +2,8 @@
 
 - 일봉: Scanner 와 같은 yfinance(auto_adjust) 일봉. 요청한 거래일과 날짜가 정확히 같은 봉만 쓴다.
   키움 API 를 쓰지 않으므로 S01 의 키움 호출량에 영향이 없다.
+  OHLC 와 함께 거래량(Volume)을 받는다. 거래량 열이 없거나 값이 NULL·NaN·음수면 ``volume=None``(미확인)으로 넘기고,
+  0 은 0 으로 넘긴다 (0 확정과 미확인을 구분. 판정은 ``inputs._store_bar``).
 - 계좌(OPS 전용): 기존 읽기 전용 잔고 조회(``web.kiwoom_holdings``, 60초 캐시)를 **미국 정규장 마감 후 하루 1회**만 부른다.
   장중에는 호출하지 않는다 (S01 자동손절 API 우선). 조회 실패·불완전이면 None → OPS 신규 가상 매수 차단.
   계좌번호·원 응답은 저장하지 않고 평가금액·현금·종목별 평가액만 쓴다.
@@ -58,10 +60,21 @@ def bars_from_download(raw, tickers: list, day: str) -> dict:
             r = df.iloc[-1]
             vals = [float(r[c]) for c in OHLC]
             if all(math.isfinite(v) and v > 0 for v in vals):
-                out[t] = Bar(*vals)
+                out[t] = Bar(*vals, volume=_volume(r))
         except Exception:
             continue
     return out
+
+
+def _volume(row):
+    """거래량 값 (미확인이면 None). 0 은 그대로 0."""
+    if "Volume" not in row.index:
+        return None
+    try:
+        v = float(row["Volume"])
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) and v >= 0 else None
 
 
 def yfinance_bars(tickers: list, day: str) -> dict:

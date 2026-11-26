@@ -12,6 +12,15 @@
   결측 일봉이 나중에 확인되면 새 run 으로 처음부터 시간순 재계산한다 (``inputs.replay``).
 - 체결 반영은 누적 체결 수량 ledger 의 증분만 적용한다. 체결마다 사용한 OHLC·공급자·조회 시각·근거를 기록한다.
 - 손절 트리거 때 같은 종목 매수 잔량이 남아 있으면 매수 잔량을 먼저 취소(예약 해제)한 뒤 체결 수량만 청산한다.
+
+거래량 0 확정 봉 (``Bar.no_volume``, 저장 단계에서 데이터 마감 후에만 확정)
+- 그날이 목표일인 매수 주문: 체결하지 않고 미체결 만료 (UNFILLED, reason=ZERO_VOLUME_EXPIRED). 유효기간은 다음 정규장
+  1일 그대로이며 다음 날로 이월하거나 같은 신호로 다시 주문하지 않는다 (signal_key 당 주문 1회).
+- 보유 포지션: 손절 체결을 만들지 않는다. 종가로 평가하고(손절가 아래면 이탈 미청산 → 위험 유지·신규 매수 차단),
+  ``zero_volume_days``·``last_zero_volume_day`` 를 남긴다. 거래가 재개된 첫 봉에서 같은 S01 규칙으로 판단하고
+  (시가 ≤ 손절가면 시가 청산 = 갭 손실), 손절 기록에 거래량 0 이력과 갭 손실 금액을 남긴다.
+- 거래량 미확인은 여기까지 오지 않는다 (저장 단계에서 결측과 같이 미확정 → FILL_UNKNOWN·UNRESOLVED).
+- 거래량이 양수여도 실제 지정가 체결이 보장되지는 않는다 (일봉 근사).
 """
 from __future__ import annotations
 
@@ -212,11 +221,11 @@ def apply_fill(db, order_id: int, cum_qty: int, price: float, day: str, *, basis
     now = time.time()
     b = rec.bar if rec else None
     db.execute("INSERT INTO ab_fill_ledger(order_id, cum_filled_qty, applied_delta, price, day, basis, bar_open, "
-               "bar_high, bar_low, bar_close, bar_provider, bar_fetched_at, bar_input_rev, applied_at) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               "bar_high, bar_low, bar_close, bar_provider, bar_fetched_at, bar_input_rev, applied_at, bar_volume) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (order_id, cum_qty, delta, price, day, basis, b.open if b else None, b.high if b else None,
                 b.low if b else None, b.close if b else None, rec.provider if rec else None,
-                rec.fetched_at if rec else None, rec.input_rev if rec else None, now))
+                rec.fetched_at if rec else None, rec.input_rev if rec else None, now, b.volume if b else None))
     prev_avg = o["avg_fill_price"] or 0.0
     avg = (prev_avg * last + price * delta) / cum_qty
     state = "FILLED" if cum_qty == o["qty"] else "PARTIAL"
@@ -276,8 +285,11 @@ def close_position(db, pos, day: str, px: float, reason: str, **details) -> None
 
 def _rec_detail(rec: BarRec) -> dict:
     b = rec.bar
-    return {"bar": [b.open, b.high, b.low, b.close], "provider": rec.provider, "fetched_at": rec.fetched_at,
-            "input_rev": rec.input_rev}
+    return {"bar": [b.open, b.high, b.low, b.close], "volume": b.volume, "provider": rec.provider,
+            "fetched_at": rec.fetched_at, "input_rev": rec.input_rev}
+
+
+ZERO_VOLUME_EXPIRY_NOTE = "목표일 거래량 0 확정 — 미체결 만료 (다음 정규장 1일 유효, 이월·같은 신호 재주문 없음)"
 
 
 # ── 하루 처리 ───────────────────────────────────────────────────────
@@ -291,7 +303,7 @@ def process_account_day(db, run_id: int, acc_id: str, inp: DayInputs, settings=N
         a = db.execute("SELECT * FROM ab_accounts WHERE id=?", (acc_id,)).fetchone()
         prof, strat = S.PROFILES[a["profile"]], S.STRATEGIES[a["strategy"]]
         counts = {"filled": 0, "unfilled": 0, "skip_open_stop": 0, "fill_unknown": 0, "stops": 0, "orders": 0,
-                  "unresolved_new": 0}
+                  "unresolved_new": 0, "unfilled_zero_volume": 0, "zero_volume_hold": 0}
         # (1) 체결 판정
         for o in db.execute("SELECT * FROM ab_orders WHERE run_id=? AND account_id=? AND state IN ('PENDING','PARTIAL') "
                             "AND target_day=?", (run_id, acc_id, day)).fetchall():
@@ -303,6 +315,12 @@ def process_account_day(db, run_id: int, acc_id: str, inp: DayInputs, settings=N
                 counts["fill_unknown"] += 1
                 continue
             bar = rec.bar
+            if bar.no_volume:
+                close_order(db, o["id"], "UNFILLED", day, reason="ZERO_VOLUME_EXPIRED", note=ZERO_VOLUME_EXPIRY_NOTE,
+                            **_rec_detail(rec))
+                counts["unfilled"] += 1
+                counts["unfilled_zero_volume"] += 1
+                continue
             st_, px, kind = try_buy(bar, o["limit_price"], o["stop_price"])
             if st_ != "FILLED":
                 close_order(db, o["id"], st_, day, **_rec_detail(rec))
@@ -326,12 +344,25 @@ def process_account_day(db, run_id: int, acc_id: str, inp: DayInputs, settings=N
                            "WHERE id=?", (day, time.time(), p["id"]))
                 counts["unresolved_new"] += 1
                 continue
+            if rec.bar.no_volume:            # 거래 없음: 손절 체결을 만들지 않고 위험 유지 (평가만)
+                db.execute("UPDATE ab_positions SET last_close=?, last_close_day=?, zero_volume_days=zero_volume_days+1, "
+                           "last_zero_volume_day=?, updated_at=? WHERE id=?",
+                           (rec.bar.close, day, day, time.time(), p["id"]))
+                counts["zero_volume_hold"] += 1
+                continue
             day0 = p["entry_day"] == day
             reason, px = check_stop(rec.bar, p["stop_price"], day0)
             if reason:
                 details = _rec_detail(rec)
                 if day0:
                     details["uncertainty"] = DAY0_UNCERTAINTY
+                if reason == "STOP_GAP":
+                    details["gap_loss_vs_stop_usd"] = (p["stop_price"] - px) * p["qty"]
+                if p["zero_volume_days"]:
+                    details["zero_volume_history"] = {
+                        "days": p["zero_volume_days"], "last_day": p["last_zero_volume_day"],
+                        "first_bar_after_resume": p["last_close_day"] == p["last_zero_volume_day"],
+                        "policy": "거래량 0 인 날은 손절 체결 없음 — 거래 재개 첫 봉에서 같은 S01 규칙 적용 (갭 손실 가능)"}
                 close_position(db, p, day, px, reason, **details)
                 counts["stops"] += 1
             else:

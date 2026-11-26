@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import math
+from decimal import ROUND_FLOOR, Decimal
 from typing import Optional
 
 from trading.auto_buy.settings import (ACCOUNT_TOTAL_RISK_WATCH, COSTS, CURRENT_HEAT_DANGER, CURRENT_HEAT_WARN,
@@ -38,7 +39,11 @@ def heat_level(ratio: float) -> str:
 
 
 def limit_price(decision_price: float) -> float:
-    return round(decision_price * (1 + LIMIT_PCT), 2)
+    """판단가 × (1 + 1%) 를 센트 단위로 **내림** (미국 주식 지정가는 0.01 단위). 반올림하면 +1% 상한을 넘을 수 있어
+    내림으로 상한 초과를 막는다. 부동소수점 오차 없이 10진수로 계산한다 (판단가의 최단 10진 표현 기준)."""
+    lim = (Decimal(repr(float(decision_price))) * (1 + Decimal(repr(LIMIT_PCT)))).quantize(Decimal("0.01"),
+                                                                                           rounding=ROUND_FLOOR)
+    return float(lim)
 
 
 def account_state(prof: dict, positions: list, reservations: list, cash: float, realized: float,

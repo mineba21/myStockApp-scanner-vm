@@ -87,7 +87,16 @@ class Bars:
 
     def __call__(self, tickers, day):
         self.calls.append((tuple(tickers), day))
-        return {t: self.table.get(day, {}).get(t) for t in tickers}
+        return {t: _with_volume(self.table.get(day, {}).get(t)) for t in tickers}
+
+
+def _with_volume(b):
+    """거래량을 지정하지 않은 테스트 봉은 정상 거래(양수 거래량) 봉으로 본다. 거래량 0·미확인 시나리오는 명시한다."""
+    import dataclasses
+    from trading.auto_buy.shadow.vfills import Bar
+    if isinstance(b, Bar) and b.volume is None:
+        return dataclasses.replace(b, volume=1_000_000.0)
+    return b
 
 
 ACCT = {"status": "OK", "equity": 46800.0, "cash": 20000.0, "holdings": [{"ticker": "XYZ", "value": 13000.0, "sector": "Energy"}],
@@ -154,8 +163,8 @@ def test_shadow_without_migration_does_not_create_journal(monkeypatch, tmp_path,
 
 def test_migration_roundtrip_and_refuses_foreign_db(tmp_path):
     p = str(tmp_path / "j.sqlite3")
-    assert upgrade_journal(p, allow_create=True) == "ab0001"
-    assert upgrade_journal(p) == "ab0001"                      # 재실행 무변경
+    assert upgrade_journal(p, allow_create=True) == "ab0002"    # head (ab0001 → ab0002 거래량 열)
+    assert upgrade_journal(p) == "ab0002"                      # 재실행 무변경
     assert schema_status(p)["schema_ready"]
     other = str(tmp_path / "orders.sqlite3")
     sqlite3.connect(other).execute("CREATE TABLE scanner_buy_orders(id INTEGER)").connection.close()

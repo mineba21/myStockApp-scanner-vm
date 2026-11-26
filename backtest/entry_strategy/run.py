@@ -3,6 +3,8 @@
 .venv/bin/python -m backtest.entry_strategy.run all        # P0~P5 (보고서 포함)
 .venv/bin/python -m backtest.entry_strategy.run p7         # P7 Heat·위험 예산 추가 검증
 .venv/bin/python -m backtest.entry_strategy.run report     # 저장된 결과로 HTML 만 다시 생성
+.venv/bin/python -m backtest.entry_strategy.run p7ops      # 운영 정책 비교판(P7-OPS) ↔ SHADOW 엔진 실제 데이터 대조
+                                                          # (기존 P7 결과 파일은 바꾸지 않음, output/p7_ops_* 생성)
 """
 from __future__ import annotations
 
@@ -276,6 +278,14 @@ def stage_p7_conclusions(args):
     _json(p7.conclusions(reg, pd.read_csv(OUT / "p7_b01_vs_b02.csv")), OUT / "p7_conclusions.json")
 
 
+def stage_p7ops(args):
+    """P7 운영 정책 비교판 ↔ SHADOW 엔진 전체 대조 (P7C 23개 계좌, 실제 재구성 데이터)."""
+    from .src import ops_parity
+    P.prepare(D.load_config(args.config) if getattr(args, "config", None) else D.load_config())
+    rep = ops_parity.run_all(OUT, progress=True)
+    log.info("p7ops all_match=%s (%d accounts)", rep["all_match"], len(rep["accounts"]))
+
+
 def stage_report(args):
     from .src import report
     path = report.build()
@@ -284,10 +294,11 @@ def stage_report(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["all", "posthoc", "p7", "p7c", "report"])
+    ap.add_argument("stage", choices=["all", "posthoc", "p7", "p7c", "p7ops", "report"])
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    {"all": stage_all, "posthoc": stage_posthoc, "p7": stage_p7, "p7c": stage_p7_conclusions, "report": stage_report}[args.stage](args)
+    {"all": stage_all, "posthoc": stage_posthoc, "p7": stage_p7, "p7c": stage_p7_conclusions, "p7ops": stage_p7ops,
+     "report": stage_report}[args.stage](args)
 
 
 if __name__ == "__main__":

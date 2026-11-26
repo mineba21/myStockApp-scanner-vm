@@ -61,6 +61,13 @@
 - `docs/AUTO_BUY_S01_LINK_DESIGN.md` v2 (위험 예산 정책, 계좌 공통 잠금, API 호출 예산과 S01 우선, A1~A8 상세 + A9~A12)
 - 운영형 B01 거래 빈도는 연 약 28건이다. 표본 40건까지 약 1.5년이 걸린다.
 
+## P7-OPS 운영 정책 비교판 (2026-11-26, PR #14 Codex 재리뷰 2차)
+- 기존 P7 코드·결과 파일은 바꾸지 않았다. `src/p7_ops.py`(독립 구현) + `src/ops_parity.py`(SHADOW 엔진 경로 실행·대조), 실행 `python -m backtest.entry_strategy.run p7ops`.
+- 운영 정책: 센트 내림 지정가(+1% 초과 없음), 유효기간 1일, 거래량 0 → 미체결 만료·보유 손절 없음(재개 첫 봉 판정), 거래량 미확인 → FILL_UNKNOWN, 같은 신호 재매수 없음. 기존 P7 과의 차이는 `p7_ops.DIFF_VS_P7` 과 `docs/auto_buy_shadow.md` 에 정리했다.
+- 실제 1,480 거래일, P7C 23 계좌: SHADOW ↔ P7-OPS 전부 일치 (거래 3,545건, 매일 현금·평가·Heat 차이 1e-15 미만). 기존 P7 거래량 0 건너뛰기 해당 D+1 5건(SW 2021-04-19 포함).
+- 판정 유지: NOT_RECOMMENDED, B01 = NEED_MORE_DATA. OPS 계좌는 과거 계좌 스냅샷이 없어 합성 테스트로만 확인.
+- 테스트: `tests/test_p7_ops_parity.py` (합성 2 seed + 단위 + 실제 데이터 1건, 실제 데이터는 캐시 있을 때만).
+
 ## 산출물·검증
 - `output/` 아래 CSV/JSON 20종과 `entry_strategy_backtest_report.html`(단일 파일, 외부 스크립트 없음)을 생성했다. jsdom 렌더링 결과 런타임 오류 0건이다.
 - 테스트: `tests/test_entry_backtest.py` 14건 + `tests/test_p7_risk.py` 8건 = 22건 통과. 전체 저장소 1,214건 통과.

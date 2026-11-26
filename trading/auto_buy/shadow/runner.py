@@ -7,7 +7,8 @@ OFF·설정 오류·스키마 미준비면 파일·테이블을 만들지 않고
 한 번의 실행 순서
 1. 스캔 보충 수집·중단 스캔 기록·스캔 건수 대조 (스캔 진행 중이면 건너뜀)
 2. 판정 로직·설정 해시 확인 — 기록과 다르면 처리 중단 (수집은 계속)
-3. 결측 일봉 재조회 → 확인되면 새 run 으로 전체 재계산
+2a. 비정상 종료된 재계산(BUILDING) 정리 → FAILED(ABANDONED_BUILD). 살아 있는 다른 작업자의 재계산이면 이번 job 은 대기
+3. 결측 일봉 재조회(거래량 미확인 포함) → 확인되면 새 run 으로 전체 재계산
 4. 아직 처리하지 않은 거래일을 시간순으로: 결정 스캔 확정 대기/NO_DECISION_SCAN → 적격 판정 → 필요 일봉 수집
    (데이터 마감까지 대기) → 계좌 스냅샷 1회 → 46 계좌 처리
 """
@@ -94,12 +95,23 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
             _rt(db, "last_job", {"at": time.time(), "blocked": "VersionMismatch"})
             return out
         _rt(db, "version_block", None)
+        out["abandoned_builds"] = IN.reap_abandoned_builds(db)
+        rs = IN.replay_state(db)
+        if rs and rs["status"] == "RUNNING":           # 다른 작업자의 재계산이 살아 있음 — 끼어들지 않는다
+            out["waiting"] = f"재계산 run #{rs['lease'].get('run_id')} 진행 중 (다른 작업자)"
+            _rt(db, "last_job", {"at": time.time(), "waiting": out["waiting"]})
+            return out
         run = EN.ensure_run(db, settings)
         EN.record_eligibility(db)
         # 결측 복구 → 재계산
         recovered = IN.recover_missing(db, bars_provider, now, settings)
         if recovered or IN.replay_needed(db):          # 이전 replay 가 실패했으면 교체될 때까지 다시 시도
-            out["replay"] = IN.replay(db, bars_provider, "BARS_RECOVERED", settings)
+            try:
+                out["replay"] = IN.replay(db, bars_provider, "BARS_RECOVERED", settings)
+            except IN.ReplayBusy as exc:
+                out["waiting"] = f"재계산 대기: {exc}"
+                _rt(db, "last_job", {"at": time.time(), "waiting": out["waiting"]})
+                return out
             run = out["replay"]["run"]
         last = CAL.last_closed_session(now, settings)
         done = {r[0] for r in db.execute("SELECT day FROM ab_days WHERE run_id=?", (run,))}
