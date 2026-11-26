@@ -99,8 +99,9 @@ def _with_volume(b):
     return b
 
 
-ACCT = {"status": "OK", "equity": 46800.0, "cash": 20000.0, "holdings": [{"ticker": "XYZ", "value": 13000.0, "sector": "Energy"}],
-        "as_of": "test"}
+# 합성 계좌 (실제 계좌 관측값과 무관한 임의의 둥근 값)
+ACCT = {"status": "OK", "equity": 100000.0, "cash": 40000.0,
+        "holdings": [{"ticker": "XYZ", "value": 5000.0, "sector": "Energy"}], "as_of": "test"}
 
 
 def job(shadow, prod, bars, now, acct=ACCT):
@@ -163,8 +164,8 @@ def test_shadow_without_migration_does_not_create_journal(monkeypatch, tmp_path,
 
 def test_migration_roundtrip_and_refuses_foreign_db(tmp_path):
     p = str(tmp_path / "j.sqlite3")
-    assert upgrade_journal(p, allow_create=True) == "ab0002"    # head (ab0001 → ab0002 거래량 열)
-    assert upgrade_journal(p) == "ab0002"                      # 재실행 무변경
+    assert upgrade_journal(p, allow_create=True) == "ab0003"    # head (ab0001 → ab0002 거래량 → ab0003 출처)
+    assert upgrade_journal(p) == "ab0003"                      # 재실행 무변경
     assert schema_status(p)["schema_ready"]
     other = str(tmp_path / "orders.sqlite3")
     sqlite3.connect(other).execute("CREATE TABLE scanner_buy_orders(id INTEGER)").connection.close()
@@ -321,21 +322,21 @@ def test_stop_breached_open_position_keeps_entry_risk_and_blocks():
 def test_ops_sleeve_sector_and_account_rules():
     prof = S.PROFILES["OPS"]
     st = ops_state()
-    assert st["sleeve_budget"] == pytest.approx(0.3 * 46800)
+    assert st["sleeve_budget"] == pytest.approx(0.3 * 100000)
     a = st["acct"]
-    assert a["manual_uncertain_risk"] == pytest.approx(13000 * 0.15)           # 손절가 없는 수동 보유 위험 ≠ 0
-    assert a["max_stock_w"] == pytest.approx(13000 / 46800)
+    assert a["manual_uncertain_risk"] == pytest.approx(5000 * 0.15)           # 손절가 없는 수동 보유 위험 ≠ 0
+    assert a["max_stock_w"] == pytest.approx(5000 / 100000)
     qty, reason, info = RK.size_order(prof, st, 100.0, 92.0, "Technology")
-    assert reason is None and qty == 11                                        # 0.75% × 14,040 / $9
+    assert reason is None and qty == 25                                        # 0.75% × 30,000 / R ≈ $9
     assert RK.size_order(prof, st, 100.0, 92.0, None)[1] == "SECTOR_UNKNOWN"    # 섹터 불명 → 우회 불가
-    full = ops_state(positions=[{"ticker": "Q", "sector": "Technology", "qty": 200, "entry_price": 40.0,
-                                 "stop_price": 36.0, "cost": 8000.0, "close": 150.0}])    # 상승으로 sleeve 초과
-    assert full["sleeve_used"] > full["sleeve_budget"] and full["acct"]["equity_as_if"] == pytest.approx(68800)
+    full = ops_state(positions=[{"ticker": "Q", "sector": "Technology", "qty": 300, "entry_price": 40.0,
+                                 "stop_price": 36.0, "cost": 12000.0, "close": 150.0}])   # 상승으로 sleeve 초과
+    assert full["sleeve_used"] > full["sleeve_budget"] and full["acct"]["equity_as_if"] == pytest.approx(133000)
     assert RK.size_order(prof, full, 100.0, 92.0, "Energy")[1] == "SLEEVE_FULL"
-    sec = ops_state(positions=[{"ticker": "Q", "sector": "Technology", "qty": 49, "entry_price": 100.0,
-                                "stop_price": 92.0, "cost": 4900.0, "close": 100.0}])
+    sec = ops_state(positions=[{"ticker": "Q", "sector": "Technology", "qty": 104, "entry_price": 100.0,
+                                "stop_price": 92.0, "cost": 10400.0, "close": 100.0}])
     assert RK.size_order(prof, sec, 100.0, 92.0, "Technology")[1] == "SECTOR_CAP"
-    poor = dict(ACCT, cash=9000.0)
+    poor = dict(ACCT, cash=15000.0)                                              # 현금 하한 20% 미만
     assert RK.size_order(prof, ops_state(poor), 100.0, 92.0, "Energy")[1] == "ACCOUNT_MIN_CASH"
     none = RK.account_state(prof, [], [], 0.0, 0.0, None, None)
     assert RK.safety_blocks(prof, none, False, 0) == ["ACCOUNT_SNAPSHOT_UNAVAILABLE"]
@@ -369,7 +370,7 @@ def test_end_to_end_decision_fill_stop_idempotent(shadow, prod):
     orders = {(o["account_id"], o["ticker"]): o for o in rows(p, "SELECT * FROM ab_orders")}
     assert ("SV1:P7C:B00", "AAA") in orders and ("SV1:P7C:B00", "BBB") in orders
     assert ("SV1:P7C:B01", "AAA") in orders and ("SV1:P7C:B01", "BBB") not in orders      # 추격 경고 제외
-    assert orders[("SV1:P7C:B01", "AAA")]["qty"] == 41 and orders[("SV1:OPS:B01", "AAA")]["qty"] == 11
+    assert orders[("SV1:P7C:B01", "AAA")]["qty"] == 41 and orders[("SV1:OPS:B01", "AAA")]["qty"] == 25
     assert all(o["is_virtual"] == 1 and o["fill_model"] == S.FILL_MODEL for o in orders.values())
     assert "후보 확정 대기" in job(shadow, prod, bars, utc(D2, 22, 0))["waiting"]          # D2 정규 스캔 전
     scan(prod, utc(D2, 21, 40), [sig("AAA", price=103.0, stop_loss=96.0)])                   # 재스캔: 손절가 변경
@@ -393,7 +394,7 @@ def test_end_to_end_decision_fill_stop_idempotent(shadow, prod):
     fill = rows(p, "SELECT * FROM ab_fill_ledger f JOIN ab_orders o ON o.id=f.order_id "
                    "WHERE o.account_id='SV1:P7C:B01'")[0]
     assert (fill["bar_open"], fill["bar_low"], fill["bar_provider"], fill["bar_input_rev"]) == (100.5, 99, 
-                                                                                                "yfinance_daily_auto_adjust", 1)
+                                                                                                "yahoo_chart_raw_v8_auto_adjust", 1)
     assert fill["basis"] == f"{S.FILL_MODEL}:open" and fill["bar_fetched_at"] > 0
     summ = RP.summary(shadow)
     b01 = next(a for a in summ["accounts"] if a["id"] == "SV1:P7C:B01")

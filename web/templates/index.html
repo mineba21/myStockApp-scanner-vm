@@ -1515,7 +1515,7 @@
       <div class="p-2 rounded bg-slate-50 sm:col-span-2" data-testid="auto-buy-version">
         <div class="text-xs text-slate-500">판정 로직 버전 · 재계산 run</div>
         <div class="text-xs" x-text="'로직 해시 ' + (h.logic_hash||'-') + ' · 기록 ' + ((h.recorded_logic_hashes||[]).join(', ')||'-') + ' · 설정 ' + (h.config_hash||'-')"></div>
-        <div class="text-xs" x-text="'현재 run #' + (h.current_run ?? '-') + (h.replay_state && h.replay_state.status === 'RUNNING' ? ' · 재계산 진행 중 (결과 미완료)' : (h.replay_state ? ' · 재계산 비정상 종료 의심 (다음 job 이 정리)' : ''))"
+        <div class="text-xs" x-text="'현재 run #' + (h.current_run ?? '-') + (h.replay_state && h.replay_state.status === 'RUNNING' ? ' · 재계산 진행 중 (결과 미완료)' : (h.replay_state && h.replay_state.status === 'STALLED' ? ' · 재계산 작업자 응답 없음 (자동 탈취 안 함, 수동 확인 필요)' : (h.replay_state ? ' · 재계산 비정상 종료 확인 (다음 job 이 정리)' : '')))"
           :class="h.replay_state ? (h.replay_state.status === 'RUNNING' ? 'text-amber-700 font-semibold' : 'text-red-700 font-semibold') : 'text-slate-600'"></div>
         <div class="text-xs text-red-700 font-semibold" x-show="h.version_block" x-text="'처리 중단: ' + (h.version_block?.message||'')"></div>
         <div class="text-xs text-slate-600" x-show="h.costs" data-testid="auto-buy-costs"
@@ -1553,7 +1553,7 @@
           </template>
         </div>
         <div class="text-xs mt-1" :class="s.validation.complete ? 'text-emerald-700' : 'text-amber-700 font-semibold'"
-          x-text="'기간 데이터 ' + (s.validation.complete ? '완전' : '미완료') + ' · 일봉 미완료일 ' + s.validation.data_incomplete_days + ' · 결정 스캔 없는 날 ' + s.validation.no_decision_days + (s.validation.replay_in_progress ? ' · 재계산 진행 중' : '') + (s.validation.replay_abandoned_suspected ? ' · 재계산 비정상 종료 의심' : '') + ' (' + s.validation.basis + ')'"></div>
+          x-text="'기간 데이터 ' + (s.validation.complete ? '완전' : '미완료') + ' · 일봉 미완료일 ' + s.validation.data_incomplete_days + ' · 결정 스캔 없는 날 ' + s.validation.no_decision_days + (s.validation.replay_in_progress ? ' · 재계산 진행 중' : '') + (s.validation.replay_abandoned_suspected ? ' · 재계산 비정상 종료 확인' : '') + (s.validation.replay_stalled ? ' · 재계산 작업자 응답 없음' : '') + ' (' + s.validation.basis + ')'"></div>
         <div class="text-xs text-slate-500 mt-1" x-text="s.validation.notes"></div>
       </div>
     </template>
@@ -1571,7 +1571,7 @@
             <td class="text-right" x-text="num(c.mdd_worsening_pp)"></td><td class="text-right" x-text="num(c.b02_percentile, 0) + (c.ranking_review ? ' 검토' : '')"></td>
             <td x-text="c.avg_r_ci95 ? num(c.avg_r_ci95[0]) + ' ~ ' + num(c.avg_r_ci95[1]) : '-'"></td>
             <td class="text-right" x-text="pct(c.filter_effect_return)"></td><td class="text-right" x-text="pct(c.ranking_effect_vs_b02_median)"></td>
-            <td class="text-right" :class="c.safety_violations ? 'text-red-700 font-semibold' : ''" :title="c.safety_breakdown ? ('운영 안전 ' + c.safety_breakdown.operational_total + ' (실제 행 ' + c.safety_breakdown.non_virtual_rows + ' · 오류 이벤트 ' + c.safety_breakdown.error_events + ' · heartbeat 지연 ' + c.safety_breakdown.heartbeat_stale + ' · 버전 차단 ' + c.safety_breakdown.version_block + ' · 재계산 비정상 종료 의심 ' + c.safety_breakdown.replay_abandoned_suspected + ') / 데이터 완전성 ' + c.safety_breakdown.data_integrity_total + ' (중단 스캔 ' + c.safety_breakdown.abandoned_scans + ' · 복구 불가 ' + c.safety_breakdown.unrecoverable_scans + ' · 미수집 ' + c.safety_breakdown.uncaptured_scans + ' · 불완전 거래일 ' + c.safety_breakdown.data_incomplete_days + ' · 체결 불명 ' + c.safety_breakdown.fill_unknown_orders + ' · 미평가 포지션 ' + c.safety_breakdown.unresolved_positions + ')') : ''" x-text="c.safety_violations"></td></tr></template></tbody></table></div>
+            <td class="text-right" :class="c.safety_violations ? 'text-red-700 font-semibold' : ''" :title="c.safety_breakdown ? ('운영 안전 ' + c.safety_breakdown.operational_total + ' (실제 행 ' + c.safety_breakdown.non_virtual_rows + ' · 오류 이벤트 ' + c.safety_breakdown.error_events + ' · heartbeat 지연 ' + c.safety_breakdown.heartbeat_stale + ' · 버전 차단 ' + c.safety_breakdown.version_block + ' · 재계산 비정상 종료 ' + c.safety_breakdown.replay_abandoned_suspected + ' · 재계산 응답 없음 ' + c.safety_breakdown.replay_stalled + ') / 데이터 완전성 ' + c.safety_breakdown.data_integrity_total + ' (중단 스캔 ' + c.safety_breakdown.abandoned_scans + ' · 복구 불가 ' + c.safety_breakdown.unrecoverable_scans + ' · 미수집 ' + c.safety_breakdown.uncaptured_scans + ' · 불완전 거래일 ' + c.safety_breakdown.data_incomplete_days + ' · 체결 불명 ' + c.safety_breakdown.fill_unknown_orders + ' · 미평가 포지션 ' + c.safety_breakdown.unresolved_positions + ' · 수동 검토 일봉 ' + c.safety_breakdown.manual_review_bars + ') — 관찰 기간 위반 ' + c.safety_breakdown.observation_period_total + ' / 현재 미해결 ' + c.safety_breakdown.current_unresolved_total + ' / 복구됨 ' + c.safety_breakdown.recovered_total + ' / 복구 불가 ' + c.safety_breakdown.unrecoverable_total + ' / 연속 정상 ' + c.safety_breakdown.continuity.current_clean_streak + '일 (필요 ' + c.safety_breakdown.continuity.required_consecutive_clean_days + '일)') : ''" x-text="c.safety_violations"></td></tr></template></tbody></table></div>
         <div class="text-xs text-slate-500 mt-1">미청산 평가손익 포함 · 필터 효과 = B01 − B00-N · 순위 효과 = B01 − B02 중앙값 · 40건 확보만으로 LIVE 승인 없음</div>
       </div>
     </template>

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from trading.auto_buy import settings as S
@@ -97,8 +97,10 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
         _rt(db, "version_block", None)
         out["abandoned_builds"] = IN.reap_abandoned_builds(db)
         rs = IN.replay_state(db)
-        if rs and rs["status"] == "RUNNING":           # 다른 작업자의 재계산이 살아 있음 — 끼어들지 않는다
-            out["waiting"] = f"재계산 run #{rs['lease'].get('run_id')} 진행 중 (다른 작업자)"
+        if rs and rs["status"] in ("RUNNING", "STALLED"):   # 다른 작업자의 재계산 — 끼어들지 않는다 (응답 없어도 탈취 안 함)
+            rid = rs["lease"].get("run_id")
+            out["waiting"] = (f"재계산 run #{rid} 진행 중 (다른 작업자)" if rs["status"] == "RUNNING" else
+                              f"재계산 run #{rid} 작업자 응답 없음 ({rs['lease_state']}) — 자동 탈취하지 않음, 수동 확인 필요")
             _rt(db, "last_job", {"at": time.time(), "waiting": out["waiting"]})
             return out
         run = EN.ensure_run(db, settings)
@@ -137,6 +139,10 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
             got = IN.collect_bars(db, day, req, bars_provider, final=final)
             if got["pending"] and not final:
                 out["waiting"] = f"{day} 일봉 {len(got['pending'])}/{len(req)}건 대기 (데이터 마감까지 재조회)"
+                with tx(db):                       # S5: 마감 전 재시도 기록 (위반 아님 — 최종 판정과 구분)
+                    waits = get_runtime(db, "pre_cutoff_waits") or {}
+                    waits[day] = int(waits.get(day, 0)) + 1
+                    set_runtime(db, "pre_cutoff_waits", dict(sorted(waits.items())[-400:]))
                 break
             # (c) 계좌 스냅샷 (그날 1회. 다음 정규장이 이미 열렸거나 지난 날이면 LATE)
             row = IN.day_input(db, day)
@@ -156,6 +162,11 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
             if EN.eligibility_pending(db, row["decision_scan_log_id"]):
                 out["waiting"] = f"{day} 결정 스캔 적격 판정 기록 대기"
                 break
+            if now_u > IN.bars_cutoff(d, settings) + timedelta(minutes=30):   # S5: 처리 지연 (heartbeat LAGGING 기준)
+                with tx(db):
+                    late = get_runtime(db, "late_processing") or {}
+                    late.setdefault(day, now_u.isoformat())
+                    set_runtime(db, "late_processing", dict(sorted(late.items())[-400:]))
             res = IN.process_day(db, run, IN.build_inputs(db, run, day, got["bars"], settings), settings)
             if res["missing"]:
                 with tx(db):

@@ -97,6 +97,17 @@ def _no_sector_providers(request, monkeypatch):
     sector_trends._cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_yahoo_chart_http(monkeypatch):
+    """자동매수 SHADOW 일봉 원본 조회(Yahoo chart HTTP)를 테스트에서 실제로 호출하지 않는다.
+
+    수집 경로 테스트는 ``http_get`` 인자나 ``market_data._http_get`` 교체로 원본 응답을 주입한다."""
+    def _blocked(url, params, timeout=15):
+        raise RuntimeError("테스트에서 Yahoo chart 실제 호출 금지 — 원본 응답을 주입하세요")
+    monkeypatch.setattr("trading.auto_buy.shadow.market_data._http_get", _blocked)
+    yield
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "sector_providers: 섹터 분류 공급자 함수를 막지 않는 테스트 (주입 함수 사용)")

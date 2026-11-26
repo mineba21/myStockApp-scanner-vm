@@ -3,15 +3,106 @@
 2026-11-25 작성, 같은 날 재리뷰 지적(P1 3건·주요 P2) 반영, 남은 운영 정책 확정 (아래 '운영 정책').
 같은 날 Draft PR #14 독립 리뷰(FAIL: P1 6건·P2 7건)를 feature branch 에서 반영했다 (아래 '독립 리뷰 반영'). 공개 이력 항목은 이력 재작성 승인이 필요해 보류.
 2026-11-26 Codex 재리뷰(2차, FAIL: 신규 P1 1건·P2 3건)를 같은 브랜치에서 반영했다 (아래 'Codex 재리뷰(2차) 반영').
+같은 날 Codex 최종 재리뷰(신규 P1 1건·P2 2건·S5 이력)를 반영했다 (아래 'Codex 최종 재리뷰 반영'). SHADOW 활성화는 계속 보류다.
 - **승인 범위:** 로컬 구현·테스트 (사용자 승인: P7/P8 검토 후 I1~I7 SHADOW 구현, 이후 P1·P2 정합성 보완), feature branch `feature/auto-buy-shadow` 커밋·Push·Draft PR.
 - **아직 하지 않은 것:** main 병합, VM 배포, 저널 Migration 실행. Codex 재리뷰를 통과하기 전에는 기본 OFF 배포도, SHADOW 활성화도 하지 않는다.
 - **판정은 그대로 유지한다.**
   - 기존 NOT_RECOMMENDED
   - B01 = NEED_MORE_DATA (전향적 SHADOW 검증 대상만)
 - **근거:** `backtest/entry_strategy` P0~P7 보고서, `backtest/entry_strategy/docs/AUTO_BUY_SHADOW_PLAN.md`, `AUTO_BUY_S01_LINK_DESIGN.md` v2
-- **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26). 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
+- **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26). 최종 목표 리비전은 `ab0003`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
   - 확인(2026-11-25): Git 이력에 `trading/auto_buy` 커밋 없음(원격도 main 뿐), 로컬 `.env` 저널 경로 미설정, 프로젝트 내 SQLite 에 `ab_alembic_version` 없음. 이전 `ab0001` 이 적용된 파일은 개발 세션 임시 폴더의 데모·벤치 파일뿐이다. 운영 VM 은 Git 으로만 배포되고 이 코드가 Push 된 적이 없어 적용 이력이 없다 (VM 에 접속해 확인하지는 않았다).
   - 이 브랜치가 커밋·Push 된 이후에는 `ab0001` 을 바꾸지 않고 새 리비전으로만 바꾼다.
+
+## Codex 최종 재리뷰 반영 (PR #14, 2026-11-26, head 7ef619b)
+
+재리뷰 결과: 테스트·실제 재구성 데이터 정합성은 통과했다. 실제 데이터 수집 경로에서 신규 P1 1건, P2 2건, S5 이력 집계 보완이 나왔고, SHADOW 활성화 보류를 수용한다.
+스키마는 새 리비전 `ab0003` 으로만 늘렸다. `ab0001`·`ab0002` 는 바꾸지 않았다.
+
+| 등급 | 지적 | 반영 | 회귀 테스트 |
+|---|---|---|---|
+| P1 | yfinance 가 Yahoo `volume:null` 을 0 으로 바꿔 미확인 거래량이 '0 확정'으로 처리됨 | 수집 단계부터 원본 응답으로 세 상태를 구분하고 출처·근거를 저장. 아래 '거래량 원본 수집' | `tests/test_auto_buy_shadow_review4.py` — 원본 응답 주입으로 실제 다운로드·파싱 경로 전체 |
+| P2 | heartbeat 가 늦은 살아 있는 작업자를 FAILED 처리할 수 있음 | 사망 근거가 있을 때만 정리, 응답 없는 작업자는 차단·경고. DB fencing. 아래 '재계산 실행권 v2' | `tests/test_auto_buy_shadow_review4_lease.py` — 실제 별도 프로세스 관찰자·SIGKILL |
+| P2 | 이미 최신인 저널의 권한을 확인하지 않음 | `--check` 권한 검증, 적용 모드 0600 보장. 아래 'Migration 파일 권한' | `tests/test_auto_buy_shadow_review4_migration.py` |
+| S5 | 재계산 복구 뒤 위반 이력이 사라짐 | 현재 미해결·관찰 기간·복구됨·복구 불가 분리, 연속 5거래일 평가. 아래 'S5 이력 집계' | `tests/test_auto_buy_shadow_review4_s5.py` |
+| 보안 | 테스트 픽스처 `ACCT` 가 실계좌 관측값과 비슷한 비율 | 실계좌와 무관한 합성 값(순자산 100,000·현금 40,000·보유 5,000)으로 교체하고 기대값 재계산 | `tests/test_auto_buy_shadow.py` |
+
+### 거래량 원본 수집 (P1)
+
+- **수집 경로:** 종목마다 Yahoo v8 chart 원본 JSON 을 한 번 받는다. yfinance 의 HTTP 세션(`yfinance.data.YfData`)만 쓰고 DataFrame 변환은 쓰지 않는다. 같은 응답에서 OHLC 와 거래량을 함께 읽으므로 서로 다른 응답을 합치지 않는다. 다른 종목의 응답(심볼 불일치)이나 다른 거래일 행은 쓰지 않는다.
+- **조정:** yfinance `auto_adjust` 와 같은 식을 같은 응답에 적용한다 (ratio = adjclose ÷ close, O·H·L × ratio, C = adjclose). 공급자 이름은 `yahoo_chart_raw_v8_auto_adjust`.
+- **상태 판정:**
+
+  | 원본 응답 | 상태 | 처리 |
+  |---|---|---|
+  | 정상 OHLC + `volume` > 0 | `POSITIVE_VOLUME` | 기존 체결 규칙 |
+  | 정상 OHLC + `volume: 0` | `CONFIRMED_ZERO_VOLUME` | 매수·매도 체결 없음, D+1 이면 `ZERO_VOLUME_EXPIRED` |
+  | `volume: null`, 거래량 필드 없음, 배열 길이 부족, 음수·숫자 아님 | `UNKNOWN_VOLUME` | 마감 후 `INVALID/UNKNOWN` → `FILL_UNKNOWN`·`DATA_INCOMPLETE`, 복구되면 재계산 |
+  | 응답 오류·결과 없음·심볼 불일치·그날 행 없음·중복 행·OHLC null·조정 종가 없음 | 결측(일봉 없음) | 기존 결측·복구 정책 |
+
+- **0 확정 조건:** 출처가 `yahoo_chart_raw` 일 때만 0 을 확정 0 으로 본다 (`vfills.CONFIRMED_ZERO_SOURCES`). 변환된 DataFrame(`yfinance_dataframe`)이나 출처가 없는 기존 행의 0 은 `UNKNOWN` 이다.
+- **저장:** `ab_bars.volume_source` 에 출처, `ab_bars.source_evidence` 에 근거를 JSON 으로 남긴다. 근거에는 원본 값(null 보존), 타임스탬프, 조정 비율, 거래량 필드 유무, 응답 SHA-256 이 들어간다. 출처를 확인할 수 없는 0 은 마감 후 `INVALID` 로 저장하고 `recover_missing` 이 원본 경로로 다시 확인한다.
+- 기존 정책은 그대로다: D+2 이월·재매수 없음, 보유 위험 유지, 복구 시 새 run 재계산.
+- yfinance 버전은 바꾸지 않았다.
+- **한계:**
+  - 이미 저장된 재구성 OHLCV 캐시(백테스트)는 변환된 값이라 원본 null 여부를 되살릴 수 없다.
+  - P7-OPS 정합성 하네스는 `vfills.assume_confirmed_zero("backtest_reconstructed_cache")` 안에서만 캐시 0 을 확정 0 으로 가정한다. 그 가정은 보고서의 `zero_volume_source_assumption` 에 기록된다.
+  - 이 대조는 **엔진 정합성**만 보여 준다. 원본 데이터 정확성이나 과거 성과를 새로 검증한 것이 아니다.
+
+### 재계산 실행권 v2 (P2)
+
+- **실행권 식별자:** `ab_runtime.replay_in_progress` 에 다음을 기록한다. 스키마 변경 없이 JSON 이다.
+  - pid, 호스트, 부트 식별자(Linux `/proc/sys/kernel/random/boot_id`, macOS `kern.boottime`)
+  - 프로세스 시작 식별자 (psutil → `/proc/<pid>/stat` → `ps -o lstart=`)
+  - 프로세스 토큰, heartbeat
+- **heartbeat:** 거래일마다, 일봉 조회 직후, 계좌마다 갱신한다. 그래서 하루 처리가 길어도 늦어지지 않는다. 갱신 쓰기가 실패하면(DB 잠김 등) 경고 로그를 남기고 계속한다. 실행권을 잃었을 때만 멈춘다 (`ReplayLeaseLost`).
+- **상태 판정 (`classify_lease`):**
+
+  | 상태 | 조건 | 처리 |
+  |---|---|---|
+  | OWN | 이 프로세스의 토큰 | — |
+  | ALIVE / ALIVE_UNVERIFIED | 같은 호스트에서 pid 가 살아 있고 시작 식별자가 같음 (확인 불가면 UNVERIFIED), heartbeat 15분 이내 | 보호, 새 재계산 대기 |
+  | STALLED / STALLED_UNVERIFIED | 같은 조건에서 heartbeat 15분 초과 | **자동 탈취하지 않음.** 대기, WARN `replay_stalled` 1회, S5 운영 위반, 화면에 '응답 없음' 표시 |
+  | REMOTE_ACTIVE / REMOTE_STALE | 다른 호스트 | 사망을 확인할 수 없어 정리하지 않음 (오래되면 STALE 로 표시) |
+  | DEAD | 부팅 식별자가 다름(재부팅), pid 없음, pid 재사용(시작 식별자가 다르거나 이 프로세스가 같은 pid 를 다른 토큰으로 가짐) | BUILDING run 을 `FAILED`(`ABANDONED_BUILD`, `death_evidence`)로 바꾸고 ERROR 이벤트를 남긴 뒤 재시도 |
+
+- **lease 만료와 프로세스 사망을 구분한다.** heartbeat 지연만으로는 사망으로 보지 않는다. 응답 없는 작업자는 운영자가 확인한 뒤 `inputs.release_stalled_lease(db, run, note)` 로만 해제한다 (`FAILED`, `ABANDONED_MANUAL`, ERROR 이벤트).
+- **DB fencing (`ab0003` 트리거):**
+  - 다음 표의 INSERT/UPDATE 는 run 이 `BUILDING`·`CURRENT` 일 때만 허용한다: `ab_account_runs`, `ab_decisions`, `ab_orders`, `ab_reservations`, `ab_positions`, `ab_stop_events`, `ab_daily`, `ab_days`. `ab_fill_ledger` 는 주문의 run 기준이다.
+  - `FAILED`·`SUPERSEDED` 는 다른 상태로 바뀌지 않는다.
+  - `CURRENT` 는 하나만 허용한다.
+  - 실행권을 잃은 이전 작업자는 파이썬 확인을 건너뛰더라도 실패 run 에 쓸 수 없고, 새 CURRENT 를 덮어쓸 수 없다. 트리거 거부는 `ReplayLeaseLost` 로 바꿔 멈춘다.
+  - CURRENT 교체 직전에 같은 트랜잭션 안에서 실행권과 토큰을 다시 확인한다.
+- CURRENT run, 실패 run 과 감사 이력은 지우지 않는다.
+
+### Migration 파일 권한 (P2)
+
+- **`--check`:** 저널과 존재하는 `-journal`/`-wal`/`-shm` 의 권한이 0600 이 아니면 `CHECK_FAILED_PERMISSIONS`(종료 코드 2)이다. 이미 최신이어도 확인한다. 권한·데이터는 바꾸지 않고 백업·보고서도 만들지 않는다.
+- **적용 모드:** 새로 만들 때, upgrade 할 때, `ALREADY_CURRENT` 일 때 모두 0600 으로 맞추고 다시 확인한다. chmod 실패나 확인 불일치는 종료 코드 4 이며 성공으로 반환하지 않는다. 백업 사본과 보고서(`O_EXCL|O_NOFOLLOW` 0600)도 확인한다. 실행 중에는 `umask 077` 이다.
+- **chmod 전 검증 (SQLite 로 열기 전):** 아래 중 하나라도 해당하면 chmod 하지 않고 중단한다. 임의 파일과 S01 저널에는 chmod 하지 않는다.
+  - 저널 경로가 심볼릭 링크
+  - 부속 파일이 심볼릭 링크이거나 일반 파일이 아님
+  - 소유자가 실행 사용자가 아님
+  - 하드링크가 2개 이상
+  - 운영 주문 저널(`SCANNER_ORDER_JOURNAL_PATH` = S01 저널)이나 ETF 저널과 같은 파일
+  - `ab_` 이외의 객체가 있음
+
+### S5 이력 집계
+
+- **관찰 기간 위반** (= S5 안전 위반 수, 기준 0 유지): 검증 기간에 결과로 쓰인 모든 run(`CURRENT`·`SUPERSEDED`)을 센다. DATA_INCOMPLETE 거래일, FILL_UNKNOWN 주문, 미확정 포지션은 같은 거래일·같은 신호를 한 번만 센다. 그 밖에 ERROR 이벤트, 중단·복구 불가·미수집 스캔, 복구 기간이 지난 결측 일봉, 운영 상태(비가상 행·heartbeat 지연·버전 차단·재계산 비정상 종료·응답 없음)를 센다. **재계산으로 복구돼도 지우지 않는다.**
+- **현재 미해결:** 지금 남아 있는 것 (현재 run 기준).
+- **복구됨:** 관찰 기간에 있었으나 지금은 해소된 것. 복구 성공은 무오류 운영이 아니다. 복구됐어도 안전 통과로 보지 않는다.
+- **복구 불가:** 복구 불가 스캔, 복구 기간이 지난 결측 일봉.
+- **마감 전 재시도:** 데이터 마감 전에 기다렸다가 정상으로 확정된 날은 위반이 아니다. runtime `pre_cutoff_waits` 에 기록하고 따로 표시한다. 마감 뒤 DATA_INCOMPLETE 는 위반이다.
+- **연속 정상 운영:** 거래일마다 처음 처리한 결과로 판정한다. 정상이려면 모두 해당해야 한다:
+  - 처음 처리 결과가 COMPLETE
+  - 그날 결정 스캔의 중단·복구 불가가 없음
+  - 처리 지연이 없음 (데이터 마감 + 30분 이후 처리는 runtime `late_processing` 에 기록)
+  - 그 처리 구간에 ERROR 이벤트가 없음
+- **5거래일 기능·안전성:**
+  - 최초 5거래일이 모두 정상이어야 통과다 (`initial_window`).
+  - 위반이 있으면 기록을 남기고, 그 이후 연속 5거래일 정상 운영을 따로 평가한다 (`current_clean_streak`, `functional_pass`).
+- 성과 기준과 판정(NOT_RECOMMENDED, B01 = NEED_MORE_DATA)은 바꾸지 않았다.
 
 ## Codex 재리뷰(2차) 반영 (PR #14, 2026-11-26)
 
@@ -54,7 +145,7 @@
 
 - BUILDING run 생성과 실행권(`ab_runtime.replay_in_progress`: run_id·host·pid·프로세스 토큰·heartbeat) 기록을 한 `BEGIN IMMEDIATE` 트랜잭션에서 한다. 살아 있는 실행권이 있으면 새 재계산을 시작하지 않는다 (`ReplayBusy`, job 은 대기).
 - 재계산은 거래일마다 heartbeat 를 갱신하고, 실행권을 잃었으면 멈춘다 (`ReplayLeaseLost`, ERROR 이벤트). CURRENT 교체 트랜잭션 안에서 실행권 소유를 다시 확인하고, 교체는 한 트랜잭션에서 원자적으로 한다.
-- **살아 있음 판단:** 같은 프로세스 토큰이면 살아 있음. 같은 호스트면 pid 가 살아 있고 heartbeat 가 15분 이내일 때만. 다른 호스트는 heartbeat 15분 이내면 살아 있다고 보고 건드리지 않는다.
+- ~~살아 있음 판단: heartbeat 15분 초과면 비정상 종료로 봄~~ → **최종 재리뷰에서 바뀜.** 위 '재계산 실행권 v2' 를 따른다 (사망 근거가 있을 때만 정리, 응답 없음은 차단·경고).
 - **정리:** job 시작 때 죽은 실행권의 BUILDING run 을 `FAILED`(요약 사유 `ABANDONED_BUILD`)로 바꾸고 ERROR 이벤트(`replay_abandoned`)를 남긴 뒤 실행권을 지운다. CURRENT run 은 그대로다. 실패 run·감사 이력은 지우지 않는다. 다음 `replay_needed` 처리에서 다시 재계산한다.
 - 화면·health 는 `RUNNING`(다른 작업자 진행 중)과 `ABANDONED_SUSPECTED`(비정상 종료 의심)를 구분한다. 의심 상태는 '재계산 중'으로 보이지 않고 S5 운영 안전 위반으로 센다.
 
@@ -64,6 +155,7 @@
   - **운영 안전:** 비가상 행, ERROR 이벤트, heartbeat 지연, 버전 차단, 재계산 비정상 종료 의심
   - **데이터 완전성:** 중단(ABANDONED) 스캔, 복구 불가(UNRECOVERABLE) 스캔, 미수집 스캔, 현재 run 의 DATA_INCOMPLETE 일, 미해결 FILL_UNKNOWN 주문, 미확정 포지션
 - 합계가 0 일 때만 안전 통과다. 5거래일 검증 기간 중에도 중단·복구 불가가 하나라도 있으면 통과로 표시하지 않는다.
+- 최종 재리뷰에서 이력 기준으로 바뀌었다 (위 'S5 이력 집계'). 현재 run 만 세면 복구 뒤 위반이 사라지므로 관찰 기간 전체를 센다.
 
 ### P7 운영 정책 비교판 (P7-OPS)
 
@@ -428,21 +520,22 @@ Current Heat 는 여기에 들어가지 않는다.
   - `events`
 - 런타임(Scanner hook, job, API)은 DDL 을 실행하지 않고 파일도 만들지 않는다. schema 확인은 `mode=ro`, 쓰기는 `mode=rw`.
 - **운영 DB `alembic/`(head `d4e8a17c5b92`)과 S01 저널 Migration(`as0001`)은 바꾸지 않았다.**
-- **권한:** 스크립트는 `umask 077` 로 돈다. 새 저널은 `O_CREAT|O_EXCL|O_NOFOLLOW` 0600 으로 먼저 만들고, 완료 후 저널과 `-journal`/`-wal`/`-shm`, 보고서를 0600 으로 맞춘다.
+- **권한:** 위 'Migration 파일 권한'. `--check` 는 0600 이 아니면 실패하고(바꾸지 않음), 적용 모드는 생성·upgrade·`ALREADY_CURRENT` 모두 0600 을 보장하며, chmod 전 파일 검증을 한다.
 - **`--env-file`:** `.env` 를 셸에서 실행하지 않고 `dotenv_values` 로 경로 키 3개(`AUTO_BUY_SHADOW_JOURNAL_PATH`, `SCANNER_ORDER_JOURNAL_PATH`, `ALLOCATION_JOURNAL_PATH`)만 읽는다. 값은 출력하지 않는다.
 
 | 명령 | 동작 |
 |---|---|
-| `--check` | 아무것도 만들지 않는다. 파일이 없으면 종료 코드 2. 기존 파일이 최신이 아니면 임시 사본에서 upgrade 를 시험해 실패하면 종료 코드 2 (불완전 `ab_*` 스키마 등). 최신이면 `CHECK_ONLY_ALREADY_CURRENT` |
+| `--check` | 아무것도 만들지 않고 권한도 바꾸지 않는다. 파일이 없으면 종료 코드 2. 저널·부속 파일 권한이 0600 이 아니면 `CHECK_FAILED_PERMISSIONS`·종료 코드 2 (최신이어도). 기존 파일이 최신이 아니면 임시 사본에서 upgrade 를 시험해 실패하면 종료 코드 2 (불완전 `ab_*` 스키마 등). 최신이면 `CHECK_ONLY_ALREADY_CURRENT` |
 | `--check --allow-create` | 아무것도 만들지 않고 생성 가능 여부(상위 디렉터리 존재·쓰기 가능, 다른 저널과 겹치지 않음)만 확인. 결과 `CHECK_ONLY_WOULD_CREATE` |
 | `--allow-create` | 파일이 없을 때만 새로 만든다 |
-| (옵션 없음) | 기존 파일 백업 후 upgrade. 이미 최신이면 `ALREADY_CURRENT` |
+| (옵션 없음) | 기존 파일 백업 후 upgrade. 이미 최신이면 `ALREADY_CURRENT` (권한은 0600 으로 맞추고 보고서를 남김) |
 
-- **종료 코드:** 0 성공, 2 사전 점검 실패, 3 Migration 실패(롤백) 또는 상위 디렉터리 없음, 4 사후 검증 실패.
+- **종료 코드:** 0 성공, 2 사전 점검 실패(권한 불일치·파일 검증 실패 포함), 3 Migration 실패(롤백) 또는 상위 디렉터리 없음, 4 사후 검증 실패 또는 권한 변경·확인 실패.
 - **중단하는 경우:** 대상이 운영 저널과 같은 파일(경로·심볼릭 링크·하드링크 inode 비교), 상대경로, 대상에 `ab_` 아닌 객체, 무결성 검사 실패, 사본 upgrade 시험 실패.
-- 스키마 비교 기준은 메모리 DB 에 해당 리비전 DDL(`ab0001` = v1, `ab0002` = v1 + `ddl_v2`)을 실행해 만든다 (대상 파일에는 DDL 을 실행하지 않음).
+- 스키마 비교 기준은 메모리 DB 에 해당 리비전 DDL(`ab0001` = v1, `ab0002` = v1 + `ddl_v2`, `ab0003` = + `ddl_v3`)을 실행해 만든다 (대상 파일에는 DDL 을 실행하지 않음).
 - **리비전:** `ab0001`(공개 후 동결, 변경 없음) → `ab0002`(거래량). `ab0002` 는 `ALTER TABLE … ADD COLUMN` 만 한다: `ab_bars.volume`·`volume_status`(CHECK), `ab_fill_ledger.bar_volume`, `ab_positions.zero_volume_days`(기본 0)·`last_zero_volume_day`. 시작 전에 대상이 정확히 `ab0001` 구조인지 확인하고 아니면 중단한다. downgrade 는 지원하지 않는다. 기존 행은 그대로이며 거래량은 NULL(미확인)이다.
-- 런타임은 `ab0002` 만 받아들인다. `ab0001` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
+- **`ab0003`** (최종 목표 리비전): `ab_bars.volume_source`·`source_evidence` 열 추가(`ALTER TABLE … ADD COLUMN`)와 run fencing 트리거(위 '재계산 실행권 v2'). 시작 전에 대상이 정확히 `ab0002` 구조인지 확인한다. downgrade 는 지원하지 않는다. 기존 행의 출처는 NULL 이며, 그 행의 거래량 0 은 미확인으로 보고 원본 경로로 다시 확인한다.
+- 런타임은 `ab0003` 만 받아들인다. `ab0001`·`ab0002` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
 - 기존 파일이면 백업한다. 실패해도 자동 복원하지 않는다. 새로 만든 뒤 upgrade 가 실패하면 빈 0600 파일이 남는다 (다음 실행에서 이어서 upgrade).
 
 ## AUTO BUY MONITOR (화면)
@@ -469,7 +562,7 @@ Current Heat 는 여기에 들어가지 않는다.
 
 | 시점 | 확인 | 통과 기준 |
 |---|---|---|
-| 5거래일 | 기능·안전성 | 스냅샷 누락 0, 중단·복구 불가 0, 비가상 행 0, job 오류 0, 버전 중단 0, S01 지표(tick 지연·429) 변화 없음 |
+| 5거래일 | 기능·안전성 | **연속 5거래일 정상 운영** (위반 시 기록 보존 후 이후 연속 5거래일 재평가). 스냅샷 누락 0, 중단·복구 불가 0, 비가상 행 0, job 오류 0, 버전 중단 0, S01 지표(tick 지연·429) 변화 없음 |
 | 20거래일 | 신호 수집·가상 체결·위험 계산 | 적격 판정·가상 체결을 백테스트 로직으로 재계산하면 일치. Heat·예약·차단 집계 일관. 일봉 미완료일 원인 기록 |
 | 60거래일 | 전향적 성과 **중간** 평가 | 아래 성과 기준을 표시만 한다 |
 | B01 종료 거래 40건 이상 | 전략 평가 **검토 시작** | 아래 기준 전체 검토 |
@@ -481,7 +574,7 @@ Current Heat 는 여기에 들어가지 않는다.
 - MDD 악화 ≤ 2%p
 - B01 이 B02 분포 백분위 ≥ 75 이면 순위 효과 검토
 - 시장 국면 편중(결정 스캔 market_condition 분포)과 통계적 불확실성 확인
-- 안전 위반 0 — 운영 안전(비가상 행, ERROR 이벤트(job·스냅샷·재계산 실패, 버전 불일치), heartbeat 지연, 버전 차단, 재계산 비정상 종료 의심) + 데이터 완전성(중단·복구 불가·미수집 스캔, DATA_INCOMPLETE 일, 미해결 FILL_UNKNOWN, 미확정 포지션)의 합계 (화면에 두 묶음 내역 표시)
+- 안전 위반 0 — **관찰 기간 전체** 운영 안전(비가상 행, ERROR 이벤트(job·스냅샷·재계산 실패, 버전 불일치), heartbeat 지연, 버전 차단, 재계산 비정상 종료·응답 없음) + 데이터 완전성(중단·복구 불가·미수집 스캔, DATA_INCOMPLETE 일, FILL_UNKNOWN, 미확정 포지션, 수동 검토 일봉)의 합계. 재계산 복구로 지우지 않는다. 현재 미해결·복구됨·복구 불가를 따로 표시
 - 필터 효과 = B01 vs B00-N, 순위 효과 = B01 vs B02
 - PF 는 P7 과 같은 거래별 총이익 ÷ 총손실이다 (총손실 0 이면 없음). 미청산 종목은 종목별로 매도 비용(수수료·매도세·슬리피지)을 뺀 마지막 확인 종가 평가로 포함하고 서로 상계하지 않는다.
 
@@ -513,7 +606,14 @@ Current Heat 는 여기에 들어가지 않는다.
    # 결과 CHECK_ONLY_WOULD_CREATE · exit=0 확인 후 별도 승인
    .venv/bin/python -m scripts.auto_buy_shadow_journal_migrate --env-file .env --backup-dir /var/backups/mystockapp --allow-create; echo "exit=$?"
    ```
+   - 결과의 `schema_version` 이 **`ab0003`**(최종 목표 리비전)인지 확인한다.
    - 생성 후 권한 확인: `stat -c '%a %U' <저널 경로>` → `600 <서비스 사용자>` (경로는 운영자가 직접 입력, 출력은 권한만).
+   - 백업에서 복원한 저널이면 먼저 `--check` 로 권한을 확인한다. 0600 이 아니면 `CHECK_FAILED_PERMISSIONS`(exit=2)이다. 승인 후 적용 모드를 다시 실행하면 `ALREADY_CURRENT` 와 함께 0600 으로 맞춰진다.
+2-1. **⛔ 활성화 전 조건 (모두 확인 후 별도 승인):**
+   - 복원·이전한 저널(있다면)의 `--check` 가 권한 포함 통과 (exit=0, 0600)
+   - 수집 경로 검증: 원본 응답 주입 회귀 테스트(`tests/test_auto_buy_shadow_review4.py`)가 배포 커밋에서 통과. 원본 `volume:null`·필드 없음은 `UNKNOWN`, `volume:0` 만 확정 0 인지 본다. 실제 Yahoo 호출 1회 점검은 별도 승인 시에만 하고, 결과 원문은 보고서에 붙이지 않는다.
+   - 장시간 BUILDING 실행권 검증: `tests/test_auto_buy_shadow_review4_lease.py`(901초 이상 정상 작업자·pid 재사용·다른 호스트·시작 식별자 확인 불가·SIGKILL·실행권 상실 후 재개·동시 replay)가 배포 커밋에서 통과
+   - VM 에서 프로세스 시작 식별자와 부트 식별자를 읽을 수 있는지 확인. 못 읽으면 `ALIVE_UNVERIFIED` 로 보수적으로 보호된다 (pid 재사용 판정 없음).
 3. **⛔ SHADOW 활성화 (승인 후):** `AUTO_BUY_US_MODE=SHADOW` 로 재시작한다. 확인:
    - 스케줄러 job `auto_buy_us_shadow` 등록, S01 job 일정 변화 없음
    - 다음 정규 미국 스캔 후 수집 이력·후보 확정(`day_inputs`) 표시, 스캔 대조 미수집 0
@@ -527,7 +627,7 @@ Current Heat 는 여기에 들어가지 않는다.
 | ID | 항목 | 상태 |
 |---|---|---|
 | S1 | 운영 DB 스냅샷 표(outbox) | **미승인 유지.** 별도 SHADOW DB 방식. 완전 보장이 필요하면 outbox Migration Plan 을 따로 승인 요청 |
-| S2 | SHADOW 전용 SQLite·Migration | 구현 완료 (`ab0001` 동결 + `ab0002` 거래량 추가), **Migration 실행 미승인** |
+| S2 | SHADOW 전용 SQLite·Migration | 구현 완료 (`ab0001`·`ab0002` 동결 + `ab0003` 거래량 출처·fencing, 최종 목표 `ab0003`), **Migration 실행 미승인** |
 | S3 | 스위치·SHADOW job 배포 (기본 OFF) | 구현 완료, Codex 재리뷰 대기 |
 | S4 | 가상 계좌 구성 | P7 비교형 + 운영 검증형, B02 seed 20개 (총 46 계좌) |
 | S5 | 채택 검토 기준 | **확정** (위 기준 유지) |
@@ -556,4 +656,7 @@ Current Heat 는 여기에 들어가지 않는다.
 - B02 seed 20개는 분포가 거칠다. 기간 말에 불변 스냅샷으로 1,000회 재계산해 보완할 수 있다.
 - **P7 대조 범위:** 실제 재구성 데이터 1,480 거래일에서 P7C 23 계좌가 P7-OPS 와 일치한다 (위 'P7 운영 정책 비교판'). 이전 리뷰의 잔여 차이(지정가 단위·거래량 0·마지막 날 판단 등)는 정책 차이로 분리해 기록했다. 기존 P7 과의 차이는 정책 차이이며 버그로 보지 않는다.
 - 일봉 거래량은 공급자 값 그대로다. 거래량이 있어도 지정가 가격에 실제로 체결됐는지는 알 수 없다. 거래 재개 갭 손실은 1R 을 넘을 수 있다.
+- 원본 null 과 확정 0 의 구분은 `ab0003` 이후 원본 수집 경로에서만 가능하다. 재구성 캐시·기존 저장 행은 원본을 되살릴 수 없다. 그래서 P7-OPS 일치는 같은 변환 캐시 입력에서의 **엔진 정합성**이며, 원본 데이터 정확성이나 새 과거 성과 검증이 아니다.
+- 원본 chart 응답 형식은 Yahoo 비공식 API 다. 형식이 바뀌면 결측·미확인으로 처리된다 (자동 체결하지 않음).
+- 다른 호스트의 실행권은 사망을 확인할 수 없어 자동 정리하지 않는다. 응답 없는 작업자는 수동 확인 후 해제해야 하며, 그동안 재계산은 대기한다.
 - OPS 계좌의 과거 손익은 당시 계좌 스냅샷이 없어 역사 데이터로 검증할 수 없다.

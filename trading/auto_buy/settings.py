@@ -72,6 +72,9 @@ POLICY = {
 # S5 채택 검토 기준 (평가 시작 전 고정, 표시·검토용. 충족해도 LIVE 를 승인하지 않는다)
 S5_CRITERIA = {
     "milestones": {"safety_days": 5, "integrity_days": 20, "interim_days": 60, "min_b01_closed_trades": 40},
+    # 5거래일 기능·안전성 = 연속 5거래일 정상 운영 (위반 이력은 보존, 위반 후에는 이후 연속 5거래일을 따로 평가).
+    # 복구 성공은 무오류 운영으로 보지 않는다. 관찰 기간 위반은 재계산으로 복구돼도 지우지 않는다.
+    "safety_window": {"consecutive_clean_days": 5, "count_observation_period": True, "recovered_counts": True},
     "performance": {
         "return_vs_b00n": "B01 누적수익률 >= 같은 프로필 B00-N",
         "pf": "PF > 1.0 이고 >= B00-N",

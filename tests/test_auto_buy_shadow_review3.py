@@ -25,6 +25,7 @@ from trading.auto_buy.shadow import report as RP
 from trading.auto_buy.shadow import risk as RK
 from trading.auto_buy.shadow.market_data import bars_from_download
 from trading.auto_buy.shadow.store import connect_rw, get_runtime, set_runtime, tx
+from trading.auto_buy.shadow.vfills import SOURCE_YAHOO_CHART_RAW as RAW_SRC
 from trading.auto_buy.shadow.vfills import Bar, volume_state
 
 D4 = "2026-11-27"                     # 조기폐장일 (정상 거래일)
@@ -45,7 +46,8 @@ class Raw:
 
 
 def vbar(o, h, lo, c, v):
-    return Bar(o, h, lo, c, volume=v)
+    """엔진 단계 주입용 봉 (원본 확인 출처로 표시). 수집 경로 전체는 test_auto_buy_shadow_review4.py 에서 검증."""
+    return Bar(o, h, lo, c, volume=v, volume_source=RAW_SRC)
 
 
 # ── 거래량 상태 ────────────────────────────────────────────────────
@@ -54,7 +56,10 @@ def vbar(o, h, lo, c, v):
                                      (-1.0, "UNKNOWN"), (float("nan"), "UNKNOWN"), ("100", "UNKNOWN"),
                                      (True, "UNKNOWN")])
 def test_volume_state_distinguishes_zero_from_unknown(v, state):
-    assert volume_state(v) == state
+    assert volume_state(v, RAW_SRC) == state
+    # 원본 확인 출처가 아니면 0 은 확정이 아니다 (yfinance 변환 시 null → 0)
+    assert volume_state(v, "yfinance_dataframe") == ("UNKNOWN" if state == "ZERO" else state)
+    assert volume_state(v) == ("UNKNOWN" if state == "ZERO" else state)
 
 
 def test_download_parses_volume_zero_and_unknown():
@@ -63,8 +68,9 @@ def test_download_parses_volume_zero_and_unknown():
                                 index=idx)
     raw = pd.concat({"POS": mk(1200), "ZER": mk(0), "NAN": mk(float("nan")), "NEG": mk(-3)}, axis=1)
     got = bars_from_download(raw, ["POS", "ZER", "NAN", "NEG"], "2026-11-24")
-    assert [got[t].volume_state for t in ("POS", "ZER", "NAN", "NEG")] == ["POSITIVE", "ZERO", "UNKNOWN", "UNKNOWN"]
-    assert got["ZER"].volume == 0 and got["NAN"].volume is None
+    # 변환 DataFrame 의 0 은 원본 null 이었을 수 있으므로 확정 0 이 아니다
+    assert [got[t].volume_state for t in ("POS", "ZER", "NAN", "NEG")] == ["POSITIVE", "UNKNOWN", "UNKNOWN", "UNKNOWN"]
+    assert got["ZER"].volume == 0 and got["ZER"].volume_source == "yfinance_dataframe" and got["NAN"].volume is None
     no_vol = pd.concat({"AAA": mk(1).drop(columns=["Volume"])}, axis=1)
     assert bars_from_download(no_vol, ["AAA"], "2026-11-24")["AAA"].volume is None     # 열 없음 = 미확인
 
@@ -145,12 +151,14 @@ def test_legacy_rows_without_volume_are_treated_as_unknown():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     db.execute("CREATE TABLE t (status TEXT, volume_status TEXT, open REAL, high REAL, low REAL, close REAL, "
-               "volume REAL, provider TEXT, fetched_at REAL, input_rev INT)")
-    db.execute("INSERT INTO t VALUES ('OK', NULL, 1, 1, 1, 1, NULL, 'x', 0, 1)")    # ab0002 이전에 저장된 행
-    db.execute("INSERT INTO t VALUES ('OK', 'ZERO', 1, 1, 1, 1, 0, 'x', 0, 2)")
-    legacy, zero = db.execute("SELECT * FROM t ORDER BY input_rev").fetchall()
+               "volume REAL, provider TEXT, fetched_at REAL, input_rev INT, volume_source TEXT)")
+    db.execute("INSERT INTO t VALUES ('OK', NULL, 1, 1, 1, 1, NULL, 'x', 0, 1, NULL)")    # ab0002 이전에 저장된 행
+    db.execute("INSERT INTO t VALUES ('OK', 'ZERO', 1, 1, 1, 1, 0, 'x', 0, 2, 'yahoo_chart_raw')")
+    db.execute("INSERT INTO t VALUES ('OK', 'ZERO', 1, 1, 1, 1, 0, 'x', 0, 3, NULL)")     # ab0002 시절 출처 없는 0
+    legacy, zero, unsourced = db.execute("SELECT * FROM t ORDER BY input_rev").fetchall()
     assert IN._rec(legacy) is None and not IN.bar_complete(legacy)
     assert IN._rec(zero).bar.no_volume
+    assert IN._rec(unsourced) is None and not IN.bar_complete(unsourced)
 
 
 # ── 거래량 0 보유 종목: 손절 체결 없음 → 거래 재개 첫 봉에서 갭 손절 ─────────────
@@ -272,12 +280,15 @@ def test_replay_killed_midway_leaves_building_then_reaped_and_retried(shadow, pr
     assert h["replay_state"] is None and h["building_runs"] == 0 and h["abandoned_replays"] == 1
 
 
-@pytest.mark.parametrize("case,alive", [("other_live_pid", True), ("other_host_fresh", True), ("stale", False),
-                                        ("other_host_stale", False), ("dead_pid", False), ("pid_reused", False),
-                                        ("this_process", True)])
+@pytest.mark.parametrize("case,alive", [("other_live_pid", True), ("other_host_fresh", True),
+                                        ("stale", True),             # 살아 있는 원래 작업자: heartbeat 지연만으로 정리 안 함
+                                        ("other_host_stale", True),  # 다른 호스트: 사망 확인 불가 → 정리 안 함
+                                        ("dead_pid", False), ("pid_reused", False), ("this_process", True)])
 def test_lease_liveness(case, alive):
+    """최종 재리뷰 이후 정책: 사망이 확인된 경우(DEAD)만 실행권을 정리한다 (상세는 review4 실행권 테스트)."""
     now = time.time()
-    base = {"run_id": 9, "host": socket.gethostname(), "pid": os.getppid(), "token": "other", "heartbeat_at": now}
+    base = {"run_id": 9, "host": socket.gethostname(), "pid": os.getppid(), "token": "other", "heartbeat_at": now,
+            "proc_start": IN.proc_start_id(os.getppid()), "boot_id": IN.boot_id()}
     lease = {
         "other_live_pid": base, "other_host_fresh": {**base, "host": "elsewhere", "pid": 1},
         "stale": {**base, "heartbeat_at": now - IN.REPLAY_LEASE_STALE_SEC - 1},
@@ -306,7 +317,13 @@ def test_live_replay_of_other_worker_is_not_terminated(shadow, prod):
     assert "진행 중" in out["waiting"] and out["days"] == [] and out["abandoned_builds"] == []
     assert one(shadow, "SELECT status FROM ab_runs WHERE run_id=?", other)["status"] == "BUILDING"
     assert RP.health(shadow)["replay_state"]["status"] == "RUNNING"
-    _set_lease(shadow, heartbeat_at=time.time() - IN.REPLAY_LEASE_STALE_SEC - 5)     # 작업자 응답 없음
+    _set_lease(shadow, heartbeat_at=time.time() - IN.REPLAY_LEASE_STALE_SEC - 5)     # 작업자 응답 없음 (살아 있음)
+    out = job(shadow, prod, full, evening(D3))
+    assert out["abandoned_builds"] == [] and "응답 없음" in out["waiting"] and out["replay"] is None   # 자동 탈취 없음
+    assert one(shadow, "SELECT status FROM ab_runs WHERE run_id=?", other)["status"] == "BUILDING"
+    assert RP.health(shadow)["replay_state"]["status"] == "STALLED"
+    assert one(shadow, "SELECT COUNT(*) n FROM ab_events WHERE kind='replay_stalled'")["n"] == 1
+    _set_lease(shadow, pid=_dead_pid())                                             # 작업자 사망 확인
     out = job(shadow, prod, full, evening(D3))
     assert out["abandoned_builds"] == [other] and out["replay"]["run"] != other
 
@@ -316,8 +333,8 @@ def test_replay_that_lost_its_lease_never_becomes_current(shadow, prod, monkeypa
     parent = one(shadow, "SELECT run_id FROM ab_runs WHERE status='CURRENT'")["run_id"]
     real = IN.process_day
 
-    def stolen(db, run, inp, settings=None):            # 다른 작업자가 이 재계산을 비정상 종료로 판정한 상황
-        res = real(db, run, inp, settings)
+    def stolen(db, run, inp, settings=None, **kw):      # 다른 작업자가 이 재계산을 비정상 종료로 판정한 상황
+        res = real(db, run, inp, settings, **kw)
         with tx(db):
             db.execute("UPDATE ab_runs SET status='FAILED' WHERE run_id=? AND status='BUILDING'", (run,))
             set_runtime(db, "replay_in_progress", None)
@@ -348,7 +365,7 @@ def test_s5_counts_abandoned_unrecoverable_incomplete_and_fill_unknown(shadow, p
     b = s5["safety_breakdown"]
     assert b["data_integrity"] == {"abandoned_scans": 2, "unrecoverable_scans": 1, "uncaptured_scans": 0,
                                    "data_incomplete_days": 1, "fill_unknown_orders": b["fill_unknown_orders"],
-                                   "unresolved_positions": 0}
+                                   "unresolved_positions": 0, "manual_review_bars": 0}
     assert b["fill_unknown_orders"] >= 1
     assert b["operational_total"] == 0 and b["data_integrity_total"] == 4 + b["fill_unknown_orders"]
     assert s5["safety_violations"] == b["total"] and s5["safety_pass"] is False
@@ -399,11 +416,12 @@ def test_ab0002_upgrades_v1_journal_keeping_rows_and_runtime_refuses_v1(tmp_path
     db.commit()
     db.close()
     st = schema_status(p)
-    assert not st["schema_ready"] and st["schema_version"] == "ab0001" and "ab0002" in st["schema_error"]
+    assert not st["schema_ready"] and st["schema_version"] == "ab0001" and "ab0003" in st["schema_error"]
+    os.chmod(p, 0o600)
     rep = run(p, str(tmp_path / "bk"), check=True)
-    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0002"}
+    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0003"}
     assert schema_status(p)["schema_version"] == "ab0001"                     # --check 는 원본을 바꾸지 않음
-    assert upgrade_journal(p) == "ab0002"
+    assert upgrade_journal(p) == "ab0003"
     db = sqlite3.connect(p)
     assert db.execute("SELECT ticker, status, volume, volume_status FROM ab_bars").fetchall() == [("AAA", "OK", None,
                                                                                                     None)]

@@ -11,9 +11,11 @@
 - 데이터 마감 후에도 없거나 무효(날짜·OHLC 불일치)면 MISSING/INVALID 로 저장하고 그날을 DATA_INCOMPLETE 로 처리한다.
   결측을 '손절 없음'·정상으로 보지 않는다 (엔진: 주문 FILL_UNKNOWN, 포지션 UNRESOLVED).
 
-거래량 (스키마 ab0002)
+거래량 (스키마 ab0002, 출처·원본 근거 ab0003)
 - 정상 OHLC + 양수 거래량: OK/POSITIVE — 기존 가상 체결 규칙.
-- 정상 OHLC + 거래량 0: 데이터 마감에 OK/ZERO 로 확정 (마감 전에는 잠정으로 보고 기다린다). 엔진은 그날 가상 매수·매도
+- 0 은 출처가 원본 확인 출처(Yahoo chart 원본 JSON, ``vfills.CONFIRMED_ZERO_SOURCES``)일 때만 확정이다. 변환 DataFrame 의
+  0·출처 기록 없는 0(ab0002 시절 행)은 미확인으로 본다. 출처와 원본 근거는 ``volume_source``·``source_evidence`` 에 남긴다.
+- 정상 OHLC + 원본 거래량 0: 데이터 마감에 OK/ZERO 로 확정 (마감 전에는 잠정으로 보고 기다린다). 엔진은 그날 가상 매수·매도
   체결을 만들지 않는다 (매수 주문은 미체결 만료, 보유는 손절 체결 없이 위험 유지).
 - 거래량 NULL·음수·NaN(미확인): 마감 전에는 기다리고, 마감 후에는 INVALID/UNKNOWN 으로 저장해 결측과 같이 데이터 불완전
   (FILL_UNKNOWN·UNRESOLVED)으로 처리하고 결측 복구 대상에 넣는다. 미확인을 0 으로 보지 않는다.
@@ -37,9 +39,12 @@
   실행권이 살아 있으면 다른 작업자는 재계산을 시작하지 않는다 (ReplayBusy).
 - 재계산은 거래일마다 heartbeat 를 갱신한다. 실행권을 잃었으면(다른 작업자가 비정상 종료로 판정) 즉시 멈추고 CURRENT 로
   바꾸지 않는다. CURRENT 전환은 실행권 확인과 같은 트랜잭션에서 원자적으로 한다.
-- 비정상 종료 판정(``reap_abandoned_builds``): heartbeat 가 ``REPLAY_LEASE_STALE_SEC`` 보다 오래됐거나, 같은 호스트에서
-  기록된 pid 의 프로세스가 없거나 pid 가 재사용된 경우. 해당 BUILDING run 은 FAILED(summary.reason=ABANDONED_BUILD)로
-  남기고(삭제 없음) ERROR 이벤트를 남긴다. 현재 CURRENT run 과 ``replay_needed`` 는 그대로라 다음 job 이 다시 재계산한다.
+- 실행권에 pid·호스트·boot 식별자·프로세스 시작 식별자·토큰을 기록한다. 판정은 ``classify_lease`` (상태 표는 그 위 주석).
+- 사망이 확인된 경우(같은 호스트에서 pid 없음·재부팅·pid 재사용)만 BUILDING run 을 FAILED(ABANDONED_BUILD)로 남기고
+  (삭제 없음) ERROR 이벤트를 남긴다. heartbeat 지연만으로는 정리하지 않는다: 같은 호스트에서 원래 프로세스가 살아 있으면
+  STALLED, 다른 호스트면 REMOTE_STALE 로 새 재계산을 막고 경고만 한다 (자동 탈취 없음, 수동 확인 ``release_stalled_lease``).
+- fencing: ab0003 트리거가 BUILDING·CURRENT 가 아닌 run 의 행 쓰기와 FAILED·SUPERSEDED run 의 상태 복귀, CURRENT 중복을
+  DB 에서 거부한다. CURRENT 전환 직전에 같은 트랜잭션에서 실행권·토큰을 다시 확인한다.
 """
 from __future__ import annotations
 
@@ -47,6 +52,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -56,16 +62,19 @@ from trading.auto_buy import settings as S
 from trading.auto_buy.shadow import calendar as CAL
 from trading.auto_buy.shadow import engine as EN
 from trading.auto_buy.shadow.store import event, get_runtime, set_runtime, tx
-from trading.auto_buy.shadow.vfills import VOLUME_POSITIVE, VOLUME_UNKNOWN, VOLUME_ZERO, Bar, volume_state
+from trading.auto_buy.shadow.vfills import (CONFIRMED_ZERO_SOURCES, VOLUME_POSITIVE, VOLUME_UNKNOWN, VOLUME_ZERO, Bar,
+                                            volume_state, zero_confirmable)
 
 logger = logging.getLogger(__name__)
-DEFAULT_PROVIDER = "yfinance_daily_auto_adjust"
+DEFAULT_PROVIDER = "yahoo_chart_raw_v8_auto_adjust"
 KNOWN_VOLUME = (VOLUME_POSITIVE, VOLUME_ZERO)
-# 최신 리비전이 이 조건이면 그 일봉은 미확정 (결측·무효·거래량 미확인·ab0002 이전 행)
+# 최신 리비전이 이 조건이면 그 일봉은 미확정 (결측·무효·거래량 미확인·ab0002 이전 행·원본 확인 출처가 아닌 0)
+_CONFIRMED_SQL = ",".join("'%s'" % x for x in sorted(CONFIRMED_ZERO_SOURCES))
 INCOMPLETE_BAR_SQL = ("(b.status != 'OK' OR b.volume_status IS NULL "
-                      "OR b.volume_status NOT IN ('POSITIVE','ZERO'))")
+                      "OR b.volume_status NOT IN ('POSITIVE','ZERO') "
+                      f"OR (b.volume_status = 'ZERO' AND (b.volume_source IS NULL OR b.volume_source NOT IN ({_CONFIRMED_SQL}))))")
 PROCESS_TOKEN = uuid.uuid4().hex          # 이 프로세스의 실행권 식별자 (pid 재사용 구분)
-REPLAY_LEASE_STALE_SEC = 15 * 60          # heartbeat 가 이보다 오래되면 재계산 작업자가 비정상 종료한 것으로 본다
+REPLAY_LEASE_STALE_SEC = 15 * 60          # heartbeat 가 이보다 오래되면 응답 없음(STALLED). 사망 판정에는 쓰지 않는다
 
 
 class ReplayBusy(RuntimeError):
@@ -149,15 +158,28 @@ def latest_bar_rows(db, day: str, tickers) -> dict:
 
 
 def bar_complete(row) -> bool:
-    """저장된 일봉 행이 가상 체결·평가에 쓸 수 있는지 (OHLC 정상 + 거래량 양수 또는 0 확정)."""
-    return row is not None and row["status"] == "OK" and row["volume_status"] in KNOWN_VOLUME
+    """저장된 일봉 행이 가상 체결·평가에 쓸 수 있는지 (OHLC 정상 + 거래량 양수 또는 원본 확인 출처의 0 확정).
+    출처 기록이 없는 0(ab0002 시절 yfinance 변환값)은 확정으로 보지 않는다."""
+    if row is None or row["status"] != "OK":
+        return False
+    if row["volume_status"] == VOLUME_POSITIVE:
+        return True
+    return row["volume_status"] == VOLUME_ZERO and zero_confirmable(_col(row, "volume_source"))
+
+
+def _col(row, key):
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
 
 
 def _rec(row) -> Optional[EN.BarRec]:
     if not bar_complete(row):
         return None
-    return EN.BarRec(Bar(row["open"], row["high"], row["low"], row["close"], volume=row["volume"]), row["provider"],
-                     row["fetched_at"], row["input_rev"])
+    return EN.BarRec(Bar(row["open"], row["high"], row["low"], row["close"], volume=row["volume"],
+                         volume_source=_col(row, "volume_source")), row["provider"], row["fetched_at"],
+                     row["input_rev"])
 
 
 def usable_bar(bar) -> bool:
@@ -173,8 +195,12 @@ def _store_bar(db, day: str, ticker: str, bar, provider: str, purpose: str, fina
                      (day, ticker)).fetchone()[0] + 1
     is_bar = isinstance(bar, Bar)
     vol = bar.volume if is_bar else None
-    vstate = volume_state(vol)
+    src = bar.volume_source if is_bar else None
+    vstate = volume_state(vol, src)
     vol_v = vol if vstate in KNOWN_VOLUME else None
+    evidence = dict(bar.evidence) if is_bar and bar.evidence else ({"source": src} if is_bar else None)
+    if is_bar and vol is not None and vstate == VOLUME_UNKNOWN:
+        evidence["reported_volume"] = vol          # 확정할 수 없는 0 등 (예: 변환 DataFrame) — 근거로만 남김
     if is_bar and bar.valid():
         vals = (bar.open, bar.high, bar.low, bar.close)
         if vstate == VOLUME_POSITIVE:
@@ -182,9 +208,11 @@ def _store_bar(db, day: str, ticker: str, bar, provider: str, purpose: str, fina
         elif not final_missing:
             return None
         elif vstate == VOLUME_ZERO:
-            status, detail = "OK", "거래량 0 확정 — 그날 가상 체결·손절 체결 없음"
+            status, detail = "OK", "원본 거래량 0 확정 — 그날 가상 체결·손절 체결 없음"
+        elif vol == 0:
+            status, detail = "INVALID", f"거래량 0 이지만 원본 확인 출처가 아님({src}) — 미확인, 데이터 불완전"
         else:
-            status, detail = "INVALID", "거래량 확인 불가 (NULL·음수·NaN) — 데이터 불완전"
+            status, detail = "INVALID", "거래량 확인 불가 (NULL·필드 없음·음수·NaN) — 데이터 불완전"
     elif bar is not None:
         if not final_missing:
             return None
@@ -194,8 +222,10 @@ def _store_bar(db, day: str, ticker: str, bar, provider: str, purpose: str, fina
             return None
         status, vals, detail, vstate = "MISSING", (None, None, None, None), "데이터 마감 후에도 일봉 없음", VOLUME_UNKNOWN
     db.execute("INSERT INTO ab_bars(day, ticker, input_rev, status, open, high, low, close, provider, fetched_at, "
-               "purpose, detail, volume, volume_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-               (day, ticker, rev, status, *vals, provider, time.time(), purpose, detail, vol_v, vstate))
+               "purpose, detail, volume, volume_status, volume_source, source_evidence) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (day, ticker, rev, status, *vals, provider, time.time(), purpose, detail, vol_v, vstate, src,
+                json.dumps(evidence, ensure_ascii=False, default=str) if evidence else None))
     return status
 
 
@@ -283,8 +313,11 @@ def day_completeness(db, run_id: int, inp: EN.DayInputs) -> dict:
     return out
 
 
-def process_day(db, run_id: int, inp: EN.DayInputs, settings=None) -> dict:
+def process_day(db, run_id: int, inp: EN.DayInputs, settings=None, on_account: Optional[Callable] = None) -> dict:
+    """46 계좌 처리 → 일 요약. ``on_account``: 계좌마다 처리 전에 부른다 (재계산 실행권 heartbeat·소유 확인)."""
     for acc_id, *_ in S.account_ids():
+        if on_account is not None:
+            on_account()
         EN.process_account_day(db, run_id, acc_id, inp, settings)
     with tx(db):
         row = db.execute("SELECT status, notes FROM ab_days WHERE run_id=? AND day=?", (run_id, inp.day)).fetchone()
@@ -406,8 +439,87 @@ def _flag_manual_review(db, expired: list) -> None:
         set_runtime(db, "manual_review_flagged", sorted(seen | set(new)))
 
 
+# ── 재계산 실행권 (lease) ───────────────────────────────────────────────
+#
+# 상태 (classify_lease):
+#   OWN                — 이 프로세스(토큰 일치)
+#   ALIVE              — 같은 호스트·같은 boot, pid 살아 있고 프로세스 시작 식별자 일치, heartbeat 최신
+#   ALIVE_UNVERIFIED   — 위와 같지만 시작 식별자를 확인할 수 없음 (pid 재사용 판정 불가 → 살아 있다고 본다)
+#   STALLED            — 같은 호스트에서 원래 프로세스가 살아 있으나 heartbeat 지연 (응답 없음). 자동 탈취하지 않고 차단·경고
+#   STALLED_UNVERIFIED — 위와 같지만 시작 식별자 확인 불가
+#   REMOTE_ACTIVE      — 다른 호스트, heartbeat 최신 (건드리지 않음)
+#   REMOTE_STALE       — 다른 호스트, heartbeat 지연. 사망을 확인할 수 없으므로 자동 탈취하지 않고 차단·경고
+#   DEAD               — 같은 호스트에서 프로세스 사망 확인: pid 없음, boot 변경(재부팅), pid 재사용(시작 식별자 불일치
+#                        또는 이 프로세스가 같은 pid 를 다른 토큰으로 가짐). 이것만 자동 정리(FAILED)한다.
+# 실행권 만료(heartbeat 지연)와 프로세스 사망을 구분한다. heartbeat 지연만으로는 FAILED 로 바꾸지 않는다.
+LEASE_BLOCKING = ("OWN", "ALIVE", "ALIVE_UNVERIFIED", "STALLED", "STALLED_UNVERIFIED", "REMOTE_ACTIVE", "REMOTE_STALE")
+LEASE_RUNNING = ("OWN", "ALIVE", "ALIVE_UNVERIFIED", "REMOTE_ACTIVE")
+LEASE_STALLED = ("STALLED", "STALLED_UNVERIFIED", "REMOTE_STALE")
+
+
+def _now() -> float:
+    return time.time()
+
+
+_BOOT_ID: dict = {}
+
+
+def boot_id() -> Optional[str]:
+    """이 호스트의 부팅 식별자 (Linux boot_id, macOS kern.boottime). 알 수 없으면 None."""
+    if "v" in _BOOT_ID:
+        return _BOOT_ID["v"]
+    v = None
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            v = "linux:" + f.read().strip()
+    except OSError:
+        try:
+            import subprocess
+            out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5).stdout
+            sec = out.split("sec =", 1)[1].split(",", 1)[0].strip() if "sec =" in out else ""
+            v = f"boottime:{sec}" if sec.isdigit() else None
+        except Exception:
+            v = None
+    _BOOT_ID["v"] = v
+    return v
+
+
+def proc_start_id(pid) -> Optional[str]:
+    """프로세스 시작 식별자 (pid 재사용 구분). psutil → Linux /proc → ps. 알 수 없으면 None."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        import psutil  # type: ignore
+        return f"psutil:{psutil.Process(pid).create_time():.3f}"
+    except Exception:
+        pass
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return "proc:" + f.read().rsplit(")", 1)[1].split()[19]
+    except Exception:
+        pass
+    try:
+        import subprocess
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5).stdout.strip()
+        return f"ps:{' '.join(out.split())}" if out else None
+    except Exception:
+        return None
+
+
+_OWNER: dict = {}
+
+
 def _owner() -> dict:
-    return {"pid": os.getpid(), "host": socket.gethostname(), "token": PROCESS_TOKEN}
+    if not _OWNER or _OWNER.get("pid") != os.getpid():
+        _OWNER.clear()
+        _OWNER.update({"pid": os.getpid(), "host": socket.gethostname(), "boot_id": boot_id(),
+                       "proc_start": proc_start_id(os.getpid()), "token": PROCESS_TOKEN})
+    return dict(_OWNER)
 
 
 def _pid_alive(pid) -> bool:
@@ -428,60 +540,114 @@ def _pid_alive(pid) -> bool:
     return True
 
 
-def lease_alive(lease, now: Optional[float] = None) -> bool:
-    """재계산 실행권이 살아 있는지. heartbeat 가 오래됐거나, 같은 호스트에서 pid 가 죽었거나 재사용됐으면 False.
-    다른 호스트의 실행권은 heartbeat 로만 판단한다."""
+def classify_lease(lease, now: Optional[float] = None) -> dict:
+    """실행권 상태 판정 → {"state", "reason", "stale", "age_sec"}. 위 상태 표 참조."""
     if not isinstance(lease, dict) or lease.get("run_id") is None:
-        return False
-    now = time.time() if now is None else now
+        return {"state": "NONE", "reason": None, "stale": None, "age_sec": None}
+    now = _now() if now is None else now
     try:
         hb = float(lease.get("heartbeat_at") or lease.get("at") or 0)
     except (TypeError, ValueError):
-        return False
-    if now - hb > REPLAY_LEASE_STALE_SEC:
-        return False
-    if lease.get("host") != socket.gethostname():
-        return True
+        hb = 0.0
+    age = now - hb
+    stale = age > REPLAY_LEASE_STALE_SEC
+    out = {"stale": stale, "age_sec": round(age, 1)}
     if lease.get("token") == PROCESS_TOKEN:
-        return True
-    if lease.get("pid") == os.getpid():          # 같은 pid 인데 토큰이 다름 = 이전 프로세스(재시작 전) 의 실행권
-        return False
-    return _pid_alive(lease.get("pid"))
+        return {**out, "state": "OWN", "reason": None}
+    if lease.get("host") != socket.gethostname():
+        return {**out, "state": "REMOTE_STALE" if stale else "REMOTE_ACTIVE",
+                "reason": "다른 호스트 — 사망 확인 불가, 자동 탈취하지 않음" if stale else None}
+    mine = _owner()
+    if lease.get("boot_id") and mine.get("boot_id") and lease["boot_id"] != mine["boot_id"]:
+        return {**out, "state": "DEAD", "reason": "REBOOTED"}
+    pid = lease.get("pid")
+    if pid == os.getpid():
+        return {**out, "state": "DEAD", "reason": "PID_REUSED"}       # 같은 pid, 다른 토큰 = 이전 프로세스의 실행권
+    if not _pid_alive(pid):
+        return {**out, "state": "DEAD", "reason": "PROCESS_GONE"}
+    rec, cur = lease.get("proc_start"), proc_start_id(pid)
+    if rec and cur and rec != cur:
+        return {**out, "state": "DEAD", "reason": "PID_REUSED"}
+    unverified = not (rec and cur)
+    if stale:
+        return {**out, "state": "STALLED_UNVERIFIED" if unverified else "STALLED",
+                "reason": "원래 작업자가 살아 있으나 heartbeat 지연 — 자동 탈취하지 않음, 수동 확인 필요"}
+    return {**out, "state": "ALIVE_UNVERIFIED" if unverified else "ALIVE",
+            "reason": "프로세스 시작 식별자 확인 불가 — pid 재사용 판정 없이 살아 있다고 봄" if unverified else None}
+
+
+def lease_alive(lease, now: Optional[float] = None) -> bool:
+    """실행권이 다른 재계산을 막는지 (사망이 확인된 경우만 False). heartbeat 지연만으로는 False 가 아니다."""
+    return classify_lease(lease, now)["state"] in LEASE_BLOCKING
 
 
 def replay_state(db, now: Optional[float] = None) -> Optional[dict]:
-    """모니터용 재계산 상태. None 이면 재계산 없음."""
+    """모니터용 재계산 상태. None 이면 재계산 없음.
+    RUNNING / STALLED (응답 없음·자동 탈취 안 함, 경고) / ABANDONED_SUSPECTED (사망 확인 또는 실행권 없는 BUILDING)."""
     lease = get_runtime(db, "replay_in_progress")
     building = [r[0] for r in db.execute("SELECT run_id FROM ab_runs WHERE status='BUILDING' ORDER BY run_id")]
     if not lease and not building:
         return None
-    alive = lease_alive(lease, now)
-    return {"status": "RUNNING" if alive and lease.get("run_id") in building else "ABANDONED_SUSPECTED",
+    c = classify_lease(lease, now)
+    on_building = isinstance(lease, dict) and lease.get("run_id") in building
+    if c["state"] in LEASE_RUNNING and on_building:
+        status = "RUNNING"
+    elif c["state"] in LEASE_STALLED and on_building:
+        status = "STALLED"
+    else:
+        status = "ABANDONED_SUSPECTED"
+    return {"status": status, "lease_state": c["state"], "lease_reason": c["reason"], "heartbeat_age_sec": c["age_sec"],
             "lease": lease, "building_runs": building}
 
 
 def reap_abandoned_builds(db, now: Optional[float] = None) -> list:
-    """비정상 종료된 BUILDING run 을 FAILED(ABANDONED_BUILD)로 기록한다 (삭제 없음). 살아 있는 작업자의 run 은 건드리지
-    않는다. CURRENT run·replay_needed 는 바꾸지 않는다 (다음 job 이 다시 재계산). 반환: FAILED 로 바꾼 run 목록."""
-    now = time.time() if now is None else now
+    """사망이 확인된 작업자(DEAD)의 BUILDING run 과 실행권 없는 BUILDING run 만 FAILED(ABANDONED_BUILD)로 기록한다
+    (삭제 없음). 살아 있거나 확인할 수 없는 작업자(STALLED·REMOTE_*)는 건드리지 않고 경고만 남긴다.
+    CURRENT run·replay_needed 는 바꾸지 않는다. 반환: FAILED 로 바꾼 run 목록."""
+    now = _now() if now is None else now
     reaped = []
     with tx(db):
         lease = get_runtime(db, "replay_in_progress")
-        alive = lease_alive(lease, now)
+        c = classify_lease(lease, now)
+        lease_run = lease.get("run_id") if isinstance(lease, dict) else None
         for (run,) in db.execute("SELECT run_id FROM ab_runs WHERE status='BUILDING' ORDER BY run_id").fetchall():
-            if alive and lease.get("run_id") == run:
+            if run == lease_run and c["state"] in LEASE_BLOCKING:
+                if c["state"] in LEASE_STALLED and get_runtime(db, "replay_stall_warned") != run:
+                    event(db, "WARN", "replay_stalled", f"재계산 run #{run} 작업자 응답 없음 ({c['state']}, heartbeat "
+                          f"{c['age_sec']}초 전) — 자동 탈취하지 않음. 새 재계산 차단, 수동 확인 필요",
+                          run=run, lease=lease, lease_state=c["state"])
+                    set_runtime(db, "replay_stall_warned", run)
                 continue
-            mine = lease if isinstance(lease, dict) and lease.get("run_id") == run else None
+            mine = lease if run == lease_run else None
+            reason = c["reason"] if mine else "NO_LEASE"
             summary = {"reason": "ABANDONED_BUILD", "abandoned": True, "detected_at": now, "lease": mine,
-                       "note": "재계산 작업자 비정상 종료 (heartbeat 만료·프로세스 없음). 현재 run 유지, 다음 job 이 재계산"}
+                       "death_evidence": reason,
+                       "note": "재계산 작업자 사망 확인 (프로세스 없음·재부팅·pid 재사용) 또는 실행권 없음. 현재 run 유지, "
+                               "다음 job 이 재계산"}
             db.execute("UPDATE ab_runs SET status='FAILED', completed_at=?, summary=? WHERE run_id=? "
                        "AND status='BUILDING'", (now, EN._j(summary), run))
-            event(db, "ERROR", "replay_abandoned", f"재계산 run #{run} 비정상 종료 감지 — FAILED(ABANDONED_BUILD)로 기록, "
-                  f"현재 run 유지", run=run, lease=mine)
+            event(db, "ERROR", "replay_abandoned", f"재계산 run #{run} 비정상 종료 확인({reason}) — FAILED(ABANDONED_BUILD)로 "
+                  f"기록, 현재 run 유지", run=run, lease=mine, death_evidence=reason)
             reaped.append(run)
-        if lease and not alive:
+        if lease and c["state"] == "DEAD":
             set_runtime(db, "replay_in_progress", None)
     return reaped
+
+
+def release_stalled_lease(db, run: int, operator_note: str) -> bool:
+    """수동 조치 전용 (별도 승인 후 운영자가 원래 작업자 종료를 확인한 다음 호출). 자동 경로에서는 부르지 않는다.
+    해당 BUILDING run 을 FAILED(ABANDONED_MANUAL)로 바꾸고 실행권을 지운다. 원래 작업자가 다시 실행돼도 fencing
+    트리거와 실행권 확인 때문에 쓰거나 CURRENT 로 바꿀 수 없다."""
+    with tx(db):
+        lease = get_runtime(db, "replay_in_progress")
+        if not isinstance(lease, dict) or lease.get("run_id") != run:
+            return False
+        db.execute("UPDATE ab_runs SET status='FAILED', completed_at=?, summary=? WHERE run_id=? AND status='BUILDING'",
+                   (_now(), EN._j({"reason": "ABANDONED_MANUAL", "lease": lease, "note": operator_note}), run))
+        set_runtime(db, "replay_in_progress", None)
+        event(db, "ERROR", "replay_released_manually", f"재계산 run #{run} 실행권 수동 해제: {operator_note}",
+              run=run, lease=lease)
+    return True
 
 
 def _owns(db, run: int) -> bool:
@@ -492,48 +658,71 @@ def _owns(db, run: int) -> bool:
     return r is not None and r[0] == "BUILDING"
 
 
+HEARTBEAT_FAILURES: dict = {}
+
+
 def _heartbeat(db, run: int) -> None:
-    with tx(db):
-        if not _owns(db, run):
-            raise ReplayLeaseLost(f"재계산 run #{run} 실행권을 잃었습니다 (다른 작업자가 비정상 종료로 판정)")
-        lease = get_runtime(db, "replay_in_progress")
-        lease["heartbeat_at"] = time.time()
-        set_runtime(db, "replay_in_progress", lease)
+    """실행권 소유 확인 + heartbeat 갱신. 소유를 잃었으면 ReplayLeaseLost. DB 잠김 등으로 갱신만 실패하면 경고하고
+    계속한다 (소유 상실과 구분). 실패가 길어지면 다른 작업자에게 STALLED 로 보이지만 자동 탈취되지는 않는다."""
+    try:
+        with tx(db):
+            if not _owns(db, run):
+                raise ReplayLeaseLost(f"재계산 run #{run} 실행권을 잃었습니다 (해제·정리됨)")
+            lease = get_runtime(db, "replay_in_progress")
+            lease["heartbeat_at"] = _now()
+            set_runtime(db, "replay_in_progress", lease)
+        HEARTBEAT_FAILURES.pop(run, None)
+    except ReplayLeaseLost:
+        raise
+    except sqlite3.OperationalError as exc:
+        n = HEARTBEAT_FAILURES[run] = HEARTBEAT_FAILURES.get(run, 0) + 1
+        logger.warning("자동매수 SHADOW 재계산 run #%s heartbeat 갱신 실패 %s회: %s", run, n, type(exc).__name__)
 
 
 def replay(db, provider: Callable, reason: str, settings=None) -> dict:
     """현재 run 이 처리한 거래일 전체를 저장된 입력으로 새 run 에서 다시 계산하고 원자적으로 교체한다.
 
-    실행권이 살아 있는 다른 재계산이 있으면 ReplayBusy. 도중에 실행권을 잃으면 ReplayLeaseLost (CURRENT 전환 없음)."""
+    실행권을 막는 다른 재계산(살아 있음·응답 없음·다른 호스트)이 있으면 ReplayBusy. 도중에 실행권을 잃으면
+    ReplayLeaseLost (CURRENT 전환 없음). heartbeat 는 거래일마다, 계좌마다, 일봉 조회 전후에 갱신한다.
+    run fencing 트리거(ab0003)가 FAILED run 에 대한 쓰기를 DB 에서 거부하므로, 실행권을 잃은 뒤 다시 실행돼도 쓸 수 없다."""
     with tx(db):
         lease = get_runtime(db, "replay_in_progress")
-        if lease_alive(lease) and db.execute("SELECT 1 FROM ab_runs WHERE run_id=? AND status='BUILDING'",
-                                             (lease.get("run_id"),)).fetchone():
-            raise ReplayBusy(f"재계산 run #{lease['run_id']} 진행 중 (pid {lease.get('pid')})")
+        c = classify_lease(lease)
+        if c["state"] in LEASE_BLOCKING and db.execute("SELECT 1 FROM ab_runs WHERE run_id=? AND status='BUILDING'",
+                                                       (lease.get("run_id"),)).fetchone():
+            raise ReplayBusy(f"재계산 run #{lease['run_id']} {c['state']} (pid {lease.get('pid')}, "
+                             f"host {lease.get('host')})")
         parent = EN.current_run(db)
         days = [r[0] for r in db.execute("SELECT day FROM ab_days WHERE run_id=? ORDER BY day", (parent,))]
         run = EN.create_run(db, reason, parent, "BUILDING", settings)
-        now = time.time()
+        now = _now()
         set_runtime(db, "replay_in_progress", {"run_id": run, "reason": reason, "at": now, "heartbeat_at": now,
                                                **_owner()})
+    beat = lambda: _heartbeat(db, run)  # noqa: E731
     try:
         for d in days:
-            _heartbeat(db, run)
+            beat()
             req = required_tickers(db, run, d)
             have = latest_bar_rows(db, d, req)
             absent = [t for t in req if t not in have]
             if absent:                           # 원래 run 에 없던 종목(복구로 생긴 새 포지션 등)은 이때 받는다
                 collect_bars(db, d, absent, provider, final=True, purpose="REPLAY")
+                beat()
             rows = latest_bar_rows(db, d, req)
             bars = {t: _rec(rows.get(t)) for t in req}
-            process_day(db, run, build_inputs(db, run, d, bars, settings), settings)
+            try:
+                process_day(db, run, build_inputs(db, run, d, bars, settings), settings, on_account=beat)
+            except sqlite3.IntegrityError as exc:
+                if "run fenced" in str(exc):     # 실행권 정리 후 이 run 에 쓰려 함 → DB 가 거부
+                    raise ReplayLeaseLost(f"재계산 run #{run} 쓰기 차단 (fencing): 실행권을 잃었습니다") from exc
+                raise
         diff = _diff(db, parent, run)
         with tx(db):
             if not _owns(db, run):               # 교체 직전 실행권 재확인 (같은 트랜잭션에서 원자적 전환)
                 raise ReplayLeaseLost(f"재계산 run #{run} 실행권을 잃어 CURRENT 로 바꾸지 않습니다")
             db.execute("UPDATE ab_runs SET status='SUPERSEDED' WHERE run_id=?", (parent,))
             db.execute("UPDATE ab_runs SET status='CURRENT', completed_at=?, through_day=?, summary=? WHERE run_id=?",
-                       (time.time(), days[-1] if days else None, EN._j(diff), run))
+                       (_now(), days[-1] if days else None, EN._j(diff), run))
             set_runtime(db, "current_run", run)
             set_runtime(db, "replay_in_progress", None)
             set_runtime(db, "replay_needed", None)          # 교체가 끝났을 때만 재계산 필요 상태를 지운다

@@ -102,11 +102,11 @@ def test_single_and_multi_ticker_download_shapes():
     assert bars_from_download(a, ["AAA", "BBB"], "2026-11-24") == {"AAA": None, "BBB": None}   # 평평한 열은 모호
 
 
-def test_recovery_of_single_ticker_uses_multiindex_response(monkeypatch):
-    raw = pd.concat({"AAA": _frame(10, 11, 9.5, 10.5)}, axis=1)
-    fake = types.SimpleNamespace(download=lambda *a, **k: raw)
-    monkeypatch.setitem(sys.modules, "yfinance", fake)
-    assert yfinance_bars(["AAA"], "2026-11-24") == {"AAA": Bar(10.0, 11.0, 9.5, 10.5)}
+def test_recovery_of_single_ticker_uses_raw_chart_response():
+    """복구(단일 종목) 조회도 Yahoo chart 원본 응답 1건에서 OHLC·거래량을 읽는다 (DataFrame 변환 경로 아님)."""
+    from tests.test_auto_buy_shadow_review4 import chart_http
+    got = yfinance_bars(["AAA"], "2026-11-24", http_get=chart_http({"AAA": {"2026-11-24": (10, 11, 9.5, 10.5, 1000)}}))
+    assert got == {"AAA": Bar(10.0, 11.0, 9.5, 10.5)} and got["AAA"].volume == 1000
 
 
 # ── P1 부동소수점 OHLC 경계 ─────────────────────────────────────────
@@ -444,6 +444,7 @@ def test_check_dry_run_passes_for_empty_new_journal(tmp_path):
     from scripts.auto_buy_shadow_journal_migrate import run
     empty = tmp_path / "empty.sqlite3"
     sqlite3.connect(empty).close()
+    os.chmod(empty, 0o600)                         # 권한 검증(최종 재리뷰)은 review4 Migration 테스트에서 따로 확인
     rep = run(str(empty), None, check=True)
     assert rep["result"] == "CHECK_ONLY" and rep["dry_run"]["ok"]
     assert sqlite3.connect(empty).execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] == 0

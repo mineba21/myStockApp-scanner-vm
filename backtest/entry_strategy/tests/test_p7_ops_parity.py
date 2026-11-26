@@ -172,3 +172,17 @@ def test_real_reconstructed_data_all_23_accounts_match():
                 if t["ticker"] == "SW" and t["entry_day"] == "2021-04-20"]
     cmp_ = OP.vs_p7_original(ops)
     assert cmp_["verdict_maintained"] == "NOT_RECOMMENDED" and cmp_["b01_status"] == "NEED_MORE_DATA"
+
+
+def test_cache_zero_is_unknown_outside_explicit_backtest_assumption():
+    """재구성 캐시(변환된 DataFrame) 거래량 0 은 원본 확인 출처가 아니다. 정합성 비교 하네스 안에서만 명시적으로 확정 0
+    으로 가정하고(보고서에 기록), 그 밖(운영 SHADOW 경로)에서는 UNKNOWN 이다."""
+    from trading.auto_buy.shadow import vfills as VF
+    bar = VF.Bar(10.0, 10.5, 9.8, 10.2, volume=0.0, volume_source=OP.CACHE_SOURCE)
+    assert bar.volume_state == VF.VOLUME_UNKNOWN and not VF.zero_confirmable(OP.CACHE_SOURCE)
+    with VF.assume_confirmed_zero(OP.CACHE_SOURCE):
+        assert bar.volume_state == VF.VOLUME_ZERO
+        assert VF.volume_state(0.0, VF.SOURCE_YF_DATAFRAME) == VF.VOLUME_UNKNOWN      # 다른 출처는 그대로
+    assert bar.volume_state == VF.VOLUME_UNKNOWN                                       # 컨텍스트 종료 후 복원
+    assert VF.volume_state(0.0, VF.SOURCE_YAHOO_CHART_RAW) == VF.VOLUME_ZERO
+    assert "확인 불가" in OP.CACHE_ZERO_ASSUMPTION and "성과 검증 아님" in OP.CACHE_ZERO_ASSUMPTION

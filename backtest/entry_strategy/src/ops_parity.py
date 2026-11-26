@@ -1,6 +1,6 @@
 """실제 재구성 데이터로 SHADOW 엔진 ↔ P7 운영 정책 비교판(P7-OPS) 전체 대조 (P7C 비교용 23개 계좌).
 
-- SHADOW 쪽: 임시 SQLite 저널(ab0002)에 백테스트 후보를 신호 스냅샷으로 넣고, 거래일마다 운영 코드 경로
+- SHADOW 쪽: 임시 SQLite 저널(최신 리비전)에 백테스트 후보를 신호 스냅샷으로 넣고, 거래일마다 운영 코드 경로
   ``inputs.required_tickers → collect_bars(OHLCV 캐시 공급자) → build_inputs → process_day`` 를 그대로 실행한다.
   (결정 스캔 수집·Scanner hook·계좌 조회는 대상이 아니다. 계좌 스냅샷이 없으므로 OPS 23개 계좌는 매일 차단된다 —
   OPS 는 과거 실제 계좌 스냅샷이 없어 실제 데이터 검증 대상이 아니며 합성 입력 테스트로만 확인한다.)
@@ -8,6 +8,12 @@
 - 기존 P7 결과 파일은 읽기만 하고 바꾸지 않는다. 산출물은 output/p7_ops_* (Git 제외).
 
 운영 DB·운영 저널·VM·주문 경로와 연결되지 않는다 (임시 디렉터리 저널, 백테스트 격리 import).
+
+**한계 (원본 거래량):** OHLCV 캐시는 yfinance 변환 DataFrame 에서 만든 것이라 원본 ``volume: null`` 이 0 으로 바뀌었는지
+확인할 수 없다 (원본 응답 미보존). 이 대조는 캐시의 0 을 '확정 0' 으로 **가정**하고(``CACHE_ZERO_ASSUMPTION``,
+``vfills.assume_confirmed_zero``) 두 구현이 같은 입력에서 같은 결과를 내는지(엔진 정합성)만 확인한다.
+원본 데이터의 정확성이나 과거 성과를 새로 검증하지 않는다. 운영 수집 경로(원본 JSON) 검증은 별도 테스트
+(``tests/test_auto_buy_shadow_review4.py``)가 맡는다.
 """
 from __future__ import annotations
 
@@ -26,6 +32,9 @@ from . import p7_ops as OPS
 from .pipeline import C
 
 STRATS = ("B00", "B00N", "B01")
+CACHE_SOURCE = "backtest_reconstructed_cache"
+CACHE_ZERO_ASSUMPTION = ("재구성 OHLCV 캐시(yfinance 변환값)의 거래량 0 을 확정 0 으로 가정. 원본 null 여부는 확인 불가 — "
+                         "엔진 정합성 대조 전용, 원본 데이터 정확성·과거 성과 검증 아님")
 
 
 def _flags_to_warnings(row) -> list:
@@ -99,12 +108,19 @@ def _provider(u):
                 continue
             r = df.loc[day]
             out[t] = Bar(float(r["Open"]), float(r["High"]), float(r["Low"]), float(r["Close"]),
-                         volume=float(r["Volume"]))
+                         volume=float(r["Volume"]), volume_source=CACHE_SOURCE)
         return out
     return f
 
 
 def run_shadow(u: dict, journal: str, progress: bool = False) -> dict:
+    """캐시 거래량 0 을 확정 0 으로 가정한 상태에서 SHADOW 엔진 경로를 실행한다 (``CACHE_ZERO_ASSUMPTION``)."""
+    from trading.auto_buy.shadow.vfills import assume_confirmed_zero
+    with assume_confirmed_zero(CACHE_SOURCE):
+        return _run_shadow(u, journal, progress)
+
+
+def _run_shadow(u: dict, journal: str, progress: bool = False) -> dict:
     from dataclasses import replace
 
     from trading.auto_buy import settings as S
@@ -347,6 +363,8 @@ def run_all(out_dir: Optional[Path] = None, progress: bool = True) -> dict:
         "shadow_zero_volume_hold_positions": {k: sum(1 for t in sh[k]["trades"] if t["zero_volume_days"])
                                               for k in ops},
         "diff_vs_p7": OPS.DIFF_VS_P7,
+        "zero_volume_source_assumption": CACHE_ZERO_ASSUMPTION,
+        "validation_scope": "엔진 정합성(같은 변환 캐시 입력에서 SHADOW = P7-OPS). 운영 수집 경로(원본 JSON) 검증과 별개",
         "ops_accounts_note": "OPS 23개 계좌는 과거 실제 계좌 스냅샷이 없어 실제 데이터 대조 대상이 아님 (합성 입력 테스트로만 확인)",
     })
     if out_dir is not None:
