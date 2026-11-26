@@ -120,7 +120,8 @@ def account_state(prof: dict, positions: list, reservations: list, cash: float, 
                 acc_sec[s] = acc_sec.get(s, 0.0) + h["value"]
             st["acct"] = {
                 "equity_as_if": eq_if, "cash_as_if": cash_if, "real_equity": acct["equity"],
-                "real_cash": acct["cash"], "manual_value": manual_val, "manual_count": len(acct["holdings"]),
+                "real_cash": acct["cash"], "real_total_cash": acct.get("total_cash"), "manual_value": manual_val,
+                "manual_count": len(acct["holdings"]),
                 "manual_uncertain_risk": manual_unc,
                 "manual_unknown_sector_value": acc_sec.get(UNKNOWN_SECTOR, 0.0) - sec_val.get(UNKNOWN_SECTOR, 0.0),
                 "account_total_risk_pct": (he + pend_risk + manual_unc) / eq_if if eq_if > 0 else float("nan"),

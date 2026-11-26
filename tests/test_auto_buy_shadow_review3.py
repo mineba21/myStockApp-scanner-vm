@@ -246,10 +246,22 @@ def _set_lease(shadow, **kw):
         db.close()
 
 
+def request_replay(shadow, bars=(("2026-11-24", "BBB"),)):
+    """재계산 요청을 운영 경로와 같은 함수(``_mark_replay_needed``)로 남긴다. 반환: 요청 세대."""
+    db = connect_rw(shadow.journal_path)
+    try:
+        with tx(db):
+            IN._mark_replay_needed(db, [tuple(b) for b in bars])
+        return IN.replay_request(db)["generation"]
+    finally:
+        db.close()
+
+
 def _replay_ready(shadow, prod):
     _two_orders(shadow, prod)
     job(shadow, prod, Bars({D2: {"AAA": BAR_A2}}), final(D2))
     scan(prod, utc(D3, 21, 30), [])
+    request_replay(shadow)                         # 직접 IN.replay 를 부르는 테스트용 (job 경로는 recover_missing 이 남김)
     return Bars({D2: {"AAA": BAR_A2, "BBB": BAR_B2}, D3: {"AAA": BAR_A3, "BBB": BAR_B3, "CCC": BAR_C3}})
 
 
@@ -367,7 +379,9 @@ def test_s5_counts_abandoned_unrecoverable_incomplete_and_fill_unknown(shadow, p
                                    "data_incomplete_days": 1, "fill_unknown_orders": b["fill_unknown_orders"],
                                    "unresolved_positions": 0, "manual_review_bars": 0}
     assert b["fill_unknown_orders"] >= 1
-    assert b["operational_total"] == 0 and b["data_integrity_total"] == 4 + b["fill_unknown_orders"]
+    # 시뮬레이션 시각이 D1 저녁 → D2 마감 후로 건너뛰므로 예정 실행 공백 1건이 운영 이력(heartbeat_gap)으로 남는다
+    assert b["operational"]["heartbeat_stale"] == 1 and b["operational_total"] == 1
+    assert b["data_integrity_total"] == 4 + b["fill_unknown_orders"]
     assert s5["safety_violations"] == b["total"] and s5["safety_pass"] is False
     assert s5["trading_days"] < S.S5_CRITERIA["milestones"]["safety_days"]     # 5거래일 검증 중에도 통과 아님
     assert S.S5_CRITERIA["performance"]["safety_violations_max"] == 0          # 기준 변경 없음
@@ -416,12 +430,12 @@ def test_ab0002_upgrades_v1_journal_keeping_rows_and_runtime_refuses_v1(tmp_path
     db.commit()
     db.close()
     st = schema_status(p)
-    assert not st["schema_ready"] and st["schema_version"] == "ab0001" and "ab0003" in st["schema_error"]
+    assert not st["schema_ready"] and st["schema_version"] == "ab0001" and "ab0004" in st["schema_error"]
     os.chmod(p, 0o600)
     rep = run(p, str(tmp_path / "bk"), check=True)
-    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0003"}
+    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0004"}
     assert schema_status(p)["schema_version"] == "ab0001"                     # --check 는 원본을 바꾸지 않음
-    assert upgrade_journal(p) == "ab0003"
+    assert upgrade_journal(p) == "ab0004"
     db = sqlite3.connect(p)
     assert db.execute("SELECT ticker, status, volume, volume_status FROM ab_bars").fetchall() == [("AAA", "OK", None,
                                                                                                     None)]

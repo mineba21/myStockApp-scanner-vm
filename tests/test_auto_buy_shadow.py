@@ -164,8 +164,8 @@ def test_shadow_without_migration_does_not_create_journal(monkeypatch, tmp_path,
 
 def test_migration_roundtrip_and_refuses_foreign_db(tmp_path):
     p = str(tmp_path / "j.sqlite3")
-    assert upgrade_journal(p, allow_create=True) == "ab0003"    # head (ab0001 → ab0002 거래량 → ab0003 출처)
-    assert upgrade_journal(p) == "ab0003"                      # 재실행 무변경
+    assert upgrade_journal(p, allow_create=True) == "ab0004"    # head (ab0001 → ab0002 거래량 → ab0003 출처 → ab0004 원장 불변)
+    assert upgrade_journal(p) == "ab0004"                      # 재실행 무변경
     assert schema_status(p)["schema_ready"]
     other = str(tmp_path / "orders.sqlite3")
     sqlite3.connect(other).execute("CREATE TABLE scanner_buy_orders(id INTEGER)").connection.close()

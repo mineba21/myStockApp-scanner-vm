@@ -173,8 +173,20 @@ def _run(journal: str, backup_dir: str, *, allow_create=False, check=False) -> d
     if os.path.islink(journal):
         raise Abort(2, "저널 경로가 심볼릭 링크입니다. 실제 파일 경로를 지정하세요.")
     journal = str(Path(journal).resolve())
-    exists = os.path.isfile(journal)
+    exists = os.path.lexists(journal)
+    if exists and not os.path.isfile(journal):
+        raise Abort(2, "저널 경로가 일반 파일이 아닙니다.")
     rep["journal_exists"] = exists
+    if exists:
+        # SQLite 로 여는 어떤 동작(schema_status 포함)보다 먼저 저널·부속 파일(-journal/-wal/-shm)의 링크·유형·소유자·
+        # 하드링크·다른 저널 여부를 검증한다. SQLite 는 열 때 부속 파일을 따라가 읽거나 만들 수 있다.
+        rep["permissions_before"] = permission_report(journal)
+        if rep["permissions_before"]["unsafe"]:
+            raise Abort(2, f"저널·부속 파일 검증 실패 (열지 않음, 권한을 바꾸지 않음): {rep['permissions_before']['unsafe']}")
+    else:
+        stray = [journal + sfx for sfx in SIDECARS if os.path.lexists(journal + sfx)]
+        if stray:
+            raise Abort(2, f"저널이 없는데 부속 파일이 있습니다 (검토 필요): {[os.path.basename(x) for x in stray]}")
     rep["status_before"] = schema_status(journal)
     if not exists and not allow_create:
         raise Abort(2, f"저널 파일이 없습니다: {journal}. 최초 생성은 --allow-create (경로 확인 후).")
@@ -185,10 +197,6 @@ def _run(journal: str, backup_dir: str, *, allow_create=False, check=False) -> d
         if not os.access(parent, os.W_OK):
             raise Abort(2, f"상위 디렉터리에 쓸 수 없습니다: {parent}")
     if exists:
-        # SQLite 로 열기 전에 파일 자체를 검증한다 (부속 파일 심볼릭 링크·하드링크·다른 저널)
-        rep["permissions_before"] = permission_report(journal)
-        if rep["permissions_before"]["unsafe"]:
-            raise Abort(2, f"저널·부속 파일 검증 실패 (권한을 바꾸지 않음): {rep['permissions_before']['unsafe']}")
         db = sqlite3.connect(Path(journal).as_uri() + "?mode=ro", uri=True)
         try:
             integ = db.execute("PRAGMA integrity_check").fetchone()[0]

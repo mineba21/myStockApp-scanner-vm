@@ -117,7 +117,8 @@ def test_other_day_null_ohlc_and_http_errors_give_no_bar():
     assert parse_chart(chart_payload("AAA", D2, (None, 11, 9.5, 10.5, 1)), "AAA", D2)[0] is None
     got = yfinance_bars(["AAA", "BBB", "CCC"], D2,
                         http_get=chart_http({"AAA": {D2: ("HTTP", 500)}, "BBB": {D2: A2 + (10,)}}))
-    assert got["AAA"] is None and got["CCC"] is None and got["BBB"].volume == 10
+    assert got["AAA"].code == "HTTP_500" and not got["AAA"].valid() and got["BBB"].volume == 10
+    assert got["CCC"].code == "HTTP_404"                     # 오류 응답 본문(chart.error JSON)은 읽지 않는다
 
 
 def test_dataframe_zero_is_not_confirmed_zero():

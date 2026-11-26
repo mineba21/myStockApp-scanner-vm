@@ -226,7 +226,15 @@ def test_old_worker_resuming_after_lease_loss_cannot_write_or_become_current(sha
         if st["n"] == 2:                  # A 가 멈춘 사이: 운영자가 실행권 해제 → B 가 재계산 완료
             other = connect_rw(shadow.journal_path)
             try:
-                assert IN.release_stalled_lease(other, run, "테스트: 작업자 응답 없음 확인 후 해제")
+                # A 를 '다른 호스트에서 응답 없는 작업자'로 만든다 (수동 해제가 허용되는 유일한 경우)
+                with tx(other):
+                    lease = get_runtime(other, "replay_in_progress")
+                    lease.update(host="worker-a.invalid", token="worker-a", heartbeat_at=time.time() - 3600)
+                    set_runtime(other, "replay_in_progress", lease)
+                ev = {"host": "worker-a.invalid", "pid": lease["pid"], "proc_start": lease["proc_start"],
+                      "confirmed_stopped_at": "2026-11-27T10:00:00Z", "method": "테스트: 원격 호스트 프로세스 목록 확인"}
+                assert IN.release_stalled_lease(other, run=run, token="worker-a", operator="test-operator",
+                                                reason="테스트: 작업자 응답 없음 확인 후 해제", evidence=ev)["released"]
                 monkeypatch.setattr(IN, "build_inputs", real_build)
                 st["b"] = IN.replay(other, full, "BARS_RECOVERED", shadow)["run"]
                 monkeypatch.setattr(IN, "build_inputs", build)
@@ -269,7 +277,8 @@ def test_concurrent_replays_only_one_becomes_current(shadow, prod):
         db = connect_rw(shadow.journal_path)
         try:
             barrier.wait()
-            results.append(("ok", IN.replay(db, full, "BARS_RECOVERED", shadow)["run"]))
+            res = IN.replay(db, full, "BARS_RECOVERED", shadow)
+            results.append(("skipped", res["skipped"]) if res.get("skipped") else ("ok", res["run"]))
         except IN.ReplayBusy as exc:
             results.append(("busy", str(exc)))
         except Exception as exc:  # pragma: no cover - 실패 내용 확인용
@@ -281,7 +290,8 @@ def test_concurrent_replays_only_one_becomes_current(shadow, prod):
         t.start()
     for t in ts:
         t.join(120)
-    assert sorted(r[0] for r in results) == ["busy", "ok"], results
+    kinds = sorted(r[0] for r in results)
+    assert kinds in (["busy", "ok"], ["ok", "skipped"]), results      # 같은 요청은 한 번만 성공 (동시=busy, 순차=skipped)
     winner = next(r[1] for r in results if r[0] == "ok")
     runs = {r["run_id"]: r["status"] for r in q(shadow, "SELECT * FROM ab_runs")}
     assert [k for k, v in runs.items() if v == "CURRENT"] == [winner] and runs[parent] == "SUPERSEDED"

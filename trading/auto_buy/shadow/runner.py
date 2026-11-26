@@ -65,13 +65,16 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
         return {"skipped": f"schema_not_ready: {st['schema_error']}"}
     now = CAL._utc(now or datetime.now(timezone.utc))
     running = scan_running or _scan_running
-    if bars_provider is None:
-        from trading.auto_buy.shadow.market_data import yfinance_bars as bars_provider
+    fetcher = None
+    if bars_provider is None:          # job 단위 공급자: 중복 제거·요청 예산·제한 재시도·연속 장애 중단 (market_data.ChartFetcher)
+        from trading.auto_buy.shadow.market_data import ChartFetcher
+        bars_provider = fetcher = ChartFetcher()
     if account_provider is None:
         from trading.auto_buy.shadow.market_data import kiwoom_account_snapshot as account_provider
     db = connect_rw(settings.journal_path)
     out = {"captures": [], "days": [], "waiting": None, "replay": None}
     try:
+        _record_heartbeat_gap(db, now, settings)
         out["captures"] = catch_up(settings, session_factory=session_factory, scan_running=running,
                                    start_day=settings.start_day, now=now)
         start = get_runtime(db, "shadow_start_day")
@@ -80,19 +83,22 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
                              "AND trading_day IS NOT NULL").fetchone()
             if not row or not row[0]:
                 out["waiting"] = "첫 스캔 스냅샷 대기"
-                _rt(db, "last_job", {"at": time.time(), "result": out["waiting"]})
+                _rt(db, "last_job", {"at": time.time(), "logical_at": now.timestamp(), "result": out["waiting"]})
                 return out
             start = max(row[0], settings.start_day) if settings.start_day else row[0]
             _rt(db, "shadow_start_day", start)
         start = version_start(db, start, settings)
+        vkey = f"s5_validation_start:{S.STRATEGY_VERSION}"
+        if get_runtime(db, vkey) is None:          # S5 연속 정상 운영 평가의 시작일을 명시적으로 고정 (이후 바꾸지 않음)
+            _rt(db, vkey, {"day": start, "fixed_at": time.time()})
         try:
             EN.ensure_accounts(db, start, settings)
         except EN.VersionMismatch as exc:
             with tx(db):
                 event(db, "ERROR", "version_mismatch", str(exc))
-                set_runtime(db, "version_block", {"at": time.time(), "message": str(exc)})
+                set_runtime(db, "version_block", {"at": time.time(), "logical_at": now.timestamp(), "message": str(exc)})
             out["error"] = "VersionMismatch"
-            _rt(db, "last_job", {"at": time.time(), "blocked": "VersionMismatch"})
+            _rt(db, "last_job", {"at": time.time(), "logical_at": now.timestamp(), "blocked": "VersionMismatch"})
             return out
         _rt(db, "version_block", None)
         out["abandoned_builds"] = IN.reap_abandoned_builds(db)
@@ -101,20 +107,30 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
             rid = rs["lease"].get("run_id")
             out["waiting"] = (f"재계산 run #{rid} 진행 중 (다른 작업자)" if rs["status"] == "RUNNING" else
                               f"재계산 run #{rid} 작업자 응답 없음 ({rs['lease_state']}) — 자동 탈취하지 않음, 수동 확인 필요")
-            _rt(db, "last_job", {"at": time.time(), "waiting": out["waiting"]})
+            _rt(db, "last_job", {"at": time.time(), "logical_at": now.timestamp(), "waiting": out["waiting"]})
             return out
         run = EN.ensure_run(db, settings)
         EN.record_eligibility(db)
+        # Scanner 수집과 Yahoo 동시 호출을 피한다: 실행 중이면 원본 조회(결측 복구·재계산·일봉 수집)를 보류만 한다
+        # (결측으로 확정하지 않음 — 다음 job 에 재시도).
+        scan_busy = running()
         # 결측 복구 → 재계산
-        recovered = IN.recover_missing(db, bars_provider, now, settings)
-        if recovered or IN.replay_needed(db):          # 이전 replay 가 실패했으면 교체될 때까지 다시 시도
+        recovered = [] if scan_busy else IN.recover_missing(db, bars_provider, now, settings)
+        if not scan_busy and (recovered or IN.replay_needed(db)):          # 이전 replay 가 실패했으면 교체될 때까지 다시 시도
+            req = IN.replay_request(db) or {}
             try:
-                out["replay"] = IN.replay(db, bars_provider, "BARS_RECOVERED", settings)
+                res = IN.replay(db, bars_provider, "BARS_RECOVERED", settings, expected_parent=run,
+                                expected_generation=req.get("generation"))
             except IN.ReplayBusy as exc:
                 out["waiting"] = f"재계산 대기: {exc}"
-                _rt(db, "last_job", {"at": time.time(), "waiting": out["waiting"]})
+                _rt(db, "last_job", {"at": time.time(), "logical_at": now.timestamp(), "waiting": out["waiting"]})
                 return out
-            run = out["replay"]["run"]
+            if res.get("skipped"):         # 이미 처리된 요청·다른 작업자가 먼저 교체 → 새 run 없음
+                out["replay_skipped"] = res["skipped"]
+                run = EN.current_run(db)
+            else:
+                out["replay"] = res
+                run = res["run"]
         last = CAL.last_closed_session(now, settings)
         done = {r[0] for r in db.execute("SELECT day FROM ab_days WHERE run_id=?", (run,))}
         now_u = now.astimezone(timezone.utc)
@@ -136,6 +152,10 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
                 break
             final = now_u >= IN.bars_cutoff(d, settings)
             req = IN.required_tickers(db, run, day)
+            to_fetch = [t for t in req if t not in IN.latest_bar_rows(db, day, req)]
+            if to_fetch and (scan_busy or running()):
+                out["waiting"] = f"{day} Scanner 실행 중 — Yahoo 일봉 {len(to_fetch)}건 조회 보류 (다음 job 에 재시도)"
+                break
             got = IN.collect_bars(db, day, req, bars_provider, final=final)
             if got["pending"] and not final:
                 out["waiting"] = f"{day} 일봉 {len(got['pending'])}/{len(req)}건 대기 (데이터 마감까지 재조회)"
@@ -174,15 +194,17 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
                           f"— 해당 주문 체결 불명·포지션 가격 미확정, 신규 매수 차단", day=day,
                           tickers=res["missing"][:50])
             out["days"].append(day)
-        _rt(db, "last_job", {"at": time.time(), "days": out["days"], "waiting": out["waiting"],
-                             "captures": len(out["captures"]), "run": run})
+        if fetcher is not None:
+            out["fetch"] = fetcher.stats()
+        _rt(db, "last_job", {"at": time.time(), "logical_at": now.timestamp(), "days": out["days"], "waiting": out["waiting"],
+                             "captures": len(out["captures"]), "run": run, "fetch": out.get("fetch")})
         return out
     except Exception as exc:
         logger.error("자동매수 SHADOW job 실패: %s", exc, exc_info=True)
         try:
             with tx(db):
                 event(db, "ERROR", "job_failed", f"SHADOW job 실패: {type(exc).__name__}: {exc}")
-                set_runtime(db, "last_error", {"at": time.time(), "type": type(exc).__name__,
+                set_runtime(db, "last_error", {"at": time.time(), "logical_at": now.timestamp(), "type": type(exc).__name__,
                                                "message": str(exc)[:300]})
         except Exception:
             pass
@@ -190,6 +212,28 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
         return out
     finally:
         db.close()
+
+
+def _record_heartbeat_gap(db, now: datetime, settings) -> None:
+    """지난 job 이후 예정 실행 시각을 놓쳤으면 WARN ``heartbeat_gap`` 을 한 번 남긴다 (S5 관찰 기간 이력 — 화면의 현재
+    heartbeat 상태는 다음 job 이 돌면 정상으로 돌아오므로 이력으로 따로 남긴다)."""
+    from trading.auto_buy.shadow.report import expected_slot
+    now = CAL._utc(now)
+    lj = get_runtime(db, "last_job") or {}
+    at = lj.get("logical_at") or lj.get("at")          # job 기준 시각 (운영에서는 실제 시각과 같음)
+    if not at:
+        return
+    cur = expected_slot(now, settings.job_minutes)
+    if cur is None:
+        return
+    target = cur if (now - cur).total_seconds() > settings.job_minutes * 60 + 120 else \
+        expected_slot(cur - timedelta(seconds=1), settings.job_minutes)
+    if target is None or at >= target.timestamp() - 120 or get_runtime(db, "heartbeat_gap_last") == target.isoformat():
+        return
+    with tx(db):
+        set_runtime(db, "heartbeat_gap_last", target.isoformat())
+        event(db, "WARN", "heartbeat_gap", f"예정 실행 {target.isoformat()} 이후 job 이 돌지 않음 (마지막 job "
+              f"{datetime.fromtimestamp(at, timezone.utc).isoformat()})", missed_slot=target.isoformat(), last_job_at=at)
 
 
 def version_start(db, base_start: str, settings) -> str:

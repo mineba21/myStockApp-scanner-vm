@@ -471,10 +471,19 @@ def reconcile(settings: AutoBuySettings, *, session_factory=None) -> dict:
             st["abandoned"] += int(c["scan_status"] == "ABANDONED")
             st["unrecoverable"] += int(c["recoverability"] == "UNRECOVERABLE")
             st["late_after_decision"] += int(bool(c["late_after_decision"]))
+        new_ids = st["uncaptured_ids"]
         st["uncaptured_ids"] = st["uncaptured_ids"][:20]
         st["at"] = time.time()
         with tx(db):
             set_runtime(db, "scan_reconciliation", st)
+            # S5 관찰 기간 이력: 처음 미수집으로 확인된 스캔마다 WARN 1회 (나중에 수집돼도 이력은 남는다)
+            seen = set(get_runtime(db, "uncaptured_seen") or [])
+            for lid in new_ids:
+                if lid not in seen:
+                    event(db, "WARN", "uncaptured_scan", f"운영 스캔 #{lid} 완료됐으나 SHADOW 미수집", scan_log_id=lid)
+                    seen.add(lid)
+            if seen:
+                set_runtime(db, "uncaptured_seen", sorted(seen))
         return st
     finally:
         session.close()

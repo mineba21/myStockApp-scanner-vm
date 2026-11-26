@@ -63,7 +63,7 @@ from trading.auto_buy.shadow import calendar as CAL
 from trading.auto_buy.shadow import engine as EN
 from trading.auto_buy.shadow.store import event, get_runtime, set_runtime, tx
 from trading.auto_buy.shadow.vfills import (CONFIRMED_ZERO_SOURCES, VOLUME_POSITIVE, VOLUME_UNKNOWN, VOLUME_ZERO, Bar,
-                                            volume_state, zero_confirmable)
+                                            BarUnavailable, volume_state, zero_confirmable)
 
 logger = logging.getLogger(__name__)
 DEFAULT_PROVIDER = "yahoo_chart_raw_v8_auto_adjust"
@@ -132,8 +132,8 @@ def store_account(db, day: str, status: str, snap: Optional[dict], reason: Optio
             return
         keep = None
         if status == "OK" and snap:
-            keep = json.dumps({k: snap.get(k) for k in ("equity", "cash", "holdings", "holdings_total",
-                                                        "ledger_evaluation", "as_of", "source")},
+            keep = json.dumps({k: snap.get(k) for k in ("equity", "cash", "orderable_cash", "total_cash", "holdings",
+                                                        "holdings_total", "ledger_evaluation", "as_of", "source")},
                               ensure_ascii=False, default=str)
         db.execute("UPDATE ab_day_inputs SET account_status=?, account_reason=?, account_snapshot=?, "
                    "account_fetched_at=? WHERE day=?", (status, reason, keep, time.time(), day))
@@ -193,6 +193,17 @@ def _store_bar(db, day: str, ticker: str, bar, provider: str, purpose: str, fina
     거래량 0·미확인은 데이터 마감 전에는 잠정으로 보고 저장하지 않는다 (다음 job 에 다시 받음)."""
     rev = db.execute("SELECT COALESCE(MAX(input_rev),0) FROM ab_bars WHERE day=? AND ticker=?",
                      (day, ticker)).fetchone()[0] + 1
+    if isinstance(bar, BarUnavailable):          # 수집 실패 (HTTP 오류·예산·연속 장애 등): 결측과 같다, 근거만 남긴다
+        if not final_missing:
+            return None
+        db.execute("INSERT INTO ab_bars(day, ticker, input_rev, status, open, high, low, close, provider, fetched_at, "
+                   "purpose, detail, volume, volume_status, volume_source, source_evidence) "
+                   "VALUES (?,?,?,'MISSING',NULL,NULL,NULL,NULL,?,?,?,?,NULL,?,?,?)",
+                   (day, ticker, rev, provider, time.time(), purpose,
+                    f"데이터 마감 후 수집 실패 {bar.code} — 결측(복구 대상), 정상 미체결로 보지 않음", VOLUME_UNKNOWN,
+                    (bar.evidence or {}).get("source"),
+                    json.dumps(bar.evidence or {"error": bar.code}, ensure_ascii=False, default=str)))
+        return "MISSING"
     is_bar = isinstance(bar, Bar)
     vol = bar.volume if is_bar else None
     src = bar.volume_source if is_bar else None
@@ -390,10 +401,21 @@ def recovery_targets(db, days: list) -> list:
 
 
 def _mark_replay_needed(db, found: list) -> None:
+    """재계산 요청 기록 (호출 측 트랜잭션 안). 요청마다 세대(generation)를 1씩 올린다. 재계산은 시작할 때 본 세대까지만
+    처리한 것으로 기록하므로, 재계산 도중 들어온 새 요청(더 높은 세대)은 지워지지 않는다."""
     prev = get_runtime(db, "replay_needed") or {}
-    bars = sorted(set(map(tuple, prev.get("bars") or [])) | set(found))
+    bars = sorted(set(map(tuple, prev.get("bars") or [])) | set(map(tuple, found)))
+    gen = int(get_runtime(db, "replay_generation") or 0) + 1
+    set_runtime(db, "replay_generation", gen)
     set_runtime(db, "replay_needed", {"reason": "BARS_RECOVERED", "since": prev.get("since") or time.time(),
-                                      "bars": bars[-200:]})
+                                      "bars": [list(b) for b in bars[-200:]], "generation": gen,
+                                      "request_id": prev.get("request_id") or uuid.uuid4().hex})
+
+
+def replay_request(db) -> Optional[dict]:
+    """대기 중인 재계산 요청 (없으면 None). generation 이 없는 이전 형식은 0 세대로 본다."""
+    need = get_runtime(db, "replay_needed")
+    return need if need else None
 
 
 def replay_needed(db) -> bool:
@@ -612,11 +634,14 @@ def reap_abandoned_builds(db, now: Optional[float] = None) -> list:
         lease_run = lease.get("run_id") if isinstance(lease, dict) else None
         for (run,) in db.execute("SELECT run_id FROM ab_runs WHERE status='BUILDING' ORDER BY run_id").fetchall():
             if run == lease_run and c["state"] in LEASE_BLOCKING:
-                if c["state"] in LEASE_STALLED and get_runtime(db, "replay_stall_warned") != run:
+                active = get_runtime(db, "replay_stall_active")
+                if c["state"] in LEASE_STALLED and active != run:       # 정체 에피소드 시작 (같은 장애는 한 번만 기록)
                     event(db, "WARN", "replay_stalled", f"재계산 run #{run} 작업자 응답 없음 ({c['state']}, heartbeat "
                           f"{c['age_sec']}초 전) — 자동 탈취하지 않음. 새 재계산 차단, 수동 확인 필요",
                           run=run, lease=lease, lease_state=c["state"])
-                    set_runtime(db, "replay_stall_warned", run)
+                    set_runtime(db, "replay_stall_active", run)
+                elif c["state"] in LEASE_RUNNING and active == run:
+                    _close_stall(db, run, "heartbeat 재개")
                 continue
             mine = lease if run == lease_run else None
             reason = c["reason"] if mine else "NO_LEASE"
@@ -628,26 +653,73 @@ def reap_abandoned_builds(db, now: Optional[float] = None) -> list:
                        "AND status='BUILDING'", (now, EN._j(summary), run))
             event(db, "ERROR", "replay_abandoned", f"재계산 run #{run} 비정상 종료 확인({reason}) — FAILED(ABANDONED_BUILD)로 "
                   f"기록, 현재 run 유지", run=run, lease=mine, death_evidence=reason)
+            _close_stall(db, run, "작업자 사망 확인")
             reaped.append(run)
         if lease and c["state"] == "DEAD":
             set_runtime(db, "replay_in_progress", None)
     return reaped
 
 
-def release_stalled_lease(db, run: int, operator_note: str) -> bool:
-    """수동 조치 전용 (별도 승인 후 운영자가 원래 작업자 종료를 확인한 다음 호출). 자동 경로에서는 부르지 않는다.
-    해당 BUILDING run 을 FAILED(ABANDONED_MANUAL)로 바꾸고 실행권을 지운다. 원래 작업자가 다시 실행돼도 fencing
-    트리거와 실행권 확인 때문에 쓰거나 CURRENT 로 바꿀 수 없다."""
+def _close_stall(db, run: int, how: str) -> None:
+    """정체 에피소드 종료 기록 (호출 측 트랜잭션). 관찰 기간 위반 수는 줄지 않는다 (replay_stalled 이벤트는 그대로)."""
+    if get_runtime(db, "replay_stall_active") == run:
+        set_runtime(db, "replay_stall_active", None)
+        event(db, "INFO", "replay_stall_recovered", f"재계산 run #{run} 응답 없음 상태 종료 ({how})", run=run, how=how)
+
+
+class ManualReleaseRefused(RuntimeError):
+    """수동 실행권 해제 거부 (아무것도 바꾸지 않음, 기존 실행권 유지)."""
+
+
+RELEASE_EVIDENCE_KEYS = ("host", "pid", "proc_start", "confirmed_stopped_at", "method")
+
+
+def release_stalled_lease(db, *, run: int, token: str, operator: str, reason: str, evidence: dict,
+                          now: Optional[float] = None) -> dict:
+    """수동 조치 전용 (운영자가 원래 작업자 종료를 직접 확인한 뒤, 별도 승인 하에). 자동 경로에서는 부르지 않는다.
+
+    해제할 수 있는 경우는 **다른 호스트의 응답 없는 작업자(REMOTE_STALE)** 뿐이다 (이 프로세스가 사망을 확인할 수 없는 경우).
+    - 같은 호스트에서 원래 프로세스가 살아 있으면(STALLED·STALLED_UNVERIFIED) 거부한다. 먼저 그 프로세스를 종료하면
+      다음 job 이 사망을 확인해 자동 정리한다 (``reap_abandoned_builds``).
+    - 정상 heartbeat 작업자(OWN·ALIVE·ALIVE_UNVERIFIED·REMOTE_ACTIVE)는 거부한다.
+    - 사망이 이미 확인된 작업자(DEAD)는 자동 정리 대상이므로 거부한다.
+    검증: 예상 run ID·실행권 토큰 일치, 운영자·사유 필수, 종료 확인 근거 필수(``RELEASE_EVIDENCE_KEYS``, 그중 host·pid·
+    proc_start 는 실행권 기록과 일치해야 함 — 해당 작업자를 실제로 확인했다는 표시). BUILDING → FAILED 갱신 행 수가
+    정확히 1 이어야 하며, 갱신·실행권 해제·감사 이벤트를 한 트랜잭션에서 한다. 어느 하나라도 어긋나면 ManualReleaseRefused
+    (롤백, 기존 실행권 유지). 해제 뒤 원래 작업자가 다시 실행돼도 fencing 트리거·실행권 확인 때문에 쓰거나 CURRENT 로
+    바꿀 수 없다."""
+    if not (isinstance(operator, str) and operator.strip()):
+        raise ManualReleaseRefused("운영자 식별 필수")
+    if not (isinstance(reason, str) and reason.strip()):
+        raise ManualReleaseRefused("해제 사유 필수")
+    if not isinstance(evidence, dict) or any(evidence.get(k) in (None, "") for k in RELEASE_EVIDENCE_KEYS):
+        raise ManualReleaseRefused(f"작업자 종료 확인 근거 필수: {', '.join(RELEASE_EVIDENCE_KEYS)}")
     with tx(db):
         lease = get_runtime(db, "replay_in_progress")
         if not isinstance(lease, dict) or lease.get("run_id") != run:
-            return False
-        db.execute("UPDATE ab_runs SET status='FAILED', completed_at=?, summary=? WHERE run_id=? AND status='BUILDING'",
-                   (_now(), EN._j({"reason": "ABANDONED_MANUAL", "lease": lease, "note": operator_note}), run))
+            raise ManualReleaseRefused(f"실행권이 run #{run} 의 것이 아님")
+        if not token or lease.get("token") != token:
+            raise ManualReleaseRefused("실행권 토큰 불일치")
+        for k in ("host", "pid", "proc_start"):
+            if str(evidence.get(k)) != str(lease.get(k)):
+                raise ManualReleaseRefused(f"종료 확인 근거의 {k} 가 실행권 기록과 다름")
+        c = classify_lease(lease, now)
+        if c["state"] != "REMOTE_STALE":
+            why = {"STALLED": "같은 호스트에서 원래 프로세스가 살아 있음 — 먼저 종료하면 다음 job 이 자동 정리",
+                   "STALLED_UNVERIFIED": "같은 호스트에서 원래 프로세스가 살아 있음 — 먼저 종료하면 다음 job 이 자동 정리",
+                   "DEAD": "사망 확인됨 — 다음 job 이 자동 정리"}.get(c["state"], "정상 heartbeat 작업자")
+            raise ManualReleaseRefused(f"해제 불가 ({c['state']}): {why}")
+        summary = {"reason": "ABANDONED_MANUAL", "lease": lease, "operator": operator, "note": reason,
+                   "evidence": evidence, "lease_state": c["state"], "heartbeat_age_sec": c["age_sec"]}
+        cur = db.execute("UPDATE ab_runs SET status='FAILED', completed_at=?, summary=? WHERE run_id=? "
+                         "AND status='BUILDING'", (_now(), EN._j(summary), run))
+        if cur.rowcount != 1:
+            raise ManualReleaseRefused(f"run #{run} 이 BUILDING 이 아님 (갱신 {cur.rowcount}행) — 해제하지 않음")
         set_runtime(db, "replay_in_progress", None)
-        event(db, "ERROR", "replay_released_manually", f"재계산 run #{run} 실행권 수동 해제: {operator_note}",
-              run=run, lease=lease)
-    return True
+        _close_stall(db, run, "수동 해제")
+        event(db, "ERROR", "replay_released_manually", f"재계산 run #{run} 실행권 수동 해제 ({operator}): {reason}",
+              run=run, lease=lease, operator=operator, evidence=evidence, lease_state=c["state"])
+    return {"released": True, "run": run, "lease_state": c["state"]}
 
 
 def _owns(db, run: int) -> bool:
@@ -679,12 +751,20 @@ def _heartbeat(db, run: int) -> None:
         logger.warning("자동매수 SHADOW 재계산 run #%s heartbeat 갱신 실패 %s회: %s", run, n, type(exc).__name__)
 
 
-def replay(db, provider: Callable, reason: str, settings=None) -> dict:
+def replay(db, provider: Callable, reason: str, settings=None, *, expected_parent: Optional[int] = None,
+           expected_generation: Optional[int] = None) -> dict:
     """현재 run 이 처리한 거래일 전체를 저장된 입력으로 새 run 에서 다시 계산하고 원자적으로 교체한다.
 
     실행권을 막는 다른 재계산(살아 있음·응답 없음·다른 호스트)이 있으면 ReplayBusy. 도중에 실행권을 잃으면
     ReplayLeaseLost (CURRENT 전환 없음). heartbeat 는 거래일마다, 계좌마다, 일봉 조회 전후에 갱신한다.
-    run fencing 트리거(ab0003)가 FAILED run 에 대한 쓰기를 DB 에서 거부하므로, 실행권을 잃은 뒤 다시 실행돼도 쓸 수 없다."""
+    run fencing 트리거(ab0003)가 FAILED run 에 대한 쓰기를 DB 에서 거부하므로, 실행권을 잃은 뒤 다시 실행돼도 쓸 수 없다.
+
+    멱등성 (같은 요청은 한 번만 성공): 실행권 획득과 아래 확인을 한 트랜잭션(BEGIN IMMEDIATE)에서 한다.
+    - 대기 중인 요청(``replay_needed``)이 없으면 새 run 을 만들지 않는다 (``skipped=NOT_NEEDED``).
+    - ``expected_generation`` 이 이미 처리된 세대 이하면 만들지 않는다 (``ALREADY_APPLIED``).
+    - ``expected_parent`` 가 현재 CURRENT 와 다르면 만들지 않는다 (``PARENT_CHANGED``, 요청은 남김).
+    - 완료 시 시작할 때 본 세대까지만 처리로 기록한다. 도중에 들어온 새 요청(더 높은 세대)은 남겨 다음 job 이 다시 계산한다.
+    - 실패·중단이면 요청을 지우지 않으므로 다음 시도가 다시 계산한다 (기존 CURRENT 유지)."""
     with tx(db):
         lease = get_runtime(db, "replay_in_progress")
         c = classify_lease(lease)
@@ -693,11 +773,23 @@ def replay(db, provider: Callable, reason: str, settings=None) -> dict:
             raise ReplayBusy(f"재계산 run #{lease['run_id']} {c['state']} (pid {lease.get('pid')}, "
                              f"host {lease.get('host')})")
         parent = EN.current_run(db)
+        need = replay_request(db)
+        done = int(get_runtime(db, "replay_done_generation") or 0)
+        skip = None
+        if need is None:
+            skip = "NOT_NEEDED"
+        elif expected_generation is not None and expected_generation <= done:
+            skip = "ALREADY_APPLIED"
+        elif expected_parent is not None and parent != expected_parent:
+            skip = "PARENT_CHANGED"
+        if skip:
+            return {"run": None, "parent": parent, "skipped": skip, "done_generation": done}
+        gen = int(need.get("generation") or 0)
         days = [r[0] for r in db.execute("SELECT day FROM ab_days WHERE run_id=? ORDER BY day", (parent,))]
         run = EN.create_run(db, reason, parent, "BUILDING", settings)
         now = _now()
         set_runtime(db, "replay_in_progress", {"run_id": run, "reason": reason, "at": now, "heartbeat_at": now,
-                                               **_owner()})
+                                               "generation": gen, "parent": parent, **_owner()})
     beat = lambda: _heartbeat(db, run)  # noqa: E731
     try:
         for d in days:
@@ -725,10 +817,19 @@ def replay(db, provider: Callable, reason: str, settings=None) -> dict:
                        (_now(), days[-1] if days else None, EN._j(diff), run))
             set_runtime(db, "current_run", run)
             set_runtime(db, "replay_in_progress", None)
-            set_runtime(db, "replay_needed", None)          # 교체가 끝났을 때만 재계산 필요 상태를 지운다
+            # 교체가 끝났을 때만, 시작할 때 본 세대까지만 처리로 기록한다 (도중의 새 요청은 남긴다)
+            set_runtime(db, "replay_done_generation", max(gen, int(get_runtime(db, "replay_done_generation") or 0)))
+            cur = replay_request(db)
+            newer = cur is not None and int(cur.get("generation") or 0) > gen
+            if not newer:
+                set_runtime(db, "replay_needed", None)
+            _close_stall(db, run, "재계산 완료")
             event(db, "WARN", "run_replaced", f"재계산 run #{run} 이 #{parent} 를 대체 ({reason}). "
-                  f"결과가 달라진 계좌 {diff['changed_accounts']}개", parent=parent, run=run, **diff)
-        return {"run": run, "parent": parent, **diff}
+                  f"결과가 달라진 계좌 {diff['changed_accounts']}개", parent=parent, run=run, generation=gen, **diff)
+            if newer:
+                event(db, "INFO", "replay_request_pending", f"재계산 중 새 요청(세대 {cur.get('generation')}) 도착 — "
+                      f"다음 job 이 다시 계산", run=run, generation=gen, pending_generation=cur.get("generation"))
+        return {"run": run, "parent": parent, "generation": gen, "pending_newer_request": newer, **diff}
     except ReplayLeaseLost as exc:
         with tx(db):
             event(db, "ERROR", "replay_lease_lost", f"재계산 run #{run} 중단: {exc}", run=run)

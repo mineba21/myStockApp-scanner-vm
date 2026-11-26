@@ -20,7 +20,7 @@ from trading.auto_buy.shadow import inputs as IN
 from trading.auto_buy.shadow import report as RP
 from trading.auto_buy.shadow import snapshot as SN
 from trading.auto_buy.shadow.snapshot import capture_scan_log, catch_up
-from trading.auto_buy.shadow.store import connect_rw
+from trading.auto_buy.shadow.store import connect_rw, tx
 from trading.auto_buy.shadow.vfills import Bar
 
 D4, D5 = "2026-11-27", "2026-11-30"           # D4 조기폐장 (13:00 ET)
@@ -317,6 +317,8 @@ def test_rerun_and_replay_reuse_frozen_inputs(shadow, prod):
     try:
         def boom(*_a):
             raise AssertionError("재계산이 저장된 입력 대신 공급자를 다시 불렀습니다")
+        with tx(db):
+            IN._mark_replay_needed(db, [(D1, "AAA")])            # 재계산 요청 (운영 경로와 같은 함수)
         res = IN.replay(db, boom, "TEST_RERUN")
     finally:
         db.close()
@@ -382,9 +384,8 @@ def _hb(shadow, last_job_at, processed, now):
         db.execute("BEGIN IMMEDIATE")
         db.execute("INSERT OR IGNORE INTO ab_runs(run_id, status, reason, strategy_version, config_hash, logic_hash, "
                    "created_at) VALUES (1,'CURRENT','INITIAL','SV1','x','y',0)")
-        db.execute("DELETE FROM ab_days")
-        for d in processed:
-            db.execute("INSERT INTO ab_days(run_id, day, status, decision_status, candidates, bars_requested, "
+        for d in processed:                    # 원장은 추가만 한다 (ab0004: 삭제 불가) — 처리일 목록은 누적만 쓴다
+            db.execute("INSERT OR IGNORE INTO ab_days(run_id, day, status, decision_status, candidates, bars_requested, "
                        "bars_missing, processed_at) VALUES (1,?,'COMPLETE','FROZEN',0,0,0,0)", (d,))
         db.execute("INSERT OR REPLACE INTO ab_runtime(key, value, updated_at) VALUES ('last_job', ?, 0)",
                    (json.dumps({"at": last_job_at}),))

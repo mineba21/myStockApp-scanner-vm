@@ -209,39 +209,194 @@ def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] =
         return fail(f"PARSE_ERROR:{type(exc).__name__}")
 
 
-def _http_get(url: str, params: dict, timeout: int = 15):
+# ── 원본 조회 호출량 안전장치 (한 job 단위) ─────────────────────────────
+# Scanner 의 yfinance 수집과 같은 Yahoo 를 쓰므로 SHADOW 가 호출량을 키우지 않도록 묶는다.
+REQUEST_TIMEOUT_SEC = 10            # 요청 1건 timeout
+MAX_ATTEMPTS = 2                    # 같은 (종목, 거래일) 최대 시도 (재시도 1회, 재시도 가능한 오류만)
+JOB_REQUEST_BUDGET = 300            # 한 job 의 원본 요청 상한 (재시도 포함). 넘으면 나머지는 수집하지 않음(BUDGET_EXHAUSTED)
+BACKOFF_BASE_SEC = 2.0              # 429/503 등 재시도 전 대기 (Retry-After 가 있으면 그 값)
+RETRY_AFTER_MAX_SEC = 30.0          # Retry-After 가 이보다 길면 기다리지 않고 이번 job 수집 중단(RATE_LIMITED)
+JOB_BACKOFF_TOTAL_MAX_SEC = 60.0    # 한 job 의 대기 합계 상한
+CIRCUIT_CONSECUTIVE_FAILURES = 5    # 연속 전송 실패(재시도 후) 이 수에 이르면 이번 job 수집 중단(CIRCUIT_OPEN)
+RETRYABLE_HTTP = frozenset({429, 500, 502, 503, 504})
+
+
+def _sleep(sec: float) -> None:
+    """재시도 대기 (테스트는 이 함수를 바꿔 실제로 기다리지 않는다)."""
+    import time as _t
+    _t.sleep(sec)
+
+
+def _http_get(url: str, params: dict, timeout: int = REQUEST_TIMEOUT_SEC):
     """yfinance 의 세션(쿠키·crumb)으로 원본 응답을 받는다 (DataFrame 변환을 거치지 않음). 테스트는 이 함수를 바꾼다."""
     from yfinance.data import YfData
     return YfData().get(url=url, params=params, timeout=timeout)
 
 
-def fetch_chart(ticker: str, day: str, http_get: Optional[Callable] = None) -> tuple:
-    """원본 응답 1건 → (payload | None, sha256 | None, 오류 코드 | None)."""
-    get = http_get or _http_get
+def _retry_after(resp) -> Optional[float]:
     try:
-        resp = get(CHART_URL.format(ticker=ticker), chart_params(day))
-        body = resp.content if hasattr(resp, "content") else resp.text.encode()
-        status = getattr(resp, "status_code", 200)
-        sha = hashlib.sha256(body).hexdigest()
-        if status != 200 and not body:
-            return None, sha, f"HTTP_{status}"
-        return json.loads(body.decode("utf-8")), sha, (None if status == 200 else f"HTTP_{status}")
+        v = (getattr(resp, "headers", None) or {}).get("Retry-After")
+    except Exception:
+        return None
+    if v is None:
+        return None
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        return max(0.0, (parsedate_to_datetime(str(v)) - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
+
+
+def fetch_chart(ticker: str, day: str, http_get: Optional[Callable] = None,
+                timeout: float = REQUEST_TIMEOUT_SEC) -> dict:
+    """원본 응답 1건 → {"payload", "sha256", "status", "error", "retryable", "retry_after"}.
+
+    - HTTP 상태가 정수 200 일 때만 본문을 JSON 으로 읽는다. 상태를 확인할 수 없는 응답(``status_code`` 없음)은
+      성공으로 가정하지 않는다 (``HTTP_STATUS_UNKNOWN``).
+    - HTTP 오류(4xx·5xx 등)는 본문이 정상 형식 JSON 이어도 읽지 않는다 → 그 본문의 ``volume: 0`` 은 확정 0 이 될 수 없다.
+    - 실패에도 응답 해시(본문이 있으면)·상태·오류 종류를 남긴다."""
+    get = http_get or _http_get
+    out = {"payload": None, "sha256": None, "status": None, "error": None, "retryable": False, "retry_after": None}
+    try:
+        resp = get(CHART_URL.format(ticker=ticker), chart_params(day), timeout=timeout)
     except Exception as exc:
-        return None, None, f"FETCH_ERROR:{type(exc).__name__}"
+        name = type(exc).__name__
+        if "timeout" in name.lower() or "timedout" in name.lower():
+            out.update(error="TIMEOUT", retryable=True)
+        elif isinstance(exc, (ConnectionError, OSError)) or "connection" in name.lower():
+            out.update(error="CONNECTION_ERROR", retryable=True)
+        else:
+            out.update(error=f"FETCH_ERROR:{name}")
+        return out
+    try:
+        body = resp.content if getattr(resp, "content", None) is not None else str(resp.text).encode()
+    except Exception:
+        body = b""
+    if not isinstance(body, (bytes, bytearray)):
+        body = str(body).encode()
+    out["sha256"] = hashlib.sha256(body).hexdigest() if body else None
+    status = getattr(resp, "status_code", None)
+    out["status"] = status if isinstance(status, int) and not isinstance(status, bool) else None
+    if out["status"] is None:
+        out["error"] = "HTTP_STATUS_UNKNOWN"
+        return out
+    if status != 200:
+        out.update(error=f"HTTP_{status}", retryable=status in RETRYABLE_HTTP, retry_after=_retry_after(resp))
+        return out
+    if not body:
+        out["error"] = "EMPTY_BODY"
+        return out
+    try:
+        out["payload"] = json.loads(bytes(body).decode("utf-8"))
+    except Exception:
+        out["error"] = "INVALID_JSON"
+        return out
+    if not isinstance(out["payload"], dict):
+        out.update(payload=None, error="INVALID_JSON")
+    return out
+
+
+def _failure(code: str, ticker: str, day: str, res: Optional[dict] = None, attempts: int = 0, **extra):
+    from trading.auto_buy.shadow.vfills import BarUnavailable
+    ev = {"source": SOURCE_YAHOO_CHART_RAW, "ticker": ticker, "day": day, "error": code, "attempts": attempts,
+          "fetch_failed": True}
+    if res:
+        ev.update(http_status=res.get("status"), response_sha256=res.get("sha256"), retry_after=res.get("retry_after"))
+    ev.update(extra)
+    return BarUnavailable(code, ev)
+
+
+class ChartFetcher:
+    """한 job 동안 쓰는 원본 일봉 공급자 ``(tickers, day) -> {ticker: Bar | BarUnavailable}``.
+
+    - 같은 (종목, 거래일)은 job 안에서 한 번만 조회한다 (결과 재사용, 실패 포함).
+    - 요청 예산 ``JOB_REQUEST_BUDGET`` (재시도 포함). 넘으면 ``BUDGET_EXHAUSTED`` — 정상 거래일로 확정하지 않는다.
+    - 요청마다 timeout, 재시도 가능한 오류(429·5xx·timeout·연결 오류)만 ``MAX_ATTEMPTS`` 까지 재시도한다.
+      재시도 전 대기는 Retry-After(있으면) 또는 지수 backoff. Retry-After 가 ``RETRY_AFTER_MAX_SEC`` 를 넘거나 대기 합계가
+      ``JOB_BACKOFF_TOTAL_MAX_SEC`` 를 넘으면 이번 job 수집을 멈춘다 (``RATE_LIMITED``).
+    - 연속 전송 실패가 ``CIRCUIT_CONSECUTIVE_FAILURES`` 에 이르면 이번 job 의 나머지 조회를 하지 않는다 (``CIRCUIT_OPEN``).
+    - 원본 응답 내용 오류(chart.error·결과 없음·종목/거래일 불일치·OHLC 오류)는 재시도하지 않고 결측으로 돌려준다.
+    실패는 모두 ``BarUnavailable`` (근거 포함) 이며 결측과 같이 처리된다 (마감 후 MISSING → 복구 시 재계산)."""
+
+    def __init__(self, http_get: Optional[Callable] = None, *, budget: Optional[int] = None,
+                 sleep: Optional[Callable] = None):
+        self.http_get = http_get
+        self.budget = JOB_REQUEST_BUDGET if budget is None else budget
+        self.sleep = sleep or (lambda sec: _sleep(sec))
+        self.cache: dict = {}
+        self.requests = 0
+        self.consecutive_failures = 0
+        self.backoff_total = 0.0
+        self.halted: Optional[str] = None
+        self.failures: dict = {}
+
+    def stats(self) -> dict:
+        return {"requests": self.requests, "budget": self.budget, "cached": len(self.cache),
+                "backoff_sec": round(self.backoff_total, 1), "halted": self.halted,
+                "failures": dict(sorted(self.failures.items()))}
+
+    def __call__(self, tickers: list, day: str) -> dict:
+        for t in sorted(set(tickers)):
+            if (t, day) not in self.cache:
+                self.cache[(t, day)] = self._one(t, day)
+                b = self.cache[(t, day)]
+                if not isinstance(b, Bar):
+                    self.failures[b.code] = self.failures.get(b.code, 0) + 1
+        return {t: self.cache[(t, day)] for t in tickers}
+
+    def _one(self, t: str, day: str):
+        attempts = 0
+        while True:
+            if self.halted:
+                return _failure(self.halted, t, day, attempts=attempts)
+            if self.requests >= self.budget:
+                self.halted = self.halted or "BUDGET_EXHAUSTED"
+                logger.warning("자동매수 SHADOW 원본 조회 예산 %s건 소진 — 이번 job 나머지 조회 중단", self.budget)
+                return _failure("BUDGET_EXHAUSTED", t, day, attempts=attempts)
+            self.requests += 1
+            attempts += 1
+            res = fetch_chart(t, day, self.http_get)
+            if res["payload"] is not None:
+                self.consecutive_failures = 0
+                bar, ev = parse_chart(res["payload"], t, day, res["sha256"])
+                if bar is None:                     # 200 이지만 내용이 쓸 수 없는 응답 (재시도하지 않음)
+                    code = (ev.get("issues") or ["PARSE_ERROR"])[0]
+                    return _failure(code, t, day, res, attempts, issues=ev.get("issues"),
+                                    chart_error=ev.get("chart_error"), meta_symbol=ev.get("meta_symbol"))
+                bar.evidence["http_status"] = res["status"]
+                bar.evidence["attempts"] = attempts
+                return bar
+            code = res["error"]
+            if res["retryable"] and attempts < MAX_ATTEMPTS:
+                ra = res.get("retry_after")
+                if ra is not None and ra > RETRY_AFTER_MAX_SEC:
+                    self.halted = "RATE_LIMITED"
+                    return _failure(code, t, day, res, attempts, halted="RATE_LIMITED")
+                wait = ra if ra is not None else BACKOFF_BASE_SEC * (2 ** (attempts - 1))
+                if self.backoff_total + wait > JOB_BACKOFF_TOTAL_MAX_SEC:
+                    self.halted = "RATE_LIMITED"
+                    return _failure(code, t, day, res, attempts, halted="RATE_LIMITED")
+                self.backoff_total += wait
+                self.sleep(wait)
+                continue
+            self.consecutive_failures += 1
+            if self.consecutive_failures >= CIRCUIT_CONSECUTIVE_FAILURES:
+                self.halted = "CIRCUIT_OPEN"
+                logger.warning("자동매수 SHADOW 원본 조회 연속 %s건 실패 — 이번 job 나머지 조회 중단", self.consecutive_failures)
+            if code in ("HTTP_429", "HTTP_503") and not self.halted:
+                self.halted = "RATE_LIMITED"            # 재시도 후에도 제한 응답 → 더 보내지 않는다
+            logger.warning("자동매수 SHADOW 일봉 원본 조회 실패 %s %s: %s", t, day, code)
+            return _failure(code, t, day, res, attempts)
 
 
 def yfinance_bars(tickers: list, day: str, http_get: Optional[Callable] = None) -> dict:
-    """{ticker: Bar | None}. 종목마다 원본 응답 1건에서 OHLC·거래량을 함께 읽는다 (복수 종목도 서로 섞지 않음)."""
-    out = {}
-    for t in sorted(set(tickers)):
-        payload, sha, err = fetch_chart(t, day, http_get)
-        if payload is None:
-            logger.warning("자동매수 SHADOW 일봉 원본 조회 실패 %s: %s", t, err)
-            out[t] = None
-            continue
-        bar, _ev = parse_chart(payload, t, day, sha)
-        out[t] = bar
-    return {t: out.get(t) for t in tickers}
+    """{ticker: Bar | BarUnavailable}. 종목마다 원본 응답 1건에서 OHLC·거래량을 함께 읽는다 (복수 종목도 서로 섞지 않음).
+    호출마다 새 ``ChartFetcher`` (단독 호출용). 운영 job 은 job 단위 ``ChartFetcher`` 하나를 공유한다 (runner)."""
+    return ChartFetcher(http_get)(tickers, day)
 
 
 RECONCILE_ABS_USD = 5.0          # 보유 평가합 vs 원장 평가금액 허용 오차 (절대)
@@ -284,10 +439,12 @@ def build_account_snapshot(summary, rows, sector_lookup, account_context) -> dic
     if summary.get("error"):
         return _unavailable(f"원장 평가 미확인: {summary.get('error')}")
     try:
-        equity, cash = account_context(summary, "US")
+        equity, cash = account_context(summary, "US")         # (순자산 = 총현금 + 원장 평가금액, 주문가능현금)
+        total_cash = float((summary.get("overseas") or {}).get("cash"))
     except Exception:
         return _unavailable("순자산·현금 계산 불가")
-    if not (math.isfinite(equity) and math.isfinite(cash)) or equity <= 0 or cash < 0 or cash > equity:
+    if not (math.isfinite(equity) and math.isfinite(cash) and math.isfinite(total_cash)) or equity <= 0 \
+            or cash < 0 or total_cash < 0 or cash > equity:
         return _unavailable("순자산·현금 값 비정상")
     holdings, total = [], 0.0
     for h in rows:
@@ -314,6 +471,9 @@ def build_account_snapshot(summary, rows, sector_lookup, account_context) -> dic
     ts = {str(h.get("price_updated_at")) for h in rows if h.get("price_updated_at")}
     if ts and summary.get("updated_at") and ts != {str(summary.get("updated_at"))}:
         return _unavailable("보유·요약 조회 시점 불일치")
-    return {"status": "OK", "reason": None, "equity": equity, "cash": cash, "holdings": holdings,
-            "holdings_total": total, "ledger_evaluation": ledger,
+    # 필드 구분: total_cash(총현금) · orderable_cash(주문가능현금, 미체결·결제 대기 반영) · holdings_total(보유주식 평가)
+    # · equity(순자산). 신규 가상 매수의 현금 판단(cash)은 보수적으로 주문가능현금을 쓴다. 가상 포지션·주문 예약금은
+    # 여기 넣지 않고 risk.account_state 가 가상 원장에서 따로 더한다 (실계좌 값과 섞지 않음).
+    return {"status": "OK", "reason": None, "equity": equity, "cash": cash, "orderable_cash": cash,
+            "total_cash": total_cash, "holdings": holdings, "holdings_total": total, "ledger_evaluation": ledger,
             "as_of": summary.get("updated_at") or datetime.now(timezone.utc).isoformat(), "source": "kiwoom_readonly"}

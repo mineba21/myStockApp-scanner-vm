@@ -99,6 +99,20 @@ class Bar:
         return self.low <= min(self.open, self.close) + tol and self.high >= max(self.open, self.close) - tol
 
 
+@dataclass(frozen=True)
+class BarUnavailable:
+    """수집 실패 (HTTP 오류·상태 불명·응답 형식 오류·chart.error·종목/거래일 불일치·요청 예산 초과·연속 장애 중단 등).
+
+    일봉이 아니다. 가상 체결·평가·거래량 판정에 쓰지 않는다. 결측과 같이 처리하고(마감 전 대기, 마감 후 MISSING →
+    FILL_UNKNOWN·DATA_INCOMPLETE → 복구 시 재계산) ``evidence`` 에 오류 종류·HTTP 상태·응답 해시를 남긴다.
+    HTTP 오류 응답 본문의 ``volume: 0`` 은 읽지 않으므로 확정 0 이 될 수 없다."""
+    code: str
+    evidence: dict = field(default_factory=dict, compare=False, repr=False)
+
+    def valid(self) -> bool:
+        return False
+
+
 def try_buy(bar: Bar, limit: float, stop: float, min_r_pct: float = MIN_R_PCT) -> tuple[str, Optional[float], Optional[str]]:
     o, lo = bar.open, bar.low
     if o <= stop or (o - stop) / o < min_r_pct / 100.0:

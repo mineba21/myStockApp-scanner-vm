@@ -105,6 +105,7 @@ def _no_yahoo_chart_http(monkeypatch):
     def _blocked(url, params, timeout=15):
         raise RuntimeError("테스트에서 Yahoo chart 실제 호출 금지 — 원본 응답을 주입하세요")
     monkeypatch.setattr("trading.auto_buy.shadow.market_data._http_get", _blocked)
+    monkeypatch.setattr("trading.auto_buy.shadow.market_data._sleep", lambda sec: None)   # 재시도 대기 생략
     yield
 
 
