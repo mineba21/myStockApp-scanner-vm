@@ -150,5 +150,5 @@ VM의 Claude Code에 "Claude Code 프롬프트" 절 전체를 붙여 넣거나, 
    - 두 종목 모두 회복 조회가 일어나는지(로그 `[자동손절] 시세 오류` JSON 또는 health `recent_quote_errors`, `quote_health[].last_ok_at`).
    - 정상이면 `RECOVERING` → `OK`, `quote_global_hold=null`, `api_errors.quote=0`, `global_hold.reasons=[]`.
    - 실패가 이어지면 `first_error`/`recent_quote_errors` 의 `category`, `http_status`, `return_code`, `message`(민감정보 제거됨)를 보고한다. 이것이 첫날 미확인 원인의 근거가 된다.
-4. 장 마감 후 일일 보고: `watch.normal_rate_pct`, `watch.missed`와 분해(`held_slots`/`failed_slots`/`schedule_missed`), `recovery`, `holds.global_seconds`, `api.errors`(회복 조회 실패 포함), `api.http_requests`·`api.http_429`, 종목별 `faults`.
+4. 장 마감 후 일일 보고 (판정은 `docs/auto_stop_sell.md` "SHADOW 운영 통과 기준": 정상 거래일 감시율 99% 이상, 설명되지 않는 누락 0건, 정상 상태 최대 감시 공백 120초 이내, 실제 주문·취소 0건): `watch.normal_rate_pct`, `watch.missed`와 분해(`held_slots`/`failed_slots`/`schedule_missed`), `recovery`, `holds.global_seconds`, `api.errors`(회복 조회 실패 포함), `api.http_requests`·`api.http_429`, 종목별 `faults`.
 5. 문제가 있으면 위 9단계(장애 시 복구)를 따른다. 코드 되돌리기는 직전 배포 커밋으로만 하고 저널은 그대로 둔다 (새 runtime 키는 이전 코드가 무시한다. 다만 이전 코드는 공통 카운터 하나로 다시 판단한다).
