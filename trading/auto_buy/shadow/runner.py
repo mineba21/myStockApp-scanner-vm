@@ -196,6 +196,7 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
             out["days"].append(day)
         if fetcher is not None:
             out["fetch"] = fetcher.stats()
+            _record_rate_limit(db, out["fetch"])
         _rt(db, "last_job", {"at": time.time(), "logical_at": now.timestamp(), "days": out["days"], "waiting": out["waiting"],
                              "captures": len(out["captures"]), "run": run, "fetch": out.get("fetch")})
         return out
@@ -212,6 +213,26 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
         return out
     finally:
         db.close()
+
+
+RATE_LIMIT_REPEAT_WARN = 3            # 연속 몇 job 이 호출 제한으로 멈추면 경고 이벤트를 한 번 남기나
+
+
+def _record_rate_limit(db, fetch: dict) -> None:
+    """후속 job 보류 정책: 호출 제한(RATE_LIMITED)으로 멈춘 job 은 다음 job 에서 다시 시도하되, 첫 제한 응답에서 바로
+    멈추므로 제한이 계속되는 동안 job 당 Yahoo 시도는 1회 남짓이다. 연속 횟수를 runtime ``yahoo_rate_limit`` 에 남기고,
+    ``RATE_LIMIT_REPEAT_WARN`` 회 연속이면 WARN ``yahoo_rate_limited_repeated`` 를 한 번 남긴다 (미수집 일봉은 결측·복구 대상)."""
+    st = get_runtime(db, "yahoo_rate_limit") or {}
+    limited = fetch.get("halted") == "RATE_LIMITED"
+    n = int(st.get("consecutive_jobs") or 0) + 1 if limited else 0
+    new = {"consecutive_jobs": n, "last_limited_at": time.time() if limited else st.get("last_limited_at"),
+           "warned": bool(st.get("warned")) and n > 0}
+    with tx(db):
+        if n >= RATE_LIMIT_REPEAT_WARN and not new["warned"]:
+            event(db, "WARN", "yahoo_rate_limited_repeated", f"Yahoo 호출 제한이 연속 {n}개 job 에서 반복 — 다음 job 도 "
+                  f"첫 제한 응답에서 멈춘다. 미수집 일봉은 결측·복구 대상", consecutive_jobs=n)
+            new["warned"] = True
+        set_runtime(db, "yahoo_rate_limit", new)
 
 
 def _record_heartbeat_gap(db, now: datetime, settings) -> None:

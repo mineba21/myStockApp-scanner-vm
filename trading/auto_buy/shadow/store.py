@@ -14,6 +14,19 @@ class SchemaNotReady(RuntimeError):
     pass
 
 
+def apply_write_pragmas(db: sqlite3.Connection) -> None:
+    """모든 SHADOW 저널 쓰기 연결의 필수 설정. 적용되지 않으면 쓰지 않는다.
+    - ``foreign_keys=ON``
+    - ``recursive_triggers=ON``: REPLACE 충돌 해소의 내부 삭제도 DELETE 트리거(삭제 거부)를 거치게 한다. 스키마(ab0005)가
+      키 충돌을 따로 거부하므로 이것은 이중 방어다."""
+    db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA recursive_triggers=ON")
+    got = (db.execute("PRAGMA foreign_keys").fetchone()[0], db.execute("PRAGMA recursive_triggers").fetchone()[0])
+    if got != (1, 1):
+        db.close()
+        raise RuntimeError(f"SHADOW 저널 연결 설정 실패 (foreign_keys, recursive_triggers) = {got}")
+
+
 def connect_rw(path: str) -> sqlite3.Connection:
     st = schema_status(path)
     if not st["schema_ready"]:
@@ -21,7 +34,7 @@ def connect_rw(path: str) -> sqlite3.Connection:
     uri = Path(path).resolve().as_uri() + "?mode=rw"
     db = sqlite3.connect(uri, uri=True, timeout=30, isolation_level=None)
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys=ON")
+    apply_write_pragmas(db)
     return db
 
 

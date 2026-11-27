@@ -382,10 +382,12 @@ def _hb(shadow, last_job_at, processed, now):
     db = connect_rw(shadow.journal_path)
     try:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("INSERT OR IGNORE INTO ab_runs(run_id, status, reason, strategy_version, config_hash, logic_hash, "
-                   "created_at) VALUES (1,'CURRENT','INITIAL','SV1','x','y',0)")
-        for d in processed:                    # 원장은 추가만 한다 (ab0004: 삭제 불가) — 처리일 목록은 누적만 쓴다
-            db.execute("INSERT OR IGNORE INTO ab_days(run_id, day, status, decision_status, candidates, bars_requested, "
+        if not db.execute("SELECT 1 FROM ab_runs WHERE run_id=1").fetchone():     # ab0005: 기존 키 충돌 거부
+            db.execute("INSERT INTO ab_runs(run_id, status, reason, strategy_version, config_hash, logic_hash, "
+                       "created_at) VALUES (1,'CURRENT','INITIAL','SV1','x','y',0)")
+        have = {r[0] for r in db.execute("SELECT day FROM ab_days WHERE run_id=1")}
+        for d in [d for d in processed if d not in have]:   # 원장은 추가만 한다 (ab0004·ab0005) — 처리일은 누적만
+            db.execute("INSERT INTO ab_days(run_id, day, status, decision_status, candidates, bars_requested, "
                        "bars_missing, processed_at) VALUES (1,?,'COMPLETE','FROZEN',0,0,0,0)", (d,))
         db.execute("INSERT OR REPLACE INTO ab_runtime(key, value, updated_at) VALUES ('last_job', ?, 0)",
                    (json.dumps({"at": last_job_at}),))

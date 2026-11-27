@@ -430,12 +430,12 @@ def test_ab0002_upgrades_v1_journal_keeping_rows_and_runtime_refuses_v1(tmp_path
     db.commit()
     db.close()
     st = schema_status(p)
-    assert not st["schema_ready"] and st["schema_version"] == "ab0001" and "ab0004" in st["schema_error"]
+    assert not st["schema_ready"] and st["schema_version"] == "ab0001" and "ab0005" in st["schema_error"]
     os.chmod(p, 0o600)
     rep = run(p, str(tmp_path / "bk"), check=True)
-    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0004"}
+    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0005"}
     assert schema_status(p)["schema_version"] == "ab0001"                     # --check 는 원본을 바꾸지 않음
-    assert upgrade_journal(p) == "ab0004"
+    assert upgrade_journal(p) == "ab0005"
     db = sqlite3.connect(p)
     assert db.execute("SELECT ticker, status, volume, volume_status FROM ab_bars").fetchall() == [("AAA", "OK", None,
                                                                                                     None)]

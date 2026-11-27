@@ -26,6 +26,10 @@ def _begin(conn):
 
 with engine.connect() as connection:
     connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+    connection.exec_driver_sql("PRAGMA recursive_triggers=ON")          # 제품 쓰기 연결과 같은 설정
+    if (connection.exec_driver_sql("PRAGMA recursive_triggers").scalar(),
+            connection.exec_driver_sql("PRAGMA foreign_keys").scalar()) != (1, 1):
+        raise RuntimeError("SHADOW 저널 Migration 연결 설정(recursive_triggers, foreign_keys) 적용 실패")
     context.configure(connection=connection, target_metadata=None, version_table=VERSION_TABLE,
                       transactional_ddl=True, transaction_per_migration=False)
     with context.begin_transaction():

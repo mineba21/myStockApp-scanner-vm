@@ -98,7 +98,7 @@ def test_http_error_body_volume_zero_is_never_a_confirmed_zero():
     ({"chart": {"result": None, "error": {"code": "Not Found", "description": "delisted"}}}, "CHART_ERROR"),
     ({"chart": {"result": [], "error": None}}, "NO_RESULT"),
     (chart_payload("ZZZ", D2, A2 + (10,)), "SYMBOL_MISMATCH"),
-    (chart_payload("AAA", D3, A2 + (10,)), "DAY_NOT_IN_RESPONSE"),
+    (chart_payload("AAA", D3, A2 + (10,)), "TIMESTAMP_OUT_OF_RANGE"),            # 다른 거래일 응답
     (chart_payload("AAA", D2, (None, 103, 99, 102, 10)), "OHLC_NULL_OR_INVALID"),
 ])
 def test_http_200_content_is_validated_separately(payload, code):

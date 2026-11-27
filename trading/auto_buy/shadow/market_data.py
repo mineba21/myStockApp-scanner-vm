@@ -114,7 +114,17 @@ def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] =
     """Yahoo v8 chart 원본 JSON → (Bar | None, 근거 dict). 순수 함수 (테스트에서 원본 응답을 그대로 주입).
 
     Bar 가 None 이면 OHLC 를 쓸 수 없는 응답이다 (결측과 같이 처리: 마감 전 대기, 마감 후 MISSING).
-    OHLC 는 정상이고 거래량만 미확인이면 Bar(volume=None) 를 돌려준다 (마감 후 INVALID/UNKNOWN)."""
+    OHLC 는 정상이고 거래량만 미확인이면 Bar(volume=None) 를 돌려준다 (마감 후 INVALID/UNKNOWN).
+
+    **일봉 응답 계약** — 하나라도 확인할 수 없으면 정상 응답으로 가정하지 않는다 (Bar 없음 → 결측·복구 대상):
+    - ``chart.error`` 없음, ``result[0]`` 과 ``meta`` 가 객체
+    - ``meta.dataGranularity`` 가 **문자열 "1d"** (분봉·시간봉·주봉·누락·다른 자료형 거부 → 그 응답의 volume:0 도 쓰지 않음)
+    - ``meta.symbol`` 이 있고 요청 종목과 같음
+    - ``meta.exchangeTimezoneName`` 이 있고 거래소 시간대(America/New_York)와 같음 (대체 시간대로 가정하지 않음)
+    - 요청한 날이 정규장 거래일이고, 타임스탬프가 모두 정수·증가 순서·요청 구간 안이며, 그날 봉이 정확히 1개이고
+      그 시각이 그날 정규장 시간(조기폐장 반영) 안
+    - OHLC 배열 길이가 타임스탬프와 같고, 값이 양수이며 고가·저가가 시가·종가를 감쌈
+    거래량 배열 길이·값은 기존 정책 (누락·부분·null·음수 = 미확인, 0 = 이 원본 경로에서만 확정 0)."""
     ev = {"source": SOURCE_YAHOO_CHART_RAW, "ticker": ticker, "day": day, "response_sha256": response_sha256,
           "issues": []}
 
@@ -129,31 +139,57 @@ def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] =
         res = (chart.get("result") or [None])[0]
         if not isinstance(res, dict):
             return fail("NO_RESULT")
-        meta = res.get("meta") or {}
-        sym = str(meta.get("symbol") or "").upper()
-        if sym and sym != ticker.upper():
-            ev["meta_symbol"] = sym
+        meta = res.get("meta")
+        if not isinstance(meta, dict):
+            return fail("META_MISSING")
+        gran = meta.get("dataGranularity")
+        ev["data_granularity"] = gran if gran is None or isinstance(gran, (str, int, float)) else type(gran).__name__
+        if gran is None:
+            return fail("GRANULARITY_MISSING")
+        if not isinstance(gran, str):
+            return fail("GRANULARITY_INVALID_TYPE")
+        if gran != "1d":
+            return fail("GRANULARITY_NOT_DAILY")
+        sym = meta.get("symbol")
+        if not isinstance(sym, str) or not sym.strip():
+            return fail("SYMBOL_MISSING")
+        if sym.strip().upper() != ticker.upper():
+            ev["meta_symbol"] = sym.strip().upper()[:20]
             return fail("SYMBOL_MISMATCH")
+        tzname = meta.get("exchangeTimezoneName")
+        if not isinstance(tzname, str) or not tzname:
+            return fail("TZ_MISSING")
+        ev["exchange_tz"] = tzname[:40]
+        if tzname != EXCHANGE_TZ:
+            return fail("TZ_MISMATCH")
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(EXCHANGE_TZ)
         ts = res.get("timestamp")
         quotes = (res.get("indicators") or {}).get("quote") or []
         q = quotes[0] if quotes and isinstance(quotes[0], dict) else None
         if not isinstance(ts, list) or not ts or q is None:
             return fail("EMPTY_OR_PARTIAL_RESPONSE")
-        from zoneinfo import ZoneInfo
-        tzname = meta.get("exchangeTimezoneName") or EXCHANGE_TZ
-        try:
-            tz = ZoneInfo(tzname)
-        except Exception:
-            tz = ZoneInfo(EXCHANGE_TZ)
-            ev["issues"].append("TZ_FALLBACK")
-        ev["exchange_tz"] = str(tz)
-        idx = [i for i, t in enumerate(ts) if _num(t) and datetime.fromtimestamp(t, tz).date().isoformat() == day]
+        if not all(isinstance(t, int) and not isinstance(t, bool) for t in ts):
+            return fail("TIMESTAMP_INVALID")
+        if any(b <= a for a, b in zip(ts, ts[1:])):
+            return fail("TIMESTAMP_NOT_INCREASING")
+        lo_b, hi_b = _day_bounds(day)
+        if any(t < lo_b or t >= hi_b for t in ts):
+            return fail("TIMESTAMP_OUT_OF_RANGE")
+        from trading.auto_buy.shadow import calendar as CAL
+        sess = CAL.session(date.fromisoformat(day))
+        if sess is None:
+            return fail("DAY_NOT_TRADING_SESSION")
+        idx = [i for i, t in enumerate(ts) if datetime.fromtimestamp(t, tz).date().isoformat() == day]
         if not idx:
             return fail("DAY_NOT_IN_RESPONSE")
         if len(idx) > 1:
             return fail("DUPLICATE_DAY")
         i = idx[0]
         ev["timestamp"] = ts[i]
+        if not (sess.open_at.timestamp() - 60 <= ts[i] <= sess.close_at.timestamp()):
+            ev["bar_time_et"] = datetime.fromtimestamp(ts[i], tz).strftime("%H:%M")
+            return fail("BAR_TIME_OUTSIDE_SESSION")
         raw = {}
         for k in ("open", "high", "low", "close"):
             arr = q.get(k)
@@ -185,6 +221,10 @@ def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] =
         ev["raw"] = raw
         if not all(_num(raw[k]) and raw[k] > 0 for k in ("open", "high", "low", "close")):
             return fail("OHLC_NULL_OR_INVALID")
+        tol = 1e-9 * raw["high"]
+        if raw["high"] + tol < max(raw["open"], raw["close"], raw["low"]) or \
+                raw["low"] - tol > min(raw["open"], raw["close"]):
+            return fail("OHLC_INCONSISTENT")
         ratio = 1.0
         if _num(adj) and adj > 0:
             ratio = adj / raw["close"]
@@ -213,7 +253,9 @@ def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] =
 # Scanner 의 yfinance 수집과 같은 Yahoo 를 쓰므로 SHADOW 가 호출량을 키우지 않도록 묶는다.
 REQUEST_TIMEOUT_SEC = 10            # 요청 1건 timeout
 MAX_ATTEMPTS = 2                    # 같은 (종목, 거래일) 최대 시도 (재시도 1회, 재시도 가능한 오류만)
-JOB_REQUEST_BUDGET = 300            # 한 job 의 원본 요청 상한 (재시도 포함). 넘으면 나머지는 수집하지 않음(BUDGET_EXHAUSTED)
+JOB_REQUEST_BUDGET = 300            # 한 job 의 **애플리케이션 조회 시도** 상한 (재시도 포함). 넘으면 나머지는 수집하지 않음
+                                    # (BUDGET_EXHAUSTED). yfinance 세션이 쿠키·crumb 갱신 등으로 내부에서 보내는 추가 요청은
+                                    # 세지 못하므로 실제 네트워크 요청 수의 상한이 아니다 (운영 지표 ``fetch.requests`` 도 같은 뜻)
 BACKOFF_BASE_SEC = 2.0              # 429/503 등 재시도 전 대기 (Retry-After 가 있으면 그 값)
 RETRY_AFTER_MAX_SEC = 30.0          # Retry-After 가 이보다 길면 기다리지 않고 이번 job 수집 중단(RATE_LIMITED)
 JOB_BACKOFF_TOTAL_MAX_SEC = 60.0    # 한 job 의 대기 합계 상한
@@ -231,6 +273,15 @@ def _http_get(url: str, params: dict, timeout: int = REQUEST_TIMEOUT_SEC):
     """yfinance 의 세션(쿠키·crumb)으로 원본 응답을 받는다 (DataFrame 변환을 거치지 않음). 테스트는 이 함수를 바꾼다."""
     from yfinance.data import YfData
     return YfData().get(url=url, params=params, timeout=timeout)
+
+
+def _is_yf_rate_limit(exc: BaseException) -> bool:
+    """yfinance 가 HTTP 429 등을 감지하면 응답 대신 ``YFRateLimitError`` 를 던진다 (``YfData.get``). 일반 조회 오류와 구분."""
+    try:
+        from yfinance.exceptions import YFRateLimitError
+    except Exception:                                  # pragma: no cover - yfinance 구버전
+        return type(exc).__name__ == "YFRateLimitError"
+    return isinstance(exc, YFRateLimitError)
 
 
 def _retry_after(resp) -> Optional[float]:
@@ -260,12 +311,15 @@ def fetch_chart(ticker: str, day: str, http_get: Optional[Callable] = None,
     - HTTP 오류(4xx·5xx 등)는 본문이 정상 형식 JSON 이어도 읽지 않는다 → 그 본문의 ``volume: 0`` 은 확정 0 이 될 수 없다.
     - 실패에도 응답 해시(본문이 있으면)·상태·오류 종류를 남긴다."""
     get = http_get or _http_get
-    out = {"payload": None, "sha256": None, "status": None, "error": None, "retryable": False, "retry_after": None}
+    out = {"payload": None, "sha256": None, "status": None, "error": None, "retryable": False, "retry_after": None,
+           "rate_limited": False}
     try:
         resp = get(CHART_URL.format(ticker=ticker), chart_params(day), timeout=timeout)
     except Exception as exc:
         name = type(exc).__name__
-        if "timeout" in name.lower() or "timedout" in name.lower():
+        if _is_yf_rate_limit(exc):                     # 호출 제한: 재시도하지 않고 이번 job 의 Yahoo 조회를 멈춘다
+            out.update(error="YF_RATE_LIMITED", rate_limited=True, exception=name)
+        elif "timeout" in name.lower() or "timedout" in name.lower():
             out.update(error="TIMEOUT", retryable=True)
         elif isinstance(exc, (ConnectionError, OSError)) or "connection" in name.lower():
             out.update(error="CONNECTION_ERROR", retryable=True)
@@ -366,11 +420,17 @@ class ChartFetcher:
                 if bar is None:                     # 200 이지만 내용이 쓸 수 없는 응답 (재시도하지 않음)
                     code = (ev.get("issues") or ["PARSE_ERROR"])[0]
                     return _failure(code, t, day, res, attempts, issues=ev.get("issues"),
-                                    chart_error=ev.get("chart_error"), meta_symbol=ev.get("meta_symbol"))
+                                    chart_error=ev.get("chart_error"), meta_symbol=ev.get("meta_symbol"),
+                                    data_granularity=ev.get("data_granularity"), exchange_tz=ev.get("exchange_tz"),
+                                    bar_time_et=ev.get("bar_time_et"))
                 bar.evidence["http_status"] = res["status"]
                 bar.evidence["attempts"] = attempts
                 return bar
             code = res["error"]
+            if res.get("rate_limited"):                 # yfinance YFRateLimitError: 즉시 중단, 다른 종목도 요청하지 않음
+                self.halted = "RATE_LIMITED"
+                logger.warning("자동매수 SHADOW Yahoo 호출 제한(%s) — 이번 job 나머지 조회 중단", res.get("exception"))
+                return _failure(code, t, day, res, attempts, halted="RATE_LIMITED", exception=res.get("exception"))
             if res["retryable"] and attempts < MAX_ATTEMPTS:
                 ra = res.get("retry_after")
                 if ra is not None and ra > RETRY_AFTER_MAX_SEC:

@@ -4,16 +4,120 @@
 같은 날 Draft PR #14 독립 리뷰(FAIL: P1 6건·P2 7건)를 feature branch 에서 반영했다 (아래 '독립 리뷰 반영'). 공개 이력 항목은 이력 재작성 승인이 필요해 보류.
 2026-11-26 Codex 재리뷰(2차, FAIL: 신규 P1 1건·P2 3건)를 같은 브랜치에서 반영했다 (아래 'Codex 재리뷰(2차) 반영').
 같은 날 Codex 최종 재리뷰(신규 P1 1건·P2 2건·S5 이력)를 반영했다 (아래 'Codex 최종 재리뷰 반영').
-2026-11-27 Codex 재리뷰(head 9a315db, FAIL: P1 1건·P2 4건·운영 안전성)를 공통 안전 원칙과 장애 주입 테스트로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27)'). SHADOW 활성화는 계속 보류다.
+2026-11-27 Codex 재리뷰(head 9a315db, FAIL: P1 1건·P2 4건·운영 안전성)를 공통 안전 원칙과 장애 주입 테스트로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27)').
+같은 날 Codex 재리뷰(head c27d9d0, 신규 P1 2건·P2 1건)를 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)'). SHADOW 활성화는 계속 보류다.
 - **승인 범위:** 로컬 구현·테스트 (사용자 승인: P7/P8 검토 후 I1~I7 SHADOW 구현, 이후 P1·P2 정합성 보완), feature branch `feature/auto-buy-shadow` 커밋·Push·Draft PR.
 - **아직 하지 않은 것:** main 병합, VM 배포, 저널 Migration 실행. Codex 재리뷰를 통과하기 전에는 기본 OFF 배포도, SHADOW 활성화도 하지 않는다.
 - **판정은 그대로 유지한다.**
   - 기존 NOT_RECOMMENDED
   - B01 = NEED_MORE_DATA (전향적 SHADOW 검증 대상만)
 - **근거:** `backtest/entry_strategy` P0~P7 보고서, `backtest/entry_strategy/docs/AUTO_BUY_SHADOW_PLAN.md`, `AUTO_BUY_S01_LINK_DESIGN.md` v2
-- **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26, 동결) + `ab0004`(종료 run 원장·감사 이력 불변성, 2026-11-27). 최종 목표 리비전은 `ab0004`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
+- **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26, 동결) + `ab0004`(종료 run 원장·감사 이력 불변성, 2026-11-27, 동결) + `ab0005`(충돌 교체 차단·남은 감사 자료 불변, 2026-11-27). 최종 목표 리비전은 `ab0005`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
   - 확인(2026-11-25): Git 이력에 `trading/auto_buy` 커밋 없음(원격도 main 뿐), 로컬 `.env` 저널 경로 미설정, 프로젝트 내 SQLite 에 `ab_alembic_version` 없음. 이전 `ab0001` 이 적용된 파일은 개발 세션 임시 폴더의 데모·벤치 파일뿐이다. 운영 VM 은 Git 으로만 배포되고 이 코드가 Push 된 적이 없어 적용 이력이 없다 (VM 에 접속해 확인하지는 않았다).
   - 이 브랜치가 커밋·Push 된 이후에는 `ab0001` 을 바꾸지 않고 새 리비전으로만 바꾼다.
+
+## Codex 재리뷰 반영 (PR #14, 2026-11-27, head c27d9d0)
+
+재리뷰 결과: 기존 결함 6건, 전체 테스트, P7-OPS 대조, 동시성·S5 검증은 통과했다. 신규 P1 2건과 운영 필수 P2 1건을 반영했고, 범위는 이 세 결함과 경계 조건으로 제한했다 (새 전략·기능·구조 변경 없음).
+
+### P1 — 일봉 응답 계약 (`market_data.parse_chart`)
+
+아래 항목을 하나라도 확인할 수 없으면 정상 응답으로 가정하지 않는다 (`BarUnavailable` → 마감 후 `MISSING` → `FILL_UNKNOWN`·`DATA_INCOMPLETE` → 정상 일봉 확보 후 replay 복구). 그런 응답의 `volume:0` 으로 `ZERO_VOLUME_EXPIRED` 를 만들지 않는다.
+
+| 검사 | 실패 코드 |
+|---|---|
+| HTTP 200 (`fetch_chart`, 이전 라운드) | `HTTP_{코드}`·`HTTP_STATUS_UNKNOWN` |
+| `chart.error` 없음, `result`·`meta` 가 객체 | `CHART_ERROR`·`NO_RESULT`·`META_MISSING` |
+| `meta.dataGranularity` 가 문자열 `"1d"` (1m·5m·1h·1wk 등 거부) | `GRANULARITY_NOT_DAILY` |
+| 주기 누락·null / 문자열이 아님 | `GRANULARITY_MISSING` / `GRANULARITY_INVALID_TYPE` |
+| `meta.symbol` 있음 / 요청 종목과 같음 | `SYMBOL_MISSING` / `SYMBOL_MISMATCH` |
+| `meta.exchangeTimezoneName` 있음 / `America/New_York` (대체 시간대로 가정하지 않음) | `TZ_MISSING` / `TZ_MISMATCH` |
+| 타임스탬프가 정수·증가 순서·요청 거래일 구간 안 | `TIMESTAMP_INVALID`·`TIMESTAMP_NOT_INCREASING`·`TIMESTAMP_OUT_OF_RANGE` |
+| 요청일이 정규장 거래일 / 그날 봉이 정확히 1개 / 봉 시각이 정규장 시간 안(조기폐장 반영) | `DAY_NOT_TRADING_SESSION` / `DAY_NOT_IN_RESPONSE`·`DUPLICATE_DAY` / `BAR_TIME_OUTSIDE_SESSION` |
+| OHLC 배열 길이가 타임스탬프와 같음, 값 양수, 고가·저가가 시가·종가를 감쌈 | `{OPEN…}_ARRAY_PARTIAL`·`OHLC_NULL_OR_INVALID`·`OHLC_INCONSISTENT` |
+| 거래량 (기존 정책) | 누락·부분·null·음수 = 미확인, `0` = 이 원본 경로에서만 확정 0 |
+
+실패 근거(`data_granularity`·`exchange_tz`·`bar_time_et`·issues·HTTP 상태·응답 SHA-256)를 결측 행 `source_evidence` 에 남긴다. 마감 전 잠정 데이터 대기 정책은 그대로다.
+
+### P1 — 충돌 교체 차단 (`ab0005`, `journal_migrations/ddl_v5.py`)
+
+- **원인:** SQLite 의 `INSERT OR REPLACE`·`REPLACE INTO`·`UPDATE OR REPLACE` 는 키가 겹치는 기존 행을 내부적으로 지운다. `PRAGMA recursive_triggers` 가 꺼져 있으면(SQLite 기본값) 이 내부 삭제는 DELETE 트리거를 부르지 않아 ab0004 의 삭제 거부를 우회했다.
+- **스키마 보호 (연결 설정과 무관):** 보호 표마다 PK 와 모든 UNIQUE(부분 UNIQUE 포함) 제약의 **기존 키 충돌을 명시적으로 거부**한다.
+  - `BEFORE INSERT`: 같은 키의 행이 있으면 거부 → `INSERT OR REPLACE`·`REPLACE INTO`·`INSERT … ON CONFLICT DO UPDATE`·PK 외 UNIQUE 충돌 교체 차단
+  - `BEFORE UPDATE`: 바꾼 키가 다른 행과 겹치면 거부 → `UPDATE OR REPLACE` 로 다른 행을 지우는 우회 차단
+  - `ab_eligibility` 만 `RAISE(IGNORE)`: 제품이 `INSERT OR IGNORE` 로 멱등 기록한다. 기존 행은 유지되고 오류 없이 0행이다.
+  - `ab_runs` 의 부분 UNIQUE(`status='CURRENT'`)는 ab0003 의 단일 CURRENT 트리거가 이미 INSERT·UPDATE 모두 거부한다.
+- **남은 감사 자료 불변:**
+  - `ab_accounts`(가상 계좌 설정·해시): UPDATE·DELETE 거부
+  - `ab_eligibility`(판정 기록): UPDATE·DELETE 거부
+  - `ab_scan_captures`(스캔 수집 이력): DELETE 거부. 수집 직후 채우는 `rows_captured`·`strict_rows` 외 열은 변경 거부
+- **연결 설정 (이중 방어):** 제품 쓰기 연결(`store.connect_rw`)과 Migration 연결(`journal_migrations/env.py`)에서 `foreign_keys=ON`, `recursive_triggers=ON` 을 설정하고 다시 읽어 확인한다. 적용되지 않으면 쓰지 않는다.
+- **외래키:** 모두 NO ACTION 이다 (CASCADE·SET NULL 없음, 테스트로 확인). 연쇄 변경 경로가 없고, 부모 행 삭제는 각 표의 삭제 거부가 막는다.
+- **보호 대상이 아닌 표:** `ab_runtime`(운영 상태 kv, upsert 사용), `ab_alembic_version`(Alembic 관리), `sqlite_sequence`.
+- **보호 범위의 한계 (구분):**
+  - 막는 것: 제품 연결과 **설정 없는 별도 sqlite3 연결** 모두에서, 일반 DML(INSERT·UPDATE·DELETE 와 충돌 해소 변형)로 보호 행을 바꾸는 경로. 테스트로 확인했다.
+  - 막지 못하는 것: DB 관리자나 파일 소유자가 하는 아래 작업. 이는 파일 권한(0600, 서비스 사용자 소유)·백업·운영 접근 통제의 영역이다.
+    - 트리거 DROP 같은 임의 DDL
+    - `PRAGMA writable_schema`
+    - 파일 직접 편집·교체·삭제, 백업에서 덮어쓰기
+
+**SQL 연산별 검증** (`tests/test_auto_buy_shadow_review6_ledger.py`, 제품 연결·별도 연결 각각):
+
+| 연산 | c27d9d0 (ab0004)에서 막히지 않던 표 | 수정 후 |
+|---|---|---|
+| `INSERT OR REPLACE` / `REPLACE INTO` | `ab_events`·`ab_runs`(종료 run)·`ab_signal_snapshots`·`ab_bars`·`ab_day_inputs`·`ab_scan_captures`·`ab_accounts`·`ab_eligibility` | 모두 차단 (`ab_eligibility` 는 무시, 행 유지) |
+| `INSERT … ON CONFLICT DO UPDATE` | `ab_day_inputs`·`ab_scan_captures`·`ab_accounts`·`ab_eligibility` | 차단 |
+| `UPDATE OR REPLACE` (다른 행 키로 변경) | `ab_orders`·`ab_positions`·`ab_reservations`·`ab_day_inputs`·`ab_scan_captures`·`ab_accounts`·`ab_eligibility` | 차단 |
+| PK 외 UNIQUE 충돌 교체 (새 PK + 같은 UNIQUE) | 활성 run 의 `ab_orders`·`ab_positions`, `ab_signal_snapshots` | 차단 |
+| `UPDATE` | `ab_accounts`·`ab_eligibility` | 차단 |
+| `DELETE` | `ab_accounts`·`ab_eligibility`·`ab_scan_captures` | 차단 |
+| OLD/NEW run 이동, 종료 run 변경, `ab_events` 변경 | (ab0004 에서 차단) | 유지 |
+| 외래키 연쇄 | CASCADE 없음 | 유지 |
+
+시도 전후로 보호 대상 표 전체(행 단위) 덤프가 같다. 정상 경로는 그대로 동작한다: 새 감사 이벤트 추가, 활성 run 행 갱신, `INSERT OR IGNORE` 멱등 기록, 실패 후 재시도 replay 와 CURRENT 전환, 다음 job.
+
+### P2 — `YFRateLimitError`
+
+- **식별:** yfinance 는 HTTP 429 를 감지하면 응답 대신 `yfinance.exceptions.YFRateLimitError` 를 던진다. 이 예외는 `YF_RATE_LIMITED` 로 분류한다 (일반 `FETCH_ERROR` 가 아님).
+- **즉시 중단:** 재시도하지 않고 job 상태를 `RATE_LIMITED` 로 둔다. 같은 job 에서 다른 종목·다른 거래일로 더 요청하지 않는다.
+- **미수집 종목:** 결측(복구 대상)이며 근거(예외 이름·halted)가 남는다. 해당 거래일은 `DATA_INCOMPLETE` 이고 COMPLETE 로 처리하지 않는다.
+- **후속 job 보류 정책:** 다음 job 은 다시 시도하되 첫 제한 응답에서 바로 멈춘다. 그래서 제한이 계속되는 동안 job 당 Yahoo 시도는 1회 남짓이다. 연속 횟수는 runtime `yahoo_rate_limit` 에 남는다. 3회 연속이면 WARN `yahoo_rate_limited_repeated` 를 한 번 남기고, 정상 수집되면 0 으로 돌아간다.
+- **기존 정책 유지:** HTTP 429 응답·Retry-After·timeout·503.
+- **요청 예산의 뜻:** `JOB_REQUEST_BUDGET`(300)과 운영 지표 `fetch.requests` 는 **애플리케이션 조회 시도 수**다. yfinance 세션이 쿠키·crumb 갱신 등으로 내부에서 보내는 추가 요청은 세지 못하므로 실제 네트워크 요청 수의 상한이 아니다.
+
+### 수정 전 실패·수정 후 통과
+
+- `tests/test_auto_buy_shadow_review6_repro.py` (6건, c27d9d0 와 현재 코드 공통 API): c27d9d0 에서 6건 모두 실패하고 수정 후 통과한다.
+  - 1m 응답이 일봉으로 파싱됨
+  - 1m `volume:0` 이 `UNFILLED`(ZERO_VOLUME_EXPIRED)로 처리됨
+  - 감사 이벤트 `INSERT OR REPLACE` 교체 (제품 연결·별도 연결)
+  - `YFRateLimitError` 가 `FETCH_ERROR` 로 분류되고 다른 종목 요청을 계속함
+- 새 API 기준 테스트:
+  - `review6_contract` 41건: c27d9d0 에서 36건 실패. 통과한 5건은 기존에도 지켜지던 경계(종목 불일치, 배열 부분, 원본 null/0 구분, 같은 날 여러 봉, 429·503 정책)의 회귀 확인이다.
+  - `review6_ledger` 8건·`review6_migration` 7건: c27d9d0 에는 `ddl_v5` 모듈이 없어 수집 단계에서 중단된다 (새 API 부재). 결함 재현은 위 repro 와 연산별 표로 확인했다.
+
+### Migration `ab0005`
+
+격리된 임시 SQLite 에서 확인했다 (`tests/test_auto_buy_shadow_review6_migration.py`). 운영 Migration 은 실행하지 않았다.
+- 신규 생성
+- ab0001→ab0005, ab0004→ab0005 (원장·감사 이력 보존, 별도 연결에서 교체 차단)
+- 실패 시 원본 무변경 (ab0004 유지)
+- 재실행 `ALREADY_CURRENT`
+- `--check` 읽기 전용
+- Migration 연결 `recursive_triggers=1`
+- 심볼릭 링크 거부
+- OFF 파일·DDL 없음
+- 0600·부속 파일·하드링크·S01 저널 보호는 기존 테스트(`review4_migration`·`review5_s5`)가 ab0005 head 에서 통과
+
+### 운영 검증 체크리스트 (실제 VM 에서만 판단 가능, 활성화 전·첫 주)
+
+- [ ] 실제 VM 의 Linux 배포판·아키텍처·서비스 사용자 권한 (저널 0600·소유자, `/proc` 식별자 읽기)
+- [ ] 실제 Yahoo 네트워크 요청량 (`fetch.requests` 는 애플리케이션 시도 수, yfinance 내부 요청 제외)
+- [ ] Scanner 실행과 429 경합 (Scanner 실행 중 보류 동작, `yahoo_rate_limit` 연속 횟수)
+- [ ] 과거 결측 복구로 당일 요청 예산이 부족해지는지 (`BUDGET_EXHAUSTED` 빈도)
+- [ ] 첫 주 CPU·메모리·디스크 사용량, SQLite 잠금 대기 시간 (트리거 추가에 따른 쓰기 시간 포함)
+
+성능 최적화는 실제 VM 관측 뒤 별도로 판단한다 (이번 범위 밖).
 
 ## Codex 재리뷰 반영 (PR #14, 2026-11-27, head 9a315db)
 
@@ -58,7 +162,7 @@
 | 항목 | 값 |
 |---|---|
 | 같은 종목·거래일 | job 안에서 한 번만 요청한다 (실패 결과도 재사용) |
-| 요청 예산 | job 당 300 회 (`JOB_REQUEST_BUDGET`). 넘으면 `BUDGET_EXHAUSTED` 결측이며, 정상 확정하지 않는다 |
+| 요청 예산 | job 당 300 회 (`JOB_REQUEST_BUDGET`, 애플리케이션 조회 시도 수 — 실제 네트워크 요청 상한 아님). 넘으면 `BUDGET_EXHAUSTED` 결측이며, 정상 확정하지 않는다 |
 | timeout | 요청당 10초 |
 | 재시도 | 최대 2회 시도. 재시도 대상은 429·5xx·timeout·연결 오류뿐 |
 | backoff | Retry-After(초·HTTP 날짜)를 따른다. 30초를 넘으면 기다리지 않고 job 수집을 멈춘다(`RATE_LIMITED`). 없으면 지수 backoff(2초부터, 최대 2회 시도이므로 실제로는 1회 2초). job 당 대기 합계는 최대 60초 |
@@ -700,8 +804,9 @@ Current Heat 는 여기에 들어가지 않는다.
 - 스키마 비교 기준은 메모리 DB 에 해당 리비전 DDL(`ab0001` = v1, `ab0002` = v1 + `ddl_v2`, `ab0003` = + `ddl_v3`)을 실행해 만든다 (대상 파일에는 DDL 을 실행하지 않음).
 - **리비전:** `ab0001`(공개 후 동결, 변경 없음) → `ab0002`(거래량). `ab0002` 는 `ALTER TABLE … ADD COLUMN` 만 한다: `ab_bars.volume`·`volume_status`(CHECK), `ab_fill_ledger.bar_volume`, `ab_positions.zero_volume_days`(기본 0)·`last_zero_volume_day`. 시작 전에 대상이 정확히 `ab0001` 구조인지 확인하고 아니면 중단한다. downgrade 는 지원하지 않는다. 기존 행은 그대로이며 거래량은 NULL(미확인)이다.
 - **`ab0003`**: `ab_bars.volume_source`·`source_evidence` 열 추가(`ALTER TABLE … ADD COLUMN`)와 run fencing 트리거(위 '재계산 실행권 v2'). 시작 전에 대상이 정확히 `ab0002` 구조인지 확인한다. downgrade 는 지원하지 않는다. 기존 행의 출처는 NULL 이며, 그 행의 거래량 0 은 미확인으로 보고 원본 경로로 다시 확인한다.
-- **`ab0004`** (최종 목표 리비전): 종료 run 원장·감사 이력 불변성 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27)'). 시작 전에 대상이 정확히 `ab0003` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
-- 런타임은 `ab0004` 만 받아들인다. `ab0001`~`ab0003` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
+- **`ab0004`**: 종료 run 원장·감사 이력 불변성 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27)'). 시작 전에 대상이 정확히 `ab0003` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
+- **`ab0005`** (최종 목표 리비전): 충돌 교체(REPLACE·UPSERT) 차단과 남은 감사 자료 불변 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)'). 시작 전에 대상이 정확히 `ab0004` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
+- 런타임은 `ab0005` 만 받아들인다. `ab0001`~`ab0004` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
 - 기존 파일이면 백업한다. 실패해도 자동 복원하지 않는다. 새로 만든 뒤 upgrade 가 실패하면 빈 0600 파일이 남는다 (다음 실행에서 이어서 upgrade).
 
 ## AUTO BUY MONITOR (화면)
@@ -772,7 +877,7 @@ Current Heat 는 여기에 들어가지 않는다.
    # 결과 CHECK_ONLY_WOULD_CREATE · exit=0 확인 후 별도 승인
    .venv/bin/python -m scripts.auto_buy_shadow_journal_migrate --env-file .env --backup-dir /var/backups/mystockapp --allow-create; echo "exit=$?"
    ```
-   - 결과의 `schema_version` 이 **`ab0004`**(최종 목표 리비전)인지 확인한다.
+   - 결과의 `schema_version` 이 **`ab0005`**(최종 목표 리비전)인지 확인한다.
    - 생성 후 권한 확인: `stat -c '%a %U' <저널 경로>` → `600 <서비스 사용자>` (경로는 운영자가 직접 입력, 출력은 권한만).
    - 백업에서 복원한 저널이면 먼저 `--check` 로 권한을 확인한다. 0600 이 아니면 `CHECK_FAILED_PERMISSIONS`(exit=2)이다. 승인 후 적용 모드를 다시 실행하면 `ALREADY_CURRENT` 와 함께 0600 으로 맞춰진다.
 2-1. **⛔ 활성화 전 조건 (모두 확인 후 별도 승인):**
@@ -783,6 +888,8 @@ Current Heat 는 여기에 들어가지 않는다.
    - HTTP 오류·호출량 장애 주입(`tests/test_auto_buy_shadow_review5_http.py`), 멱등성·불변성(`review5_replay`), S5 연속성·Migration(`review5_s5`), 결함 재현(`review5_repro`)이 배포 커밋에서 통과
    - **Linux 검증 (활성화 전 필수):** 운영 VM 과 같은 계열 Linux(격리 환경)에서 `/proc` 시작 식별자·boot_id·pid 재사용·장시간 실행권 보호·SIGKILL 복구·fencing 테스트가 통과해야 한다 (아래 'Linux 호환성'). VM 자체에서 실행하지 않는다.
    - 수동 실행권 해제는 위 '수동 실행권 해제' 절차와 별도 승인으로만 한다
+   - 일봉 응답 계약·호출 제한(`review6_contract`), 원장 충돌 교체 차단(`review6_ledger`), ab0005(`review6_migration`), 결함 재현(`review6_repro`)이 배포 커밋에서 통과
+   - 위 '운영 검증 체크리스트'를 첫 주 관측 항목으로 등록
 3. **⛔ SHADOW 활성화 (승인 후):** `AUTO_BUY_US_MODE=SHADOW` 로 재시작한다. 확인:
    - 스케줄러 job `auto_buy_us_shadow` 등록, S01 job 일정 변화 없음
    - 다음 정규 미국 스캔 후 수집 이력·후보 확정(`day_inputs`) 표시, 스캔 대조 미수집 0
@@ -796,7 +903,7 @@ Current Heat 는 여기에 들어가지 않는다.
 | ID | 항목 | 상태 |
 |---|---|---|
 | S1 | 운영 DB 스냅샷 표(outbox) | **미승인 유지.** 별도 SHADOW DB 방식. 완전 보장이 필요하면 outbox Migration Plan 을 따로 승인 요청 |
-| S2 | SHADOW 전용 SQLite·Migration | 구현 완료 (`ab0001`~`ab0003` 동결 + `ab0004` 원장 불변성, 최종 목표 `ab0004`), **Migration 실행 미승인** |
+| S2 | SHADOW 전용 SQLite·Migration | 구현 완료 (`ab0001`~`ab0004` 동결 + `ab0005` 충돌 교체 차단, 최종 목표 `ab0005`), **Migration 실행 미승인** |
 | S3 | 스위치·SHADOW job 배포 (기본 OFF) | 구현 완료, Codex 재리뷰 대기 (2026-11-27 재리뷰 반영분) |
 | S4 | 가상 계좌 구성 | P7 비교형 + 운영 검증형, B02 seed 20개 (총 46 계좌) |
 | S5 | 채택 검토 기준 | **확정** (위 기준 유지) |
