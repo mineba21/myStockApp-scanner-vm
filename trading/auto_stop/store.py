@@ -35,6 +35,18 @@ class LeaseLost(Exception):
     """lease 를 잃음. 이 작업자는 더 이상 주문·상태 변경을 하지 않는다."""
 
 
+class ScannerJournalUnreadable(Exception):
+    """Scanner 매수 저널을 읽을 수 없음 (스키마 불일치·조회 오류). 미확정 주문 없음으로 보지 않는다."""
+
+
+# Scanner 매수의 미확정 정의 (trading/scanner_buy_orders.py): 전송 중·접수 불명(SENDING/UNKNOWN), 그리고
+# 접수(SUBMITTED)됐지만 브로커 최종 상태(FILLED/CANCELLED/REJECTED)가 확인되지 않은 주문(미체결·부분체결 포함).
+# PREPARED(미리보기, 미전송)·BLOCKED·REJECTED·ABANDONED·RESOLVED_MANUAL 은 증권사에 살아 있는 주문이 아니다.
+SCANNER_IN_FLIGHT_SQL = ("SELECT 1 FROM scanner_buy_orders WHERE account_profile='account1' AND ticker=? AND "
+                         "(state IN ('SENDING','UNKNOWN') OR (state='SUBMITTED' AND "
+                         "COALESCE(broker_state,'') NOT IN ('FILLED','CANCELLED','REJECTED'))) LIMIT 1")
+
+
 def _row(r):
     return dict(r) if r is not None else None
 
@@ -335,6 +347,8 @@ class AutoStopStore:
                 reason = gate(db, now)
                 if reason:
                     raise ClaimRefused(reason)
+                # 게이트가 이 트랜잭션에서 읽은 최신 설정으로 한도·lease 를 판단한다 (서로 다른 시점의 설정 금지).
+                settings = getattr(gate, "settings", None) or settings
             self._extend_lease(db, owner, now, settings.lease_sec)
             ev = db.execute("SELECT * FROM auto_stop_exit_events WHERE id=?", (event_id,)).fetchone()
             if ev is None or ev["state"] != "OPEN":
@@ -394,6 +408,8 @@ class AutoStopStore:
                 reason = gate(db, now)
                 if reason:
                     raise ClaimRefused(reason)
+                eff = getattr(gate, "settings", None)
+                lease_sec = eff.lease_sec if eff is not None else lease_sec
             self._extend_lease(db, owner, now, lease_sec)
             o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (order_id,)).fetchone()
             if o is None or o["state"] != expect_state or o["cancel_rejected"] or not o["order_number"]:
@@ -412,6 +428,12 @@ class AutoStopStore:
             db.execute("INSERT INTO auto_stop_daily_stats(day,mode,metric,key,value) VALUES(?,?,?,?,?) "
                        "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=excluded.value",
                        (day, mode, metric, key, value))
+
+    def stat_set_if_absent(self, day, mode, metric, key, value) -> bool:
+        """처음 한 번만 기록한다 (예: 그날 신규 슬롯 형식 기록 시작 시각)."""
+        with self.tx() as db:
+            return db.execute("INSERT OR IGNORE INTO auto_stop_daily_stats(day,mode,metric,key,value) "
+                              "VALUES(?,?,?,?,?)", (day, mode, metric, key, value)).rowcount == 1
 
     def stat_set_many(self, rows):
         """여러 통계 행을 한 트랜잭션에서 쓴다. rows: [(day, mode, metric, key, value)]."""
@@ -491,18 +513,27 @@ class AutoStopStore:
             return [dict(r) for r in db.execute("SELECT * FROM auto_stop_alerts ORDER BY id DESC LIMIT ?", (limit,))]
 
     # ── 외부 저널 대조 ──────────────────────────────────────────
-    def scanner_buy_in_flight(self, ticker) -> bool:
-        """같은 SQLite 의 스캐너 매수 저널에 account1 같은 종목의 미확정·미체결 매수가 있는지."""
-        with self.tx() as db:
+    @staticmethod
+    def scanner_buy_in_flight_db(db, ticker) -> bool:
+        """현재 트랜잭션의 db 로 Scanner 미확정 매수를 확인한다 (새 연결·중첩 트랜잭션 없음).
+
+        표가 없으면 False: Scanner 매수 모듈은 첫 사용 때 같은 저널에 표를 만들므로(CREATE TABLE IF NOT EXISTS),
+        표가 없다는 것은 이 저널에서 Scanner 매수가 한 번도 준비되지 않았다는 뜻이다. 선점 트랜잭션은 쓰기 잠금을
+        쥐고 있어 그 사이 다른 연결이 표를 만들거나 행을 넣을 수 없다. 표가 있는데 조회가 실패하면(열 누락 등)
+        ScannerJournalUnreadable 로 올려 선점을 거부하게 한다."""
+        try:
             exists = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scanner_buy_orders'"
                                 ).fetchone()
             if not exists:
                 return False
-            r = db.execute("SELECT 1 FROM scanner_buy_orders WHERE account_profile='account1' AND ticker=? AND "
-                           "(state IN ('SENDING','UNKNOWN') OR (state='SUBMITTED' AND "
-                           "COALESCE(broker_state,'') NOT IN ('FILLED','CANCELLED','REJECTED')))",
-                           (ticker,)).fetchone()
-            return r is not None
+            return db.execute(SCANNER_IN_FLIGHT_SQL, (ticker,)).fetchone() is not None
+        except sqlite3.Error as exc:
+            raise ScannerJournalUnreadable(str(exc)) from exc
+
+    def scanner_buy_in_flight(self, ticker) -> bool:
+        """같은 SQLite 의 스캐너 매수 저널에 account1 같은 종목의 미확정·미체결 매수가 있는지."""
+        with self.tx() as db:
+            return self.scanner_buy_in_flight_db(db, ticker)
 
 
 def dec(value) -> Decimal:

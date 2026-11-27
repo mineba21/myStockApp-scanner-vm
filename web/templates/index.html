@@ -923,7 +923,8 @@
 
     <template x-if="report">
       <div class="mt-3 p-2 border rounded text-sm" data-testid="report">
-        <div class="font-semibold">운영 보고 <span x-text="report.day + ' ' + report.mode"></span></div>
+        <div class="font-semibold">운영 보고 <span x-text="report.day + ' ' + report.mode"></span>
+          <span x-show="report.format" class="text-xs font-normal" data-testid="report-format"> · 형식 <span x-text="report.format"></span> (공백 측정 <span x-text="report.watch?.gaps?.coverage ?? '-'"></span>)</span></div>
         <template x-if="!report.trading_day"><p>휴장일입니다.</p></template>
         <template x-if="report.trading_day"><div class="space-y-1">
           <div>감시 <span x-text="report.watched_positions"></span>종목 · 정상 감시 <strong x-text="report.watch.ok + '/' + report.watch.expected"></strong> (누락 <span x-text="report.watch.missed"></span> = 보류 미실행 <span x-text="report.watch.held_slots ?? 0"></span> + 일시중지 <span x-text="report.watch.paused_slots ?? 0"></span> + 감시 실패 <span x-text="report.watch.failed_slots ?? 0"></span> + 스케줄 지연 <span x-text="report.watch.schedule_missed ?? 0"></span>)
@@ -936,7 +937,7 @@
             · 미해결 이벤트 <span x-text="report.unresolved_events"></span> · 알림 성공/실패 <span x-text="report.alerts.sent + '/' + report.alerts.failed"></span>
             · heartbeat <span x-text="report.heartbeat.ok ? '정상' : '이상'"></span></div>
           <template x-for="w in report.watch.positions" :key="w.id"><div class="text-xs">
-            <span x-text="w.ticker"></span>: 정상 <span x-text="w.ok_checks + '/' + w.expected_checks"></span> (<span x-text="w.normal_rate_pct ?? '-'"></span>%), 실패 <span x-text="w.quote_fail"></span>, 무효 <span x-text="w.quote_invalid"></span>, 보류 <span x-text="w.held_slots ?? 0"></span>, 회복 <span x-text="w.recovery ? (w.recovery.ok + '/' + w.recovery.attempts) : '-'"></span>, 최대 시세 지연 <span x-text="w.max_quote_age_sec ?? '-'"></span>초, 마지막 정상 <span x-text="fmt(w.last_check_at)"></span>
+            <span x-text="w.ticker"></span>: 정상 <span x-text="(w.ok_checks ?? '-') + '/' + w.expected_checks"></span> (<span x-text="w.normal_rate_pct ?? '-'"></span>%), 실패 <span x-text="w.quote_fail"></span>, 무효 <span x-text="w.quote_invalid"></span>, 보류 <span x-text="w.held_slots ?? 0"></span>, 회복 <span x-text="w.recovery ? (w.recovery.ok + '/' + w.recovery.attempts) : '-'"></span>, 최대 시세 지연 <span x-text="w.max_quote_age_sec ?? '-'"></span>초, 마지막 정상 <span x-text="fmt(w.last_check_at)"></span>
             <span x-show="w.health_state && w.health_state !== 'OK'" class="text-red-700"> · 시세 <span x-text="w.health_state"></span> (장애 시작 <span x-text="fmt(w.fault_started_at)"></span>)</span>
             <span x-show="w.recovered_at" class="text-green-700"> · 복구 <span x-text="fmt(w.recovered_at)"></span></span>
             <span x-show="w.gaps"> · 최대 공백 <span x-text="w.gaps?.max_sec ?? '-'"></span>초 (정상 상태 <span x-text="w.gaps?.max_normal_sec ?? '-'"></span>초, 120초 초과 <span x-text="w.gaps?.over_120 ?? 0"></span>건)</span>

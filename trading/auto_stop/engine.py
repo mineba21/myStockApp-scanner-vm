@@ -30,7 +30,7 @@ from trading.auto_stop import settings as S
 from trading.auto_stop.brokers import BalanceUnavailable
 from trading.auto_stop.quotes import (MIN_AUTO_PRICE, consistent, is_jump,
                                       limit_price, reference_price, validate_detail)
-from trading.auto_stop.store import UNRESOLVED, ClaimRefused, LeaseLost, dec
+from trading.auto_stop.store import UNRESOLVED, ClaimRefused, LeaseLost, ScannerJournalUnreadable, dec
 from trading.auto_stop.us_calendar import market_clock, ny_date, session_for
 from trading.kiwoom_orders import OrderRejected, OrderUnknown
 from trading.kiwoom_readonly import KiwoomError
@@ -423,6 +423,9 @@ class Engine:
         try:
             mc = market_clock(now, self.settings)
             self.summary["market_open"] = mc.is_open
+            if self.settings.mode in ("SHADOW", "LIVE"):
+                # 이 거래일에 신규 슬롯 형식(SLOT_V2) 기록을 시작한 시각 (보고서의 LEGACY/MIXED 구분 근거)
+                self.store.stat_set_if_absent(ny_date(now).isoformat(), self.settings.mode, "slot_v2_since", "", now)
             if self.settings.mode == "SHADOW":
                 self._track_shadow_config()
             self._recover_stale()
@@ -1160,7 +1163,12 @@ class Engine:
                 rnd["system"] += 1
             record = self._record_quote_error(pos, "incident", err)
             if rec is not None:
-                QH.on_error(rec, self.now(), record, self.settings.max_consecutive_errors)
+                if QH.on_error(rec, self.now(), record, self.settings.max_consecutive_errors) == "fault":
+                    # 상태 전이는 항상 감사 기록으로 남긴다 (보고서의 상태 구간 복원 근거)
+                    self.store.audit(self.now(), "engine", "quote_fault", f"{pos['mode']}:{pos['ticker']}",
+                                     {"position_id": pos["id"], "category": err.get("category"),
+                                      "scope": err.get("scope"), "consecutive": rec["consecutive_errors"],
+                                      "path": "incident_probe"})
                 rec["last_observation"] = "failed"
             if err.get("scope") in (QH.SYSTEM, QH.UNKNOWN):
                 self._quote_global_error(record, pos)
@@ -1174,7 +1182,10 @@ class Engine:
                 rnd["new_ok"].append(key)
             state = None
             if rec is not None:
-                QH.on_success(rec, self.now(), q.as_of)
+                if QH.on_success(rec, self.now(), q.as_of) == "recovered":
+                    self.store.audit(self.now(), "engine", "quote_recovered", f"{pos['mode']}:{pos['ticker']}",
+                                     {"position_id": pos["id"], "fault_started_at": rec.get("fault_started_at"),
+                                      "path": "incident_probe"})
                 rec["last_observation"] = "recovering" if rec["state"] != QH.OK else "ok"
                 state = rec["state"]
             self._incident_observe(pos["id"], "ok", as_of=q.as_of, health_state=state, managed=managed)
@@ -1208,63 +1219,118 @@ class Engine:
             snap["order"] = {k: o[k] for k in self._SNAP_ORDER}
         return snap
 
-    def _exec_gate(self, *, kind, mode, position_id, event_id, quote_as_of, snapshot, order_id=None):
-        """선점 트랜잭션 안에서 실행되는 게이트(db, now) → 거부 사유 또는 None. 네트워크 호출 없음.
+    ORDER_KINDS = ("ORIGINAL", "REPLACE", "CARRY_OVER", "CANCEL_FOR_REPLACE")
+    REPLACE_KINDS = ("REPLACE", "CANCEL_FOR_REPLACE")
 
-        lease·긴급 중지·실거래 스위치·API 계약은 store.claim_* 와 guard 가 같은 트랜잭션에서 확인한다."""
-        store = self.store
+    def _exec_gate(self, *, kind, mode, position_id, event_id, quote_as_of, snapshot, order_id=None, qty=None,
+                   limit_price=None):
+        """선점 트랜잭션 안에서 실행되는 주문 종류별 최종 게이트 → 호출 가능 객체(db, now) → 거부 사유 또는 None.
 
-        def gate(db, now):
-            settings = self.settings_loader()
-            mc = market_clock(now, settings)
-            if not mc.is_open:
-                return "session_closed: 정규장이 아닙니다"
-            if not mc.before_cutoff:
-                return "cutoff: 마감 cutoff 이후에는 신규 매도·재주문 목적 취소를 하지 않습니다"
-            if settings.mode != mode:
-                return f"mode: 운영 모드 {settings.mode} ≠ 주문 모드 {mode}"
-            thr = settings.max_consecutive_errors
-            errs = store.rt(db, "api_errors", {}) or {}
-            busy = [c for c in ("balance", "status", "orders", "quote") if int(errs.get(c, 0) or 0) >= thr]
-            if busy:
-                return f"global_hold: 연속 오류 보류 ({', '.join(busy)})"
-            if store.rt(db, "quote_global_hold"):
-                return "global_hold: 시세 시스템 장애 보류"
-            rec = (store.rt(db, f"quote_health:{mode}", {}) or {}).get(str(position_id))
-            if rec and rec.get("state", QH.OK) != QH.OK:
-                return f"symbol_hold: 종목 시세 {rec.get('state')}"
-            pos = db.execute("SELECT * FROM auto_stop_positions WHERE id=?", (position_id,)).fetchone()
-            ev = db.execute("SELECT * FROM auto_stop_exit_events WHERE id=?", (event_id,)).fetchone()
-            if pos is None or pos["state"] != "EXITING" or pos["auto_paused"]:
-                return "position: 청산 진행 상태가 아니거나 일시중지됨"
-            if ev is None or ev["state"] != "OPEN":
-                return "event: 청산 이벤트가 OPEN 이 아님"
-            for k, v in snapshot["position"].items():
-                if pos[k] != v:
-                    return f"stale_precheck: position.{k} {v} → {pos[k]}"
-            for k, v in snapshot["event"].items():
-                if ev[k] != v:
-                    return f"stale_precheck: event.{k} {v} → {ev[k]}"
-            if order_id is not None:
-                o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (order_id,)).fetchone()
-                for k, v in snapshot["order"].items():
-                    if o is None or o[k] != v:
-                        return f"stale_precheck: order.{k} {v} → {None if o is None else o[k]}"
-            if quote_as_of is None:
-                return "quote: 시세 시각 없음"
-            if ny_date(quote_as_of) != mc.session.day or quote_as_of < mc.session.open_ts:
-                return "quote: 당일 정규장 시세가 아님"
-            age = now - quote_as_of
-            if age > settings.quote_max_age_sec or age < -60:
-                return f"quote_stale: 시세 {int(age)}초 경과 (한도 {settings.quote_max_age_sec}초)"
-            if kind == "cancel":
-                if not settings.replace_enabled_for(mode):
-                    return "replace_switch: 재주문 스위치 꺼짐"
-                if (ev["session_replace_count"] >= settings.max_replaces_per_session
-                        or ev["event_replace_count"] >= settings.max_replaces_per_event):
-                    return "replace_limit: 재주문 한도 도달"
-            return None
-        return gate
+        - 주문 종류: ORIGINAL / REPLACE / CARRY_OVER (신규·재·이월 매도), CANCEL_FOR_REPLACE (재주문 목적 취소).
+          알 수 없는 종류, 최신 설정을 읽지 못함은 fail closed.
+        - 최신 설정은 이 호출에서 한 번만 읽고(gate.settings), store.claim_* 가 그 설정으로 한도·lease 를 판단한다.
+        - 네트워크 호출 없음. 저널 DB 읽기와 env·스키마 재확인만 한다. 조건표는 docs/auto_stop_sell.md
+          "주문 종류별 안전 조건 매트릭스"."""
+        engine, store = self, self.store
+
+        class Gate:
+            settings = None
+
+            def __call__(self, db, now):
+                self.settings = None
+                if kind not in Engine.ORDER_KINDS:
+                    return f"kind: 알 수 없는 주문 종류 {kind}"
+                try:
+                    settings = engine.settings_loader()
+                except Exception as exc:                      # 최신 설정 확인 불가: 전송하지 않는다
+                    return f"settings_unavailable: {type(exc).__name__}"
+                if settings is None:
+                    return "settings_unavailable: 설정 없음"
+                if engine.schema_block:
+                    return f"schema: {engine.schema_block}"
+                mc = market_clock(now, settings)
+                if not mc.is_open:
+                    return "session_closed: 정규장이 아닙니다"
+                if not mc.before_cutoff:
+                    return "cutoff: 마감 cutoff 이후에는 신규 매도·재주문 목적 취소를 하지 않습니다"
+                if settings.mode != mode:
+                    return f"mode: 운영 모드 {settings.mode} ≠ 주문 모드 {mode}"
+                if mode == "LIVE":
+                    # 모드별 주문 활성화 스위치 + API Contract Gate (+ 취소면 LIVE 재주문 스위치·부분 취소 계약)
+                    block = (S.live_cancel_block_reason(settings) if kind == "CANCEL_FOR_REPLACE"
+                             else S.live_order_block_reason(settings))
+                    if block:
+                        return f"live_gate: {block}"
+                thr = settings.max_consecutive_errors
+                errs = store.rt(db, "api_errors", {}) or {}
+                busy = [c for c in ("balance", "status", "orders", "quote") if int(errs.get(c, 0) or 0) >= thr]
+                if busy:
+                    return f"global_hold: 연속 오류 보류 ({', '.join(busy)})"
+                if store.rt(db, "quote_global_hold"):
+                    return "global_hold: 시세 시스템 장애 보류"
+                rec = (store.rt(db, f"quote_health:{mode}", {}) or {}).get(str(position_id))
+                if rec and rec.get("state", QH.OK) != QH.OK:
+                    return f"symbol_hold: 종목 시세 {rec.get('state')}"
+                pos = db.execute("SELECT * FROM auto_stop_positions WHERE id=?", (position_id,)).fetchone()
+                ev = db.execute("SELECT * FROM auto_stop_exit_events WHERE id=?", (event_id,)).fetchone()
+                if pos is None or pos["state"] != "EXITING" or pos["auto_paused"]:
+                    return "position: 청산 진행 상태가 아니거나 일시중지됨"
+                if ev is None or ev["state"] != "OPEN":
+                    return "event: 청산 이벤트가 OPEN 이 아님"
+                for k, v in snapshot["position"].items():
+                    if pos[k] != v:
+                        return f"stale_precheck: position.{k} {v} → {pos[k]}"
+                for k, v in snapshot["event"].items():
+                    if ev[k] != v:
+                        return f"stale_precheck: event.{k} {v} → {ev[k]}"
+                if kind != "CANCEL_FOR_REPLACE" and ev["next_order_kind"] != kind:
+                    return f"kind_mismatch: 호출 {kind} ≠ 이벤트 {ev['next_order_kind']}"
+                if order_id is not None:
+                    o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (order_id,)).fetchone()
+                    for k, v in snapshot["order"].items():
+                        if o is None or o[k] != v:
+                            return f"stale_precheck: order.{k} {v} → {None if o is None else o[k]}"
+                elif kind == "CANCEL_FOR_REPLACE":
+                    return "kind: 취소 대상 주문 없음"
+                if kind in Engine.REPLACE_KINDS:
+                    if not settings.replace_enabled_for(mode):
+                        flag = "AUTO_STOP_US_REPLACE_ENABLED" if mode == "LIVE" else "AUTO_STOP_US_SHADOW_REPLACE_ENABLED"
+                        return f"replace_switch: {flag} 꺼짐"
+                    if (ev["session_replace_count"] >= settings.max_replaces_per_session
+                            or ev["event_replace_count"] >= settings.max_replaces_per_event):
+                        return (f"replace_limit: 세션 {ev['session_replace_count']}/{settings.max_replaces_per_session}"
+                                f", 이벤트 {ev['event_replace_count']}/{settings.max_replaces_per_event}")
+                if kind == "CARRY_OVER":
+                    # 기존 이월 정책 (_rollover): 이월 횟수 한도, 오늘 세션으로 이월됨, LIVE 는 POST_CLOSE_EXPIRY 검증
+                    if ev["carry_over_count"] > settings.max_carry_over_sessions:
+                        return f"carry_limit: 이월 {ev['carry_over_count']}/{settings.max_carry_over_sessions}"
+                    if ev["session_date"] != mc.session.day.isoformat():
+                        return "carry_session: 오늘 정규장으로 이월되지 않은 이벤트"
+                    if mode == "LIVE" and not settings.verified("POST_CLOSE_EXPIRY"):
+                        return "carry_contract: POST_CLOSE_EXPIRY 미검증"
+                if qty is None or limit_price is None or int(qty) < 1 or Decimal(limit_price) <= 0:
+                    return "order_size: 수량·가격 없음"
+                if int(qty) > settings.max_order_qty or Decimal(limit_price) * int(qty) > settings.max_order_notional_usd:
+                    return f"order_cap: 주문 상한 초과 ({qty}주 × {limit_price})"
+                if mode == "LIVE" and int(qty) > settings.live_qty_cap():
+                    return f"order_cap: LIVE 수량 제한 {settings.live_qty_cap()}주 ({qty}주)"
+                if quote_as_of is None:
+                    return "quote: 시세 시각 없음"
+                if ny_date(quote_as_of) != mc.session.day or quote_as_of < mc.session.open_ts:
+                    return "quote: 당일 정규장 시세가 아님"
+                age = now - quote_as_of
+                if age > settings.quote_max_age_sec or age < -60:
+                    return f"quote_stale: 시세 {int(age)}초 경과 (한도 {settings.quote_max_age_sec}초)"
+                if mode == "LIVE":
+                    try:
+                        if store.scanner_buy_in_flight_db(db, pos["ticker"]):
+                            return "scanner_buy_in_flight: 같은 계좌·종목 Scanner 미확정 매수"
+                    except ScannerJournalUnreadable as exc:
+                        return f"scanner_journal_unreadable: {exc}"
+                self.settings = settings
+                return None
+
+        return Gate()
 
     def _guard(self, mode):
         if self.schema_block:
@@ -1411,12 +1477,13 @@ class Engine:
         evidence["claim"] = [{"quote_as_of": q.as_of, "ref": str(ref), "limit": str(price), "qty": qty,
                               "sellable": int(h["sellable"]), "held": int(h["qty"])}]
         try:
+            # 실거래 스위치·API 계약·재주문 스위치·한도는 게이트가 같은 트랜잭션에서 한 번 읽은 최신 설정으로 본다.
             order = self.store.claim_sell(
                 self.now(), owner=self.owner, event_id=ev["id"], kind=kind, qty=qty, ref_price=ref, ref_source=src,
-                quote_as_of=q.as_of, limit_price=price, settings=self.settings, guard=self._guard(mode),
+                quote_as_of=q.as_of, limit_price=price, settings=self.settings, guard=lambda: None,
                 clock=self.clock, sent_evidence=evidence,
-                gate=self._exec_gate(kind="sell", mode=mode, position_id=pos["id"], event_id=ev["id"],
-                                     quote_as_of=q.as_of, snapshot=snapshot))
+                gate=self._exec_gate(kind=kind, mode=mode, position_id=pos["id"], event_id=ev["id"],
+                                     quote_as_of=q.as_of, snapshot=snapshot, qty=qty, limit_price=price))
         except ClaimRefused as exc:
             log.info("[자동손절] 매도 선점 거부: %s %s", pos["ticker"], exc)
             self._stat("claim_refused", str(exc).split(":")[0])
@@ -1486,10 +1553,11 @@ class Engine:
         try:
             order = self.store.claim_cancel(
                 self.now(), owner=self.owner, order_id=o["id"], expect_state=snap["order"]["state"],
-                guard=self._cancel_guard(ev["mode"]), lease_sec=self.settings.lease_sec, clock=self.clock,
+                guard=lambda: None, lease_sec=self.settings.lease_sec, clock=self.clock,
                 evidence={"quote_as_of": ctx["quote_as_of"], "replace_qty": ctx["replace_qty"]},
-                gate=self._exec_gate(kind="cancel", mode=ev["mode"], position_id=pos["id"], event_id=ev["id"],
-                                     quote_as_of=ctx["quote_as_of"], snapshot=snap, order_id=o["id"]))
+                gate=self._exec_gate(kind="CANCEL_FOR_REPLACE", mode=ev["mode"], position_id=pos["id"],
+                                     event_id=ev["id"], quote_as_of=ctx["quote_as_of"], snapshot=snap,
+                                     order_id=o["id"], qty=ctx["replace_qty"], limit_price=ctx["limit"]))
         except ClaimRefused as exc:
             # 사전 검증 이후 조건이 바뀜: 기존 주문 상태 유지. 다음 tick 에 주문 대조부터 다시 한다.
             self._stat("claim_refused", str(exc).split(":")[0])

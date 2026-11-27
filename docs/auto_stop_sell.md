@@ -418,6 +418,48 @@ RECOVERING ──(오류)──> FAULT          RECOVERING ──(같은·더 �
 - 스냅샷이 하나라도 다르면 선점을 거부하고 기존 주문 상태를 유지한다 (같은 PARTIAL_FILLED 여도 누적 체결·잔량이 바뀌면 거부). 다음 tick 에 주문 대조부터 다시 하고 새로 검증한다.
 - 트랜잭션 안에서는 네트워크 호출을 하지 않는다 (DB 읽기·쓰기와 env 재확인만).
 
+### 주문 종류별 안전 조건 매트릭스 (2026-11-27 Codex 3차 리뷰 반영)
+
+주문 종류: `ORIGINAL`(첫 매도), `REPLACE`(취소 확정 후 잔여 재주문), `CARRY_OVER`(다음 정규장 첫 매도), `CANCEL_FOR_REPLACE`(재주문 목적 취소). 게이트는 호출부의 주문 종류와 이벤트의 실제 다음 주문 종류가 같은지 확인하고(취소 제외), 알 수 없는 종류·최신 설정 조회 실패는 거부한다(fail closed). 최신 설정은 선점 트랜잭션 안에서 **한 번** 읽고, `claim_*` 의 재주문 한도·lease 판단도 같은 설정 객체를 쓴다.
+
+✓ = 적용(사전 검증 후 바뀌면 거부), – = 해당 없음, 정책 = 기존 정책 유지. 매개변수화 테스트: `tests/test_auto_stop_gate_matrix.py`.
+
+| 조건 | ORIGINAL S/L | REPLACE S/L | CARRY_OVER S/L | CANCEL_FOR_REPLACE S/L |
+|---|---|---|---|---|
+| lease·현재 시각 (잠금 획득 후 시각) | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| 정규장·cutoff | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| 운영 모드 = 주문 모드 | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| Kill Switch | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| 주문 활성화 스위치 (KIWOOM_TRADING_ENABLED·ACCOUNT1_ORDER_ENABLED 등) | –/✓ | –/✓ | –/✓ | –/✓ |
+| 재주문 스위치 (LIVE `REPLACE_ENABLED` / SHADOW `SHADOW_REPLACE_ENABLED`) | –/– | ✓/✓ | –/– | ✓/✓ |
+| 세션·이벤트 재주문 한도 | –/– | ✓/✓ | –/– | ✓/✓ |
+| 이월 정책 (이월 횟수 한도, 오늘 세션 이월, LIVE `POST_CLOSE_EXPIRY`) | –/– | –/– | 정책/정책 | –/– |
+| API Contract Gate (`LIVE_REQUIRED`, 취소는 `UST20003_PARTIAL_CANCEL` 추가) | –/✓ | –/✓ | –/✓ | –/✓ |
+| 전체·종목 장애 보류 | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| 포지션·이벤트 상태 | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| 일시중지 | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| 주문·체결·잔량·관리 수량 변경 (스냅샷) | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| 최신 주문 수량·금액 상한, LIVE 수량 제한 (취소는 계획된 재주문 기준) | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| 시세 유효성 (당일 정규장, 120초) | ✓/✓ | ✓/✓ | ✓/✓ | ✓/✓ |
+| Scanner 미확정 매수 (같은 account1·종목) | –/✓ | –/✓ | –/✓ | –/✓ |
+
+해당 없음의 이유
+- 주문 활성화 스위치·API Contract Gate·Scanner 미확정 매수 (SHADOW): SHADOW 는 실계좌 주문 클라이언트가 없고(가상 주문만), 실계좌 주문 상태와 충돌하지 않는다. 기존 SHADOW 정책과 같다.
+- 재주문 스위치·재주문 한도 (ORIGINAL, CARRY_OVER): 재주문이 아니다. 재주문 카운터를 올리지 않는 기존 정책(주문 종류와 카운터 표)과 같다.
+- 이월 정책 (CARRY_OVER 외): 이월 주문에만 해당한다. `_rollover` 가 이월 시 확인하는 조건(이월 횟수, LIVE `POST_CLOSE_EXPIRY`)을 선점 때 다시 확인한다. 이월 주문의 적용 조건: 직전 정규장에 이벤트의 모든 주문이 종료·체결 확정되어 CARRY_OVER 대기였고, 다음 정규장에 이월 횟수가 한도 이내이며, 이전 주문 이력이 있을 것 (없으면 ORIGINAL).
+
+### Scanner 미확정 매수 확인
+
+- Scanner 매수의 미확정 정의(`trading/scanner_buy_orders.py`, `store.SCANNER_IN_FLIGHT_SQL`): SENDING, UNKNOWN, 그리고 SUBMITTED 이면서 브로커 최종 상태(FILLED·CANCELLED·REJECTED)가 확인되지 않은 주문(미체결 OPEN·부분체결 PARTIAL·미조회 포함). PREPARED(미전송)·BLOCKED·REJECTED·ABANDONED·RESOLVED_MANUAL 은 증권사에 살아 있는 주문이 아니다.
+- LIVE `claim_sell`·`claim_cancel` 의 선점 트랜잭션 안에서 같은 `db` 객체로 확인한다 (`AutoStopStore.scanner_buy_in_flight_db`, 새 연결·중첩 트랜잭션 없음). 사전 검사(`_send`, 취소 전 검증)도 같은 SQL 을 쓴다.
+- 표가 없으면 미확정 없음으로 본다: Scanner 매수 모듈은 첫 사용 때 같은 저널에 `CREATE TABLE IF NOT EXISTS` 로 표를 만들므로, 표가 없다는 것은 그 저널에서 Scanner 매수가 한 번도 준비되지 않았다는 뜻이다. 선점 트랜잭션이 쓰기 잠금을 쥐고 있는 동안 다른 연결은 표를 만들거나 행을 넣을 수 없다.
+- 표가 있는데 조회가 실패하면(열 누락 등 스키마 불일치, SQLite 오류) `ScannerJournalUnreadable` 로 선점을 거부한다.
+
+**반대 방향 경쟁 (Scanner 매수 선점 → 자동손절 매도) — 교차 시스템 LIVE 차단 조건**
+- Scanner 매수의 `prepare()` 는 Scanner 미확정만, `execute()` 의 선점 갱신(PREPARED→SENDING)은 아무 교차 확인 없이 진행한다. 자동손절 LIVE 매도가 SENDING·SUBMITTED·CANCEL_* 인 같은 종목에 Scanner 매수가 나갈 수 있다 (이번 PR 범위 밖, 코드 변경 없음).
+- 같은 종목에 매수·매도 주문이 동시에 살아 있을 수 있으므로, **LIVE 전환 전 Scanner 매수 경로에 자동손절 미확정 주문 확인을 추가하는 별도 승인 작업이 필요하다.** 그전까지 LIVE 는 다른 게이트(미검증 API 계약)로도 차단되어 있다.
+- 두 시스템의 확인을 각각의 쓰기 트랜잭션 안에 두면 선점 시점의 상호 배제는 보장되지만, SQLite 트랜잭션과 증권사 API 를 원자적으로 묶을 수는 없다 (아래 "보장 범위").
+
 **선점과 외부 전송의 보장 범위 (원자성의 한계)**
 - SQLite 트랜잭션과 증권사 HTTP 요청은 하나로 묶을 수 없다. 선점 시점 = 위 조건을 모두 확인하고 SENDING / CANCEL_SENDING 을 커밋한 시점이다. 이 커밋에 `sent_at`(취소는 `cancel_sent_at`)과 근거 증거가 함께 들어가며, 커밋 직후 다른 DB·API 작업 없이 바로 요청을 보낸다.
 - 선점 이후 전송 전 단계에서 증권사로 나가지 않았음이 확실한 실패(입력 검증 `KiwoomError`)는 기존대로 NOT_SENT(취소는 원상태 + `cancel_rejected`)로 처리한다.
@@ -569,6 +611,24 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
 - 공백 = 감시 시작(등록 또는 개장) → 첫 성공, 성공 → 다음 성공, 마지막 성공 → 감시 종료(관리 종료·트리거·장 마감·현재). 그날 성공이 0회면 감시 구간 전체가 하나의 공백이다.
 - 종목·position_id 별로 `gaps.max_sec`(최대 공백), `max_normal_sec`(종목 장애·전체 보류·일시중지가 없던 정상 상태 공백의 최대), `over_120`, `normal_over_120`, 120초 초과 공백마다 시작·종료·지속 시간·정상 상태 여부·원인(`cause`)·공백 안 슬롯 분류·상태 전이(`quote_fault`/`quote_recovered`/`pause`/`resume`/`global_hold_on|off`)를 보여 준다. 전체 합계는 `watch.gaps`.
 - Scheduler tick 간격(`ticks.max_gap_sec`), 시세 신선도(`max_quote_age_sec`), 실제 감시 공백(`gaps`)은 서로 다른 지표다.
+
+### 정상 상태 공백 판정 (2026-11-27 Codex 3차 리뷰 반영)
+
+- 정상 여부를 슬롯 분류만으로 판단하지 않는다. 감사 기록 **전체 이력**으로 상태 구간을 복원해 공백과 겹치는지 본다 (장 시작 이전부터 이어진 상태 포함).
+  - 일시중지: `pause`/`resume` (대상 position_id)
+  - 종목 장애: `quote_fault`/`quote_recovered` (대상 `mode:ticker`, position_id) + 기존 카운터 이행 `quote_health_migrate`. 대체 조회 경로의 장애·복구도 감사 기록을 남긴다.
+  - 전체 보류: `global_hold`
+- 정상 상태 공백 = 공백 전 구간이 위 어떤 상태와도 겹치지 않고 보류·일시중지 슬롯도 없는 공백. 상태가 섞인 공백은 정상 상태가 아니다. 각 공백에 겹친 상태(`states`), 상태 전이, 원인(`global_hold`/`symbol_fault`/`paused`/`watch_fail`/`invalid`/`schedule_missed`/`interval`)을 붙이고, 감시 시작 시점의 상태(`state_at_start`)를 보인다.
+- 오늘 보고서에서 현재 상태(포지션 `auto_paused`, 종목 상태)가 복원 결과와 맞지 않으면(감사 기록 없는 변경) 정상 상태 판정을 하지 않는다: `gaps.measurable=false`, `max_normal_sec=null`, `data_quality: state_unaudited`. 실제 전체 공백(`max_sec`, `over_120`)은 그대로 보인다.
+- 지표: 전체 실제 최대 공백(`max_sec`), 정상 상태 공백의 최대(`max_normal_sec`), 120초 초과 전체 공백 수(`over_120`), 120초 초과 정상 상태 공백 수(`normal_over_120`).
+
+### 보고서 데이터 형식 (LEGACY / SLOT_V2 / MIXED)
+
+- 엔진은 그 거래일·모드에서 처음 tick 을 돌 때 `metric='slot_v2_since'` 에 시각을 남긴다 (장 전 tick 포함, 한 번만).
+- `LEGACY`: 표식이 없는 날 (예: 2026-11-25). 기존 집계로 복원한다 — 기대 = 감시 구간 ÷ 감시 주기 내림, 정상 = 티커별 `quote_ok`, 누락 = 기대 − 정상. 슬롯 분류·성공 시각·최대 공백은 측정 불가(`null`, `gaps.measurable=false`). 같은 날 같은 티커 포지션이 여럿이면 포지션별로 나누지 않고(`ok_checks=null`, `data_quality: legacy_ticker_shared`) `watch.legacy_ticker_totals` 에 티커 합계로 한 번만 센다.
+- `SLOT_V2`: 모든 포지션의 감시 시작이 표식 이후(허용 오차 = tick 주기 + 3초). position_id 슬롯·성공 시각으로 전부 측정한다.
+- `MIXED`: 표식이 있지만 감시가 표식 전에 시작된 포지션이 있음 (장중 버전 전환). 그 포지션의 정상·기대는 기존 일계 집계 기준(전 구간, 신규 코드도 같은 `quote_ok` 를 슬롯당 1회 올리므로 중복 없음), 슬롯·공백은 표식 이후만 측정(`gaps.partial=true`, `measured_from`, `data_quality: mixed_format`).
+- 보고서 생성은 읽기 전용이다. 기존 저널·저장된 보고서를 바꾸지 않는다.
 
 ### 저장량과 보고서 성능 (측정)
 
