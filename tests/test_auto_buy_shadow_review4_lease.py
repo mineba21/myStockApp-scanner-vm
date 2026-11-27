@@ -257,7 +257,7 @@ def test_old_worker_resuming_after_lease_loss_cannot_write_or_become_current(sha
             with tx(db):
                 db.execute("UPDATE ab_orders SET state='FILLED' WHERE run_id=?", (a,))
                 db.execute("UPDATE ab_daily SET equity=0 WHERE run_id=?", (a,))
-        with pytest.raises(Exception, match="terminal|only one CURRENT"):
+        with pytest.raises(Exception, match="terminal|only one CURRENT|contract transition"):
             with tx(db):
                 db.execute("UPDATE ab_runs SET status='CURRENT' WHERE run_id=?", (a,))
     finally:
@@ -298,7 +298,7 @@ def test_concurrent_replays_only_one_becomes_current(shadow, prod):
     assert "BUILDING" not in runs.values()
     db = connect_rw(shadow.journal_path)
     try:                                            # CURRENT 전환 경쟁: 두 번째 CURRENT 는 DB 가 거부
-        with pytest.raises(Exception, match="only one CURRENT|terminal"):
+        with pytest.raises(Exception, match="only one CURRENT|terminal|contract transition"):
             with tx(db):
                 db.execute("UPDATE ab_runs SET status='CURRENT' WHERE run_id=?", (parent,))
     finally:

@@ -5,16 +5,152 @@
 2026-11-26 Codex 재리뷰(2차, FAIL: 신규 P1 1건·P2 3건)를 같은 브랜치에서 반영했다 (아래 'Codex 재리뷰(2차) 반영').
 같은 날 Codex 최종 재리뷰(신규 P1 1건·P2 2건·S5 이력)를 반영했다 (아래 'Codex 최종 재리뷰 반영').
 2026-11-27 Codex 재리뷰(head 9a315db, FAIL: P1 1건·P2 4건·운영 안전성)를 공통 안전 원칙과 장애 주입 테스트로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27)').
-같은 날 Codex 재리뷰(head c27d9d0, 신규 P1 2건·P2 1건)를 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)'). SHADOW 활성화는 계속 보류다.
+같은 날 Codex 재리뷰(head c27d9d0, 신규 P1 2건·P2 1건)를 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)').
+같은 날 Codex 독립 재리뷰(head 36e5d2f, P1 3건·P2 2건)를 테이블별 데이터 불변성 계약으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)'). SHADOW 활성화는 계속 보류다.
 - **승인 범위:** 로컬 구현·테스트 (사용자 승인: P7/P8 검토 후 I1~I7 SHADOW 구현, 이후 P1·P2 정합성 보완), feature branch `feature/auto-buy-shadow` 커밋·Push·Draft PR.
 - **아직 하지 않은 것:** main 병합, VM 배포, 저널 Migration 실행. Codex 재리뷰를 통과하기 전에는 기본 OFF 배포도, SHADOW 활성화도 하지 않는다.
 - **판정은 그대로 유지한다.**
   - 기존 NOT_RECOMMENDED
   - B01 = NEED_MORE_DATA (전향적 SHADOW 검증 대상만)
 - **근거:** `backtest/entry_strategy` P0~P7 보고서, `backtest/entry_strategy/docs/AUTO_BUY_SHADOW_PLAN.md`, `AUTO_BUY_S01_LINK_DESIGN.md` v2
-- **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26, 동결) + `ab0004`(종료 run 원장·감사 이력 불변성, 2026-11-27, 동결) + `ab0005`(충돌 교체 차단·남은 감사 자료 불변, 2026-11-27). 최종 목표 리비전은 `ab0005`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
+- **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26, 동결) + `ab0004`(종료 run 원장·감사 이력 불변성, 2026-11-27, 동결) + `ab0005`(충돌 교체 차단·남은 감사 자료 불변, 2026-11-27, 동결) + `ab0006`(테이블별 데이터 불변성 계약, 2026-11-27). 최종 목표 리비전은 `ab0006`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
   - 확인(2026-11-25): Git 이력에 `trading/auto_buy` 커밋 없음(원격도 main 뿐), 로컬 `.env` 저널 경로 미설정, 프로젝트 내 SQLite 에 `ab_alembic_version` 없음. 이전 `ab0001` 이 적용된 파일은 개발 세션 임시 폴더의 데모·벤치 파일뿐이다. 운영 VM 은 Git 으로만 배포되고 이 코드가 Push 된 적이 없어 적용 이력이 없다 (VM 에 접속해 확인하지는 않았다).
   - 이 브랜치가 커밋·Push 된 이후에는 `ab0001` 을 바꾸지 않고 새 리비전으로만 바꾼다.
+
+## Codex 재리뷰 반영 (PR #14, 2026-11-27, head 36e5d2f)
+
+재리뷰 결과: 전체 테스트, P7-OPS 대조, 이전 결함 수정은 확인됐다. P1 3건·P2 2건이 재현돼 FAIL 을 수용했다.
+이번에는 개별 SQL 연산·컬럼에 보호 조건을 하나씩 붙이지 않았다. 대신 **테이블별 데이터 불변성 계약**(`journal_migrations/ddl_v6.py` 의 `CONTRACT`)을 정의하고, 트리거를 그 계약에서 만들고, 실제 스키마와 전수 대조한다. 전략·위험 계산·매매 엔진·UI 는 바꾸지 않았다.
+
+### 36e5d2f 에서 막히지 않던 변경 (조사 결과)
+
+리뷰 지적 외에도 같은 종류의 빈틈을 표 전체에서 찾았다. 아래는 36e5d2f(ab0005) 저널에서 활성(CURRENT) run 행을 대상으로 시도했을 때 성공한 변경이다.
+- 기본 연결: recursive_triggers OFF
+- 제품 연결: `connect_rw`, recursive_triggers ON
+
+| 종류 | 표·컬럼 | 기본 연결 | 제품 연결 |
+|---|---|---|---|
+| 동결 입력 컬럼 수정 | `ab_day_inputs`: day·frozen_by·strategy_version·config_hash·logic_hash, 계좌 저장 후 account_reason·account_fetched_at | 성공 | 성공 |
+| 숨은 rowid 교체 (`INSERT OR REPLACE … (rowid, 새 키)`, `UPDATE OR REPLACE SET rowid=`) | 정수 PK 별칭이 아닌 9개 표: `ab_bars`·`ab_day_inputs`·`ab_accounts`·`ab_eligibility`·`ab_account_runs`·`ab_decisions`·`ab_daily`·`ab_days`·`ab_fill_ledger` | 성공 (기존 행 삭제) | 차단 (recursive_triggers 로 삭제 거부가 동작) |
+| 음수 rowid INSERT | 위 9개 표 | 성공 | 성공 |
+| rowid 변경 (`SET rowid=`, 정수 PK 표 포함) | `ab_runs`·`ab_scan_captures`·`ab_orders`·`ab_positions`·`ab_reservations` 등. `BEFORE UPDATE OF <컬럼>` 트리거는 rowid 별칭으로 바꾸면 동작하지 않는다 | 성공 | 일부 (외래키로 차단된 표 제외) |
+| 활성 run 의 불변 컬럼 수정 | `ab_runs` reason·strategy_version·config_hash·logic_hash·created_at, `ab_orders` limit_price·stop_price·qty·target_day·signal_key·ticker, `ab_positions` entry_day·stop_price·order_id, `ab_reservations` sector·created_day, `ab_decisions`·`ab_daily`·`ab_days`·`ab_fill_ledger` 의 모든 값 컬럼 | 성공 | 성공 |
+| 상반된 적격 판단 재등록 (`INSERT OR IGNORE`) | `ab_eligibility` | 조용히 무시 | 조용히 무시 |
+
+### 테이블별 불변성 계약 (ab0006)
+
+분류는 다섯 가지다: 완전 불변 입력 · 추가 전용 감사 기록 · 최초 1회 입력 허용 · 활성 run 에서만 변경 · 런타임 상태 갱신 허용.
+
+| 분류 | 표 | 행 식별 | PK·UNIQUE | 변경 허용 컬럼 | 상태 전환·최초 1회 | 신규 INSERT | 기존 행 변경 / 삭제 | 충돌 처리 |
+|---|---|---|---|---|---|---|---|---|
+| 완전 불변 입력 | `ab_bars` | 복합 PK + 숨은 rowid | (day, ticker, input_rev) | 없음 | - | 새 수집 결과는 새 input_rev 행으로만 추가 (기존 행 교체 없음) | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 완전 불변 입력 | `ab_signal_snapshots` | 정수 PK id (= rowid) | (id) · (scan_log_id, signal_key) | 없음 | - | 제한 없음 (키 충돌만 거부) | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 완전 불변 입력 | `ab_accounts` | TEXT PK id + 숨은 rowid | (id) | 없음 | - | 제한 없음 (키 충돌만 거부) | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 추가 전용 감사 기록 | `ab_events` | 정수 PK id AUTOINCREMENT (= rowid) | (id) | 없음 | - | 자동 id 로 추가만 | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 추가 전용 감사 기록 | `ab_eligibility` | 복합 PK + 숨은 rowid | (snapshot_id, pool, strategy_version) | 없음 | - | 제한 없음 (키 충돌만 거부) | 변경 불가 / 거부 | 같은 키 + 같은 판단(eligible·reasons·decision_role·logic_hash)만 멱등 무시, 판단이 다르면 거부 (INSERT OR IGNORE 포함). rowid 충돌 거부 |
+| 최초 1회 입력 허용 | `ab_day_inputs` | TEXT PK day + 숨은 rowid | (day) | account_status, account_reason, account_snapshot, account_fetched_at | 계좌 4필드: 모두 NULL → (OK + JSON 스냅샷 + 조회 시각) 또는 (UNAVAILABLE·LATE + 스냅샷 없음 + 조회 시각), 한 번에 함께, 이후 변경 불가 | 계좌 4필드 NULL. FROZEN 은 결정 스캔·신호 해시 필수, NO_DECISION_SCAN 은 둘 다 없음 | 계좌 4필드만 최초 1회 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 최초 1회 입력 허용 | `ab_scan_captures` | 정수 PK scan_log_id (= rowid) | (scan_log_id) | rows_captured, strict_rows | 수집 건수: (0, 0) → 불변 스냅샷의 실제 건수(전체·Strict 통과)와 같은 값으로 1회 | 제한 없음 (키 충돌만 거부) | 수집 건수만 최초 1회 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_runs` | 정수 PK run_id (= rowid) | (run_id) | status, through_day, completed_at, summary | BUILDING→CURRENT·FAILED, CURRENT→SUPERSEDED. FAILED·SUPERSEDED 는 변경 불가 (ab0004) | CURRENT 는 1개만 (ab0003) | BUILDING·CURRENT run 의 허용 목록 컬럼만 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_account_runs` | 복합 PK + 숨은 rowid | (run_id, account_id) | initial_cash, cash, realized_pnl, updated_at | - | run 이 BUILDING·CURRENT 일 때만 (ab0003 fence_insert) | OLD·NEW run 이 BUILDING·CURRENT 일 때 허용 목록 컬럼만 (ab0003·ab0004 fence). 삭제 거부 (ab0004) / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_decisions` | 복합 PK + 숨은 rowid | (run_id, account_id, snapshot_id) | 없음 | - | run 이 BUILDING·CURRENT 일 때만 (ab0003 fence_insert) | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_orders` | 정수 PK id (= rowid) | (id) · (run_id, account_id, signal_key) · (run_id, account_id, ticker) WHERE state IN ('PENDING','PARTIAL','FILL_UNKNOWN') | filled_qty, avg_fill_price, state, fill_kind, updated_at, details | PENDING→그 외 상태, PARTIAL→PENDING 외 상태. 종결 상태(FILLED·UNFILLED·FILL_UNKNOWN 등)는 변경 불가. filled_qty 감소 불가 | run 이 BUILDING·CURRENT 일 때만 (ab0003 fence_insert) | OLD·NEW run 이 BUILDING·CURRENT 일 때 허용 목록 컬럼만 (ab0003·ab0004 fence). 삭제 거부 (ab0004) / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_reservations` | 정수 PK order_id (= rowid) | (order_id) | reserved_cash, planned_risk, state, closed_day, updated_at | ACTIVE→ACTIVE·CONVERTED·RELEASED. CONVERTED·RELEASED 는 변경 불가 | run 이 BUILDING·CURRENT 일 때만 (ab0003 fence_insert) | OLD·NEW run 이 BUILDING·CURRENT 일 때 허용 목록 컬럼만 (ab0003·ab0004 fence). 삭제 거부 (ab0004) / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_positions` | 정수 PK id (= rowid) | (id) · (order_id) · (run_id, account_id, ticker) WHERE state = 'OPEN' | qty, entry_price, cost, risk0, last_close, last_close_day, price_status, unresolved_since, state, exit_day, exit_price, exit_reason, proceeds, pnl, r_multiple, updated_at, zero_volume_days, last_zero_volume_day | OPEN→CLOSED (CLOSED 는 변경 불가), price_status OK→UNRESOLVED (되돌림 불가) | run 이 BUILDING·CURRENT 일 때만 (ab0003 fence_insert) | OLD·NEW run 이 BUILDING·CURRENT 일 때 허용 목록 컬럼만 (ab0003·ab0004 fence). 삭제 거부 (ab0004) / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_stop_events` | 정수 PK id (= rowid) | (id) · (position_id) | 없음 | - | run 이 BUILDING·CURRENT 일 때만 (ab0003 fence_insert) | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_daily` | 복합 PK + 숨은 rowid | (run_id, account_id, day) | 없음 | - | run 이 BUILDING·CURRENT 일 때만 (ab0003 fence_insert) | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_days` | 복합 PK + 숨은 rowid | (run_id, day) | 없음 | - | run 이 BUILDING·CURRENT 일 때만 (ab0003 fence_insert) | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 활성 run 에서만 변경 | `ab_fill_ledger` | 복합 PK + 숨은 rowid | (order_id, cum_filled_qty) | 없음 | - | 주문이 있고 그 run 이 BUILDING·CURRENT 일 때만 (ab0003·ab0004) | 변경 불가 / 거부 | 기존 PK·UNIQUE·rowid 충돌 거부 (REPLACE·UPSERT·UPDATE OR REPLACE 포함, ab0005·ab0006) |
+| 런타임 상태 갱신 허용 | `ab_runtime` | TEXT PK key + 숨은 rowid | (key) | value, updated_at | - | 제한 없음 | upsert 허용 (운영 상태 kv) / 허용 (제품 경로 없음) | ON CONFLICT(key) DO UPDATE (제품 upsert) |
+| 런타임 상태 갱신 허용 | `ab_alembic_version` | TEXT PK version_num | (version_num) | version_num | - | Alembic 전용 | Alembic 전용 / Alembic 전용 | Alembic 전용 |
+| 런타임 상태 갱신 허용 | `sqlite_sequence` | SQLite 내부 (AUTOINCREMENT 순번) | - | name, seq | - | SQLite 내부 | SQLite 내부 / SQLite 내부 | SQLite 내부 |
+
+계약에서 만든 트리거 (보호 대상 17개 표 전부, 연결 설정과 무관):
+- **숨은 rowid:** `BEFORE INSERT` 에서 같은 rowid 가 있으면 거부한다. `AFTER INSERT` 에서는 확정 rowid ≤ 0 이면 거부한다. `BEFORE UPDATE` 에서는 rowid 를 바꿀 수 없다 (`rowid`·`oid`·`_rowid_`·정수 PK 별칭 모두 같은 값이다).
+  - 자동 생성 rowid 는 `BEFORE INSERT` 시점에 아직 정해지지 않아 `NEW.rowid` 가 -1 로 보인다 (SQLite 3.53.4 확인).
+  - 그래서 0 이하 rowid 는 `AFTER INSERT` 에서 막는다. 이렇게 하면 자동 생성(-1)은 기존 행과 충돌할 수 없고, 명시적 음수 rowid 는 거부된다.
+- **변경 허용 목록:** `mutable` 에 없는 컬럼과 PK·UNIQUE 키 컬럼은 최초 INSERT 이후 바꿀 수 없다. 변경 금지 목록이 아니라 허용 목록이므로, 컬럼을 추가하면 계약에 분류하기 전까지 테스트가 실패한다.
+- **상태 전환:**
+  - `ab_runs`: BUILDING→CURRENT·FAILED, CURRENT→SUPERSEDED
+  - `ab_orders`: 종결 상태는 변경 불가, PENDING 으로 되돌림 불가, filled_qty 감소 불가
+  - `ab_positions`: CLOSED 는 변경 불가, UNRESOLVED→OK 불가
+  - `ab_reservations`: CONVERTED·RELEASED 는 변경 불가
+- **최초 1회 입력:**
+  - `ab_day_inputs` 계좌 4필드: 모두 NULL 일 때 한 번에 저장한다. 허용 조합은 (OK + JSON 스냅샷 + 조회 시각) 또는 (UNAVAILABLE·LATE + 스냅샷 없음 + 조회 시각)뿐이다.
+  - `ab_day_inputs` INSERT: 계좌 필드는 NULL 이어야 한다. FROZEN 은 결정 스캔·신호 해시가 있어야 하고, NO_DECISION_SCAN 은 둘 다 없어야 한다.
+  - `ab_scan_captures` 수집 건수: (0, 0) 에서 불변 스냅샷의 실제 건수로 1회만 바꿀 수 있다.
+- **NULL 처리:** 허용 조건은 `COALESCE(…, 0)`·`IS` 로 작성했다. SQL 의 NULL 3값 논리 때문에 조건이 NULL 이 되어 검사를 건너뛰는 일이 없게 하기 위해서다. 전수 테스트가 처음 작성한 트리거에서 이 문제(상태 없이 조회 시각만 쓰는 갱신 통과)를 찾아 고쳤다.
+- **앱 경로 (`store_account`):**
+  - 허용되지 않은 상태, 또는 OK 인데 스냅샷이 없으면 `AccountInputInvalid` 로 쓰지 않는다.
+  - 저장은 같은 트랜잭션에서 4필드가 비어 있을 때만 갱신하는 조건부 갱신이다. 갱신 후 다시 읽어 쓴 값과 동결 필드가 그대로인지 확인하고, 다르면 롤백한다.
+- **WITHOUT ROWID 대안:** 비교했지만 쓰지 않았다. 9개 표를 새로 만들어 데이터를 복사하고, 그 표들을 참조하는 트리거 99개를 다시 만들어야 해서 기존 저널과 Migration 에 미치는 영향이 크다. 트리거 방식으로 같은 보호를 얻으므로 표 재구성은 하지 않았다.
+
+### P1 — 거래소 세션 설정 일치
+
+- runner 가 `ChartFetcher(settings=job settings)` 를 만들고, ChartFetcher 는 그날 세션(`calendar.session(day, settings)`)을 `parse_chart(…, session=…)` 에 넘긴다. 추가 휴장일·조기폐장일 설정을 무시하고 기본 캘린더를 따로 조회하지 않는다.
+- 신규 수집·결측 복구·replay 는 모두 같은 job 공급자를 쓰므로 같은 세션이 적용된다.
+- 실패 근거에 `session_close_et`·`bar_time_et` 를 남긴다.
+- 설정상 13:00 ET 폐장일에 15:00 ET 타임스탬프와 `volume:0` 인 HTTP 200 응답이 오면 `BAR_TIME_OUTSIDE_SESSION` 결측이다.
+  - `FILL_UNKNOWN`·`DATA_INCOMPLETE` 로 남는다 (`ZERO_VOLUME_EXPIRED`·COMPLETE 없음).
+  - 결측 복구에서 같은 응답이 다시 와도 거부된다.
+  - 정상 일봉을 받으면 replay 로 복구된다.
+- 정상 일봉과 실제 조기폐장일(기본·사용자 추가) 응답은 계속 받아들인다. 확인한 경계:
+  - 장 시작 60초 전, 장 마감 시각, 1초 초과
+  - DST 전환 전후
+  - 기본·사용자 추가 휴장일
+- 추가 휴장일·조기폐장일은 설정 해시에 들어간다. 처리 후 설정을 바꾸면 `VersionMismatch` 로 멈추고, 동결 입력·원장은 바뀌지 않는다 (테스트로 확인).
+
+### P2 — ab_eligibility 충돌 정책
+
+- 같은 키에 **같은 판단**(eligible·reasons·decision_role·logic_hash)을 다시 넣는 경우만 멱등 무시한다 (기존 행 유지, rowcount 0). 재등록 시 달라질 수 있는 기록 시각 `created_at` 은 판단 내용과 구분해 비교하지 않는다.
+- 판단이 다르면 `INSERT OR IGNORE`·`REPLACE`·일반 INSERT 모두 `eligibility conflict` 로 거부한다.
+- 앱(`record_eligibility`)이 충돌을 받으면 다음 순서로 처리한다. 경합 상황은 테스트로 재현했다.
+  1. 이번 기록 트랜잭션 전체를 롤백한다.
+  2. ERROR 이벤트 `eligibility_conflict` 를 남긴다 (스냅샷·풀·버전·logic_hash).
+  3. `EligibilityConflict` 를 던져 job 처리를 멈춘다.
+
+### P2 — Yahoo 호출 제한 카운터
+
+- **증가:** job 이 RATE_LIMITED 로 멈추면 늘린다. 같은 job 에 정상 응답이 있어도 제한이 우선이다.
+- **초기화:** **정상 수집이 실제로 확인된 job** 에서만 0 으로 되돌린다.
+  - 정상 수집 = 그 job 에서 받은 실제 신규 응답 중 일봉 응답 계약을 통과한 것이 1건 이상 (`fetch.contract_ok`). HTTP 200 만으로는 인정하지 않는다.
+  - 거래량만 미확인인 응답은 계약(주기·종목·시간대·세션·OHLC)을 통과했으므로 정상 수집으로 인정한다. 거래량 자체는 기존 미확인 정책을 따른다.
+- **보존:** 아래 경우에는 연속 횟수와 warned 를 그대로 둔다.
+  - 요청 0건
+  - Scanner 실행으로 보류
+  - 캐시만 사용
+  - 요청했지만 정상 응답 없이 실패 (계약 위반·HTTP 오류·연속 실패 중단·예산 소진)
+  - 판단 불가
+- `YFRateLimitError` 즉시 중단 정책은 그대로다.
+
+### 수정 전 실패·수정 후 통과
+
+`tests/test_auto_buy_shadow_review7_repro.py` 는 36e5d2f 와 현재 코드에 공통인 API 만 쓴다. pytest 가 19건을 수집해 실행했다.
+- **36e5d2f:** 18건이 동작 단언으로 실패했고 1건이 통과했다.
+  - 실패 내역: 동결·계좌 필드 수정 12건, 숨은 rowid 교체 (기본 연결) 1건, 사용자 조기폐장 E2E 1건, 상반 판정 2건, 카운터 초기화 2건
+  - 통과 1건: 숨은 rowid 교체 (제품 연결). 36e5d2f 의 제품 연결은 recursive_triggers=ON 이라 이미 막혔다.
+- **수정 후:** 19건 모두 통과한다.
+
+새 API 기준 테스트를 36e5d2f 에서 돌린 결과 (모듈·API 부재는 결함 재현으로 세지 않는다):
+- `review7_contract`(1,195건)·`review7_migration`(9건): `ddl_v6` 모듈이 없어 수집 단계에서 중단된다.
+- `review7_session`(32건): 22건은 API 부재(`parse_chart(settings=…)`·`ChartFetcher(settings=…)`·`contract_ok`), 8건은 동작 실패(카운터 보존 6건, runner 의 설정 전달 1건, Scanner 보류 job 의 카운터 1건), 2건 통과.
+
+### Migration `ab0006`
+
+격리된 임시 SQLite 에서 확인했다 (`tests/test_auto_buy_shadow_review7_migration.py`). 운영 Migration 은 실행하지 않았다.
+- 신규 생성
+- ab0001→ab0006, ab0005→ab0006: 데이터·감사 이력을 보존하고, 기본·제품 연결 모두에서 숨은 rowid·동결 필드·계좌 재수정을 차단한다
+- **사전 데이터 검사:** 계약과 맞지 않는 기존 데이터(rowid ≤ 0, 계좌·결정 조합 오류, 수집 건수 불일치)가 있으면 중단하고 원본은 바꾸지 않는다
+- 실패 시 ab0005 유지·원본 무변경
+- 재실행 `ALREADY_CURRENT`
+- `--check` 읽기 전용
+- OFF 에서 파일·DDL 없음
+- 0600·부속 파일·하드링크·S01 저널 거부는 기존 Migration 테스트가 ab0006 head 에서 통과한다
+
+### P7-OPS 대조와 쓰기 비용
+
+- P7-OPS 대조 도구(`backtest/entry_strategy/src/ops_parity.py`)는 거래일 입력을 직접 넣는다. 그래서 운영 확정과 같은 신호 집합 해시(`signal_set_hash`)를 함께 넣도록 맞췄다 (계약: FROZEN 은 해시 필수). 계산 결과에는 영향이 없다.
+- 결과: 23계좌·1,480거래일·진입 3,545건 일치, 판정 유지.
+- 트리거 추가에 따른 쓰기 비용은 같은 데이터의 SHADOW 재생 시간으로 비교했다: 36e5d2f 141.1초, ab0006 141.8초 (차이 약 0.5%, 로컬 macOS). 실제 VM 의 잠금 대기 시간은 운영 검증 체크리스트에서 따로 본다.
 
 ## Codex 재리뷰 반영 (PR #14, 2026-11-27, head c27d9d0)
 
@@ -805,8 +941,9 @@ Current Heat 는 여기에 들어가지 않는다.
 - **리비전:** `ab0001`(공개 후 동결, 변경 없음) → `ab0002`(거래량). `ab0002` 는 `ALTER TABLE … ADD COLUMN` 만 한다: `ab_bars.volume`·`volume_status`(CHECK), `ab_fill_ledger.bar_volume`, `ab_positions.zero_volume_days`(기본 0)·`last_zero_volume_day`. 시작 전에 대상이 정확히 `ab0001` 구조인지 확인하고 아니면 중단한다. downgrade 는 지원하지 않는다. 기존 행은 그대로이며 거래량은 NULL(미확인)이다.
 - **`ab0003`**: `ab_bars.volume_source`·`source_evidence` 열 추가(`ALTER TABLE … ADD COLUMN`)와 run fencing 트리거(위 '재계산 실행권 v2'). 시작 전에 대상이 정확히 `ab0002` 구조인지 확인한다. downgrade 는 지원하지 않는다. 기존 행의 출처는 NULL 이며, 그 행의 거래량 0 은 미확인으로 보고 원본 경로로 다시 확인한다.
 - **`ab0004`**: 종료 run 원장·감사 이력 불변성 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27)'). 시작 전에 대상이 정확히 `ab0003` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
-- **`ab0005`** (최종 목표 리비전): 충돌 교체(REPLACE·UPSERT) 차단과 남은 감사 자료 불변 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)'). 시작 전에 대상이 정확히 `ab0004` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
-- 런타임은 `ab0005` 만 받아들인다. `ab0001`~`ab0004` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
+- **`ab0005`**: 충돌 교체(REPLACE·UPSERT) 차단과 남은 감사 자료 불변 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)'). 시작 전에 대상이 정확히 `ab0004` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
+- **`ab0006`** (최종 목표 리비전): 테이블별 데이터 불변성 계약 트리거를 추가하고, 정책이 바뀐 ab0005 트리거 1개(`ab_eligibility_no_replace_insert`)만 교체한다 (위 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)'). 시작 전에 대상이 정확히 `ab0005` 구조이고 기존 데이터가 계약과 맞는지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
+- 런타임은 `ab0006` 만 받아들인다. `ab0001`~`ab0005` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
 - 기존 파일이면 백업한다. 실패해도 자동 복원하지 않는다. 새로 만든 뒤 upgrade 가 실패하면 빈 0600 파일이 남는다 (다음 실행에서 이어서 upgrade).
 
 ## AUTO BUY MONITOR (화면)
@@ -877,7 +1014,7 @@ Current Heat 는 여기에 들어가지 않는다.
    # 결과 CHECK_ONLY_WOULD_CREATE · exit=0 확인 후 별도 승인
    .venv/bin/python -m scripts.auto_buy_shadow_journal_migrate --env-file .env --backup-dir /var/backups/mystockapp --allow-create; echo "exit=$?"
    ```
-   - 결과의 `schema_version` 이 **`ab0005`**(최종 목표 리비전)인지 확인한다.
+   - 결과의 `schema_version` 이 **`ab0006`**(최종 목표 리비전)인지 확인한다.
    - 생성 후 권한 확인: `stat -c '%a %U' <저널 경로>` → `600 <서비스 사용자>` (경로는 운영자가 직접 입력, 출력은 권한만).
    - 백업에서 복원한 저널이면 먼저 `--check` 로 권한을 확인한다. 0600 이 아니면 `CHECK_FAILED_PERMISSIONS`(exit=2)이다. 승인 후 적용 모드를 다시 실행하면 `ALREADY_CURRENT` 와 함께 0600 으로 맞춰진다.
 2-1. **⛔ 활성화 전 조건 (모두 확인 후 별도 승인):**
@@ -890,6 +1027,7 @@ Current Heat 는 여기에 들어가지 않는다.
    - 수동 실행권 해제는 위 '수동 실행권 해제' 절차와 별도 승인으로만 한다
    - 일봉 응답 계약·호출 제한(`review6_contract`), 원장 충돌 교체 차단(`review6_ledger`), ab0005(`review6_migration`), 결함 재현(`review6_repro`)이 배포 커밋에서 통과
    - 위 '운영 검증 체크리스트'를 첫 주 관측 항목으로 등록
+   - 테이블별 불변성 계약(`review7_contract`), 세션·호출 제한 카운터(`review7_session`), ab0006(`review7_migration`), 결함 재현(`review7_repro`)이 배포 커밋에서 통과
 3. **⛔ SHADOW 활성화 (승인 후):** `AUTO_BUY_US_MODE=SHADOW` 로 재시작한다. 확인:
    - 스케줄러 job `auto_buy_us_shadow` 등록, S01 job 일정 변화 없음
    - 다음 정규 미국 스캔 후 수집 이력·후보 확정(`day_inputs`) 표시, 스캔 대조 미수집 0
@@ -903,7 +1041,7 @@ Current Heat 는 여기에 들어가지 않는다.
 | ID | 항목 | 상태 |
 |---|---|---|
 | S1 | 운영 DB 스냅샷 표(outbox) | **미승인 유지.** 별도 SHADOW DB 방식. 완전 보장이 필요하면 outbox Migration Plan 을 따로 승인 요청 |
-| S2 | SHADOW 전용 SQLite·Migration | 구현 완료 (`ab0001`~`ab0004` 동결 + `ab0005` 충돌 교체 차단, 최종 목표 `ab0005`), **Migration 실행 미승인** |
+| S2 | SHADOW 전용 SQLite·Migration | 구현 완료 (`ab0001`~`ab0005` 동결 + `ab0006` 테이블별 불변성 계약, 최종 목표 `ab0006`), **Migration 실행 미승인** |
 | S3 | 스위치·SHADOW job 배포 (기본 OFF) | 구현 완료, Codex 재리뷰 대기 (2026-11-27 재리뷰 반영분) |
 | S4 | 가상 계좌 구성 | P7 비교형 + 운영 검증형, B02 seed 20개 (총 46 계좌) |
 | S5 | 채택 검토 기준 | **확정** (위 기준 유지) |

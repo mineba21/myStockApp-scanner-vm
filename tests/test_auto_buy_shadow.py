@@ -21,7 +21,7 @@ from trading.auto_buy.shadow import risk as RK
 from trading.auto_buy.shadow.runner import run_shadow_job
 from trading.auto_buy.shadow.schema import schema_status, upgrade_journal
 from trading.auto_buy.shadow.snapshot import capture_scan_log, catch_up
-from trading.auto_buy.shadow.store import SchemaNotReady, connect_rw
+from trading.auto_buy.shadow.store import SchemaNotReady, connect_rw, tx
 from trading.auto_buy.shadow.vfills import Bar, check_stop, try_buy
 
 D1, D2, D3 = "2026-11-23", "2026-11-24", "2026-11-25"     # 월·화·수 (11-26 추수감사절 휴장)
@@ -164,8 +164,8 @@ def test_shadow_without_migration_does_not_create_journal(monkeypatch, tmp_path,
 
 def test_migration_roundtrip_and_refuses_foreign_db(tmp_path):
     p = str(tmp_path / "j.sqlite3")
-    assert upgrade_journal(p, allow_create=True) == "ab0005"    # head (… → ab0004 원장 불변 → ab0005 충돌 교체 차단)
-    assert upgrade_journal(p) == "ab0005"                      # 재실행 무변경
+    assert upgrade_journal(p, allow_create=True) == "ab0006"    # head (… → ab0005 충돌 교체 차단 → ab0006 테이블 계약)
+    assert upgrade_journal(p) == "ab0006"                      # 재실행 무변경
     assert schema_status(p)["schema_ready"]
     other = str(tmp_path / "orders.sqlite3")
     sqlite3.connect(other).execute("CREATE TABLE scanner_buy_orders(id INTEGER)").connection.close()
@@ -428,15 +428,14 @@ def test_partial_fill_increments_and_stop_cancels_buy_remainder(shadow, prod):
         assert EN.apply_fill(db, o["id"], 10, 100.5, D2) == 0                  # 같은 누적값 재전달 무시
         with pytest.raises(EN.FillAnomaly):
             EN.apply_fill(db, o["id"], 5, 100.5, D2)                          # 누적 감소 = 이상
-        db.execute("UPDATE ab_orders SET target_day='2026-11-30' WHERE id=?", (o["id"],))   # 잔량 미체결 유지
         db.execute("COMMIT")
         r = db.execute("SELECT * FROM ab_reservations WHERE order_id=?", (o["id"],)).fetchone()
         assert r["state"] == "ACTIVE" and r["reserved_cash"] > 0
-        inp = EN.DayInputs(day=D2, decision_status="NO_DECISION_SCAN", decision_scan_log_id=None, required=["AAA"],
-                           bars={"AAA": EN.BarRec(Bar(95, 96, 90, 91), "test", 0.0, 1)}, cands={}, acct=None,
-                           account_status=None, next_day=D3)
-        res = EN.process_account_day(db, EN.current_run(db), "SV1:P7C:B01", inp, shadow)
-        assert res["counts"]["stops"] == 1
+        # 잔량 미체결(PARTIAL) 상태에서 같은 날 S01 손절 (target_day 는 계약상 바꿀 수 없어 손절 처리를 직접 호출)
+        pos = db.execute("SELECT * FROM ab_positions WHERE order_id=?", (o["id"],)).fetchone()
+        reason, px = check_stop(Bar(95, 96, 90, 91), pos["stop_price"], pos["entry_day"] == D2)
+        with tx(db):
+            EN.close_position(db, pos, D2, px, reason)
         o2 = db.execute("SELECT * FROM ab_orders WHERE id=?", (o["id"],)).fetchone()
         ev = db.execute("SELECT * FROM ab_stop_events WHERE account_id='SV1:P7C:B01'").fetchone()
         assert o2["state"] == "CANCELLED_BY_STOP" and ev["qty"] == 10 and ev["cancelled_buy_qty"] == o["qty"] - 10

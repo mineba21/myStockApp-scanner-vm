@@ -12,8 +12,8 @@ import sqlite3
 from functools import lru_cache
 from pathlib import Path
 
-EXPECTED_SCHEMA_VERSION = "ab0005"
-SCHEMA_VERSIONS = ("ab0001", "ab0002", "ab0003", "ab0004", "ab0005")          # 순서대로 적용. 공개된 리비전은 바꾸지 않고 새 리비전만 더한다
+EXPECTED_SCHEMA_VERSION = "ab0006"
+SCHEMA_VERSIONS = ("ab0001", "ab0002", "ab0003", "ab0004", "ab0005", "ab0006")          # 순서대로 적용. 공개된 리비전은 바꾸지 않고 새 리비전만 더한다
 VERSION_TABLE = "ab_alembic_version"
 MIGRATIONS_DIR = Path(__file__).with_name("journal_migrations")
 OWNED_PREFIX = "ab_"
@@ -29,7 +29,9 @@ def _ddl(version: str) -> tuple:
     from trading.auto_buy.shadow.journal_migrations.ddl_v3 import DDL_V3
     from trading.auto_buy.shadow.journal_migrations.ddl_v4 import DDL_V4
     from trading.auto_buy.shadow.journal_migrations.ddl_v5 import DDL_V5
-    parts = {"ab0001": DDL_V1, "ab0002": DDL_V2, "ab0003": DDL_V3, "ab0004": DDL_V4, "ab0005": DDL_V5}
+    from trading.auto_buy.shadow.journal_migrations.ddl_v6 import DDL_V6
+    parts = {"ab0001": DDL_V1, "ab0002": DDL_V2, "ab0003": DDL_V3, "ab0004": DDL_V4, "ab0005": DDL_V5,
+             "ab0006": DDL_V6}
     out = ()
     for v in SCHEMA_VERSIONS[:SCHEMA_VERSIONS.index(version) + 1]:
         out += parts[v]

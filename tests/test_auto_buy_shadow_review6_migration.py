@@ -9,7 +9,7 @@ from tests.test_auto_buy_shadow_review5_s5 import _mode, _sha, _to, _triggers, m
 from trading.auto_buy.shadow.journal_migrations.ddl_v5 import DDL_V5
 from trading.auto_buy.shadow.schema import EXPECTED_SCHEMA_VERSION, schema_status
 
-V5_TRIGGERS = {s.split()[2] for s in DDL_V5}
+V5_TRIGGERS = {s.split()[2] for s in DDL_V5} - {"ab_eligibility_no_replace_insert"}   # ab0006 이 판정 충돌 정책으로 교체
 
 
 def _seed(j):
@@ -31,10 +31,10 @@ def _rows(j):
 
 
 def test_head_is_ab0005_and_new_journal_has_v5_triggers(menv):
-    assert EXPECTED_SCHEMA_VERSION == "ab0005"
+    assert EXPECTED_SCHEMA_VERSION == "ab0006"
     j = str(menv / "new.sqlite3")
     rep = M.run(j, str(menv / "bk"), allow_create=True)
-    assert rep["result"] == "OK" and rep["schema_version"] == "ab0005" and _mode(j) == 0o600
+    assert rep["result"] == "OK" and rep["schema_version"] == "ab0006" and _mode(j) == 0o600
     assert V5_TRIGGERS <= _triggers(j)
 
 
@@ -45,7 +45,7 @@ def test_upgrade_to_ab0005_preserves_ledger_and_audit(menv, start):
     _seed(j)
     before = _rows(j)
     rep = M.run(j, str(menv / "bk"))
-    assert rep["result"] == "OK" and rep["schema_version"] == "ab0005" and _mode(rep["backup"]) == 0o600
+    assert rep["result"] == "OK" and rep["schema_version"] == "ab0006" and _mode(rep["backup"]) == 0o600
     assert _rows(j) == before and V5_TRIGGERS <= _triggers(j)
     c = sqlite3.connect(j)                                               # 설정 없는 연결에서도 교체 차단
     try:
@@ -78,7 +78,7 @@ def test_check_mode_is_read_only_for_ab0004(menv):
     os.chmod(j, 0o600)
     sha = _sha(j)
     rep = M.run(j, str(menv / "bk"), check=True)
-    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0005"}
+    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0006"}
     assert _sha(j) == sha and not (menv / "bk").exists()
 
 

@@ -320,7 +320,7 @@ def test_terminal_run_ledger_is_immutable_but_normal_replay_still_works(shadow, 
     }
     try:
         for name, sql in blocked.items():
-            with pytest.raises(Exception, match="fenced|immutable|terminal"):
+            with pytest.raises(Exception, match="fenced|immutable|terminal|contract"):
                 with tx(db):
                     db.execute(sql)
     finally:

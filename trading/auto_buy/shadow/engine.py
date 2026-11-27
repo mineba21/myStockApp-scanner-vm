@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -43,6 +44,10 @@ DAY0_UNCERTAINTY = ("체결 당일 저가가 손절가 이하: 일봉으로는 �
 
 class FillAnomaly(RuntimeError):
     pass
+
+
+class EligibilityConflict(RuntimeError):
+    """같은 (스냅샷, 풀, 버전)에 이미 다른 적격 판단이 기록돼 있다 (ab0006 ``ab_eligibility_v6_conflict``)."""
 
 
 class VersionMismatch(RuntimeError):
@@ -167,16 +172,28 @@ def record_eligibility(db) -> int:
         "WHERE NOT EXISTS (SELECT 1 FROM ab_eligibility e WHERE e.snapshot_id=s.id AND e.strategy_version=?) "
         "AND (d.day IS NOT NULL OR s.intraday=1 OR s.scan_status!='DONE')", (S.STRATEGY_VERSION,)).fetchall()
     n, now = 0, time.time()
-    with tx(db):
-        for r in rows:
-            snap = dict(r)
-            snap["decision_role"] = decision_role(r, {"decision_scan_log_id": r["d_scan"]} if r["d_day"] else None)
-            for pool, (ok, reasons) in EL.evaluate(snap).items():
-                cur = db.execute("INSERT OR IGNORE INTO ab_eligibility(snapshot_id, pool, strategy_version, eligible, "
-                                 "reasons, decision_role, logic_hash, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                                 (r["id"], pool, S.STRATEGY_VERSION, int(ok), _j(reasons), snap["decision_role"],
-                                  lh, now))
-                n += cur.rowcount
+    current = None
+    try:
+        with tx(db):
+            for r in rows:
+                snap = dict(r)
+                snap["decision_role"] = decision_role(r, {"decision_scan_log_id": r["d_scan"]} if r["d_day"] else None)
+                for pool, (ok, reasons) in EL.evaluate(snap).items():
+                    current = (r["id"], pool)
+                    # 같은 판단의 재기록은 스키마가 멱등 무시 (rowcount 0), 다른 판단은 거부 (INSERT OR IGNORE 여도)
+                    cur = db.execute("INSERT OR IGNORE INTO ab_eligibility(snapshot_id, pool, strategy_version, "
+                                     "eligible, reasons, decision_role, logic_hash, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                                     (r["id"], pool, S.STRATEGY_VERSION, int(ok), _j(reasons), snap["decision_role"],
+                                      lh, now))
+                    n += cur.rowcount
+    except sqlite3.IntegrityError as exc:
+        if "eligibility conflict" not in str(exc):
+            raise
+        with tx(db):                         # 위 트랜잭션은 롤백됨 (기록 없음) — 안전 위반으로 남기고 처리를 멈춘다
+            event(db, "ERROR", "eligibility_conflict", f"스냅샷 #{current[0]} {current[1]} 적격 판단이 기존 기록과 다름 "
+                  f"— 기존 기록 유지, 이번 기록 전체 롤백", snapshot_id=current[0], pool=current[1],
+                  strategy_version=S.STRATEGY_VERSION, logic_hash=lh)
+        raise EligibilityConflict(f"snapshot {current[0]} {current[1]}: 적격 판단 충돌") from exc
     return n
 
 

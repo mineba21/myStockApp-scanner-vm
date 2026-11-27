@@ -110,7 +110,11 @@ def chart_params(day: str) -> dict:
     return {"period1": p1, "period2": p2, "interval": "1d", "includePrePost": "false", "events": "div,splits"}
 
 
-def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] = None) -> tuple:
+_UNSET = object()
+
+
+def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] = None, *, settings=None,
+                session=_UNSET) -> tuple:
     """Yahoo v8 chart 원본 JSON → (Bar | None, 근거 dict). 순수 함수 (테스트에서 원본 응답을 그대로 주입).
 
     Bar 가 None 이면 OHLC 를 쓸 수 없는 응답이다 (결측과 같이 처리: 마감 전 대기, 마감 후 MISSING).
@@ -124,7 +128,11 @@ def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] =
     - 요청한 날이 정규장 거래일이고, 타임스탬프가 모두 정수·증가 순서·요청 구간 안이며, 그날 봉이 정확히 1개이고
       그 시각이 그날 정규장 시간(조기폐장 반영) 안
     - OHLC 배열 길이가 타임스탬프와 같고, 값이 양수이며 고가·저가가 시가·종가를 감쌈
-    거래량 배열 길이·값은 기존 정책 (누락·부분·null·음수 = 미확인, 0 = 이 원본 경로에서만 확정 0)."""
+    거래량 배열 길이·값은 기존 정책 (누락·부분·null·음수 = 미확인, 0 = 이 원본 경로에서만 확정 0).
+
+    **거래소 세션**은 runner 와 같은 캘린더·설정(추가 휴장일·조기폐장일)을 쓴다. 운영 경로는 ``ChartFetcher`` 가 job 의
+    ``settings`` 로 구한 그날 세션(``session``)을 넘긴다. ``session`` 을 주지 않으면 ``settings`` 로 직접 구한다
+    (``settings`` 도 없으면 기본 NYSE 규칙 — 단독 호출·테스트용)."""
     ev = {"source": SOURCE_YAHOO_CHART_RAW, "ticker": ticker, "day": day, "response_sha256": response_sha256,
           "issues": []}
 
@@ -176,10 +184,13 @@ def parse_chart(payload, ticker: str, day: str, response_sha256: Optional[str] =
         lo_b, hi_b = _day_bounds(day)
         if any(t < lo_b or t >= hi_b for t in ts):
             return fail("TIMESTAMP_OUT_OF_RANGE")
-        from trading.auto_buy.shadow import calendar as CAL
-        sess = CAL.session(date.fromisoformat(day))
+        if session is _UNSET:
+            from trading.auto_buy.shadow import calendar as CAL
+            session = CAL.session(date.fromisoformat(day), settings)
+        sess = session
         if sess is None:
             return fail("DAY_NOT_TRADING_SESSION")
+        ev["session_close_et"] = sess.close_at.astimezone(tz).strftime("%H:%M")
         idx = [i for i, t in enumerate(ts) if datetime.fromtimestamp(t, tz).date().isoformat() == day]
         if not idx:
             return fail("DAY_NOT_IN_RESPONSE")
@@ -377,8 +388,10 @@ class ChartFetcher:
     실패는 모두 ``BarUnavailable`` (근거 포함) 이며 결측과 같이 처리된다 (마감 후 MISSING → 복구 시 재계산)."""
 
     def __init__(self, http_get: Optional[Callable] = None, *, budget: Optional[int] = None,
-                 sleep: Optional[Callable] = None):
+                 sleep: Optional[Callable] = None, settings=None):
         self.http_get = http_get
+        self.settings = settings                 # runner 와 같은 거래소 캘린더 설정 (추가 휴장일·조기폐장일)
+        self.contract_ok = 0                     # 이번 job 에서 일봉 응답 계약을 통과한 실제 신규 응답 수
         self.budget = JOB_REQUEST_BUDGET if budget is None else budget
         self.sleep = sleep or (lambda sec: _sleep(sec))
         self.cache: dict = {}
@@ -389,7 +402,8 @@ class ChartFetcher:
         self.failures: dict = {}
 
     def stats(self) -> dict:
-        return {"requests": self.requests, "budget": self.budget, "cached": len(self.cache),
+        return {"requests": self.requests, "contract_ok": self.contract_ok, "budget": self.budget,
+                "cached": len(self.cache),
                 "backoff_sec": round(self.backoff_total, 1), "halted": self.halted,
                 "failures": dict(sorted(self.failures.items()))}
 
@@ -416,15 +430,18 @@ class ChartFetcher:
             res = fetch_chart(t, day, self.http_get)
             if res["payload"] is not None:
                 self.consecutive_failures = 0
-                bar, ev = parse_chart(res["payload"], t, day, res["sha256"])
+                from trading.auto_buy.shadow import calendar as CAL
+                bar, ev = parse_chart(res["payload"], t, day, res["sha256"],
+                                      session=CAL.session(date.fromisoformat(day), self.settings))
                 if bar is None:                     # 200 이지만 내용이 쓸 수 없는 응답 (재시도하지 않음)
                     code = (ev.get("issues") or ["PARSE_ERROR"])[0]
                     return _failure(code, t, day, res, attempts, issues=ev.get("issues"),
                                     chart_error=ev.get("chart_error"), meta_symbol=ev.get("meta_symbol"),
                                     data_granularity=ev.get("data_granularity"), exchange_tz=ev.get("exchange_tz"),
-                                    bar_time_et=ev.get("bar_time_et"))
+                                    bar_time_et=ev.get("bar_time_et"), session_close_et=ev.get("session_close_et"))
                 bar.evidence["http_status"] = res["status"]
                 bar.evidence["attempts"] = attempts
+                self.contract_ok += 1                   # 거래량 미확인(volume=None)이어도 계약 통과 응답이면 센다
                 return bar
             code = res["error"]
             if res.get("rate_limited"):                 # yfinance YFRateLimitError: 즉시 중단, 다른 종목도 요청하지 않음
@@ -453,10 +470,10 @@ class ChartFetcher:
             return _failure(code, t, day, res, attempts)
 
 
-def yfinance_bars(tickers: list, day: str, http_get: Optional[Callable] = None) -> dict:
+def yfinance_bars(tickers: list, day: str, http_get: Optional[Callable] = None, settings=None) -> dict:
     """{ticker: Bar | BarUnavailable}. 종목마다 원본 응답 1건에서 OHLC·거래량을 함께 읽는다 (복수 종목도 서로 섞지 않음).
     호출마다 새 ``ChartFetcher`` (단독 호출용). 운영 job 은 job 단위 ``ChartFetcher`` 하나를 공유한다 (runner)."""
-    return ChartFetcher(http_get)(tickers, day)
+    return ChartFetcher(http_get, settings=settings)(tickers, day)
 
 
 RECONCILE_ABS_USD = 5.0          # 보유 평가합 vs 원장 평가금액 허용 오차 (절대)

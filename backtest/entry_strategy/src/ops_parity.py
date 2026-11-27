@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import tempfile
@@ -159,9 +160,12 @@ def _run_shadow(u: dict, journal: str, progress: bool = False) -> dict:
                      json.dumps(c["warnings"], ensure_ascii=False), c["sector"], "backtest", "{}",
                      "BACKTEST_REPLAY", now))
             for i in range(start, end + 1):
+                # 운영 확정(snapshot.capture_scan_log)과 같은 신호 집합 해시 — 저널 계약(ab0006): FROZEN 은 해시 필수
+                sig_hash = hashlib.sha256(json.dumps(sorted(r[0] for r in db.execute(
+                    "SELECT row_sha256 FROM ab_signal_snapshots WHERE scan_log_id=?", (i + 1,)))).encode()).hexdigest()[:16]
                 db.execute("INSERT INTO ab_day_inputs(day, decision_status, decision_scan_log_id, frozen_at, frozen_by, "
-                           "strategy_version, config_hash, logic_hash) VALUES (?,?,?,?,?,?,?,?)",
-                           (days[i], "FROZEN", i + 1, now, "BACKTEST_REPLAY", S.STRATEGY_VERSION, ch, lh))
+                           "signal_set_hash, strategy_version, config_hash, logic_hash) VALUES (?,?,?,?,?,?,?,?,?)",
+                           (days[i], "FROZEN", i + 1, now, "BACKTEST_REPLAY", sig_hash, S.STRATEGY_VERSION, ch, lh))
         EN.record_eligibility(db)
         prov = _provider(u)
         for i in range(start, end + 1):

@@ -124,19 +124,42 @@ def freeze_no_decision(db, day: str, reason: str, settings=None) -> None:
               day=day, reason=reason)
 
 
+ACCOUNT_STATUSES = ("OK", "UNAVAILABLE", "LATE")
+_ACCOUNT_FIELDS = ("account_status", "account_reason", "account_snapshot", "account_fetched_at")
+
+
+class AccountInputInvalid(ValueError):
+    """계좌 입력이 계약(최초 1회, 허용된 상태·필드 조합)과 맞지 않는다 — 저장하지 않는다."""
+
+
 def store_account(db, day: str, status: str, snap: Optional[dict], reason: Optional[str]) -> None:
-    """그날 계좌 스냅샷을 1회 저장한다 (이미 있으면 그대로). 계좌번호·원 응답은 저장하지 않는다."""
+    """그날 계좌 스냅샷을 1회 저장한다 (이미 있으면 그대로). 계좌번호·원 응답은 저장하지 않는다.
+
+    계약 (ab0006 ``ab_day_inputs_v6_account_once`` 와 같음): 계좌 4필드가 모두 비어 있을 때만 한 번에 함께 저장한다.
+    - ``OK``: JSON 스냅샷 + 조회 시각 / ``UNAVAILABLE``·``LATE``: 스냅샷 없음 + 조회 시각 (사유는 선택)
+    같은 트랜잭션에서 조건부 갱신(4필드가 비어 있을 때만) 후 다시 읽어 쓴 값과 동결 필드가 그대로인지 확인한다.
+    다르면 롤백하고 ``AccountInputInvalid``."""
+    if status not in ACCOUNT_STATUSES:
+        raise AccountInputInvalid(f"{day} 계좌 상태 {status!r} 는 허용되지 않음")
+    keep = None
+    if status == "OK":
+        if not snap:
+            raise AccountInputInvalid(f"{day} 계좌 상태 OK 에 스냅샷이 없음")
+        keep = json.dumps({k: snap.get(k) for k in ("equity", "cash", "orderable_cash", "total_cash", "holdings",
+                                                    "holdings_total", "ledger_evaluation", "as_of", "source")},
+                          ensure_ascii=False, default=str)
     with tx(db):
         row = day_input(db, day)
         if row is None or row["account_status"] is not None:
             return
-        keep = None
-        if status == "OK" and snap:
-            keep = json.dumps({k: snap.get(k) for k in ("equity", "cash", "orderable_cash", "total_cash", "holdings",
-                                                        "holdings_total", "ledger_evaluation", "as_of", "source")},
-                              ensure_ascii=False, default=str)
-        db.execute("UPDATE ab_day_inputs SET account_status=?, account_reason=?, account_snapshot=?, "
-                   "account_fetched_at=? WHERE day=?", (status, reason, keep, time.time(), day))
+        want = (status, reason, keep, time.time())
+        cur = db.execute("UPDATE ab_day_inputs SET account_status=?, account_reason=?, account_snapshot=?, "
+                         "account_fetched_at=? WHERE day=? AND account_status IS NULL AND account_reason IS NULL "
+                         "AND account_snapshot IS NULL AND account_fetched_at IS NULL", want + (day,))
+        back = day_input(db, day)
+        if cur.rowcount != 1 or tuple(back[k] for k in _ACCOUNT_FIELDS) != want or any(
+                back[k] != row[k] for k in row.keys() if k not in _ACCOUNT_FIELDS):
+            raise AccountInputInvalid(f"{day} 계좌 입력 저장 확인 실패 (갱신 {cur.rowcount}행) — 롤백")
 
 
 def account_from_input(row) -> Optional[dict]:
