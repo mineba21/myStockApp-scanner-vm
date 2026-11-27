@@ -115,19 +115,60 @@ class Engine:
         return bool(self._hold_reasons())
 
     def _hold_reasons(self) -> list:
-        """전체 신규 진입 보류 사유. 계좌 잔고·주문 상태·주문내역 확인 불가, 시세 공통 오류, 광범위 조회 실패."""
+        """전체 신규 진입 보류 사유. 계좌 잔고·주문 상태·주문내역 확인 불가, 시세 시스템 장애(incident).
+
+        시세 incident 는 auto_stop_runtime.quote_global_hold 에 원인·영향 범위와 함께 보존된다. 종목 추가로 광범위
+        실패 비율이 낮아지거나 장애 종목이 일시중지·관리 종료돼도 사유는 사라지지 않는다 (복구 증거로만 해제)."""
         errs, thr = self._errors(), self.settings.max_consecutive_errors
         reasons = [c for c in ("balance", "status", "orders") if int(errs.get(c, 0) or 0) >= thr]
-        if self.store.runtime_get("quote_global_hold") or int(errs.get("quote", 0) or 0) >= thr:
-            reasons.append("quote_system")
-        if self.settings.mode in ("SHADOW", "LIVE"):
-            health = self._health_load(self.settings.mode)
-            watched = [p for p in self.store.positions(mode=self.settings.mode, states=("ACTIVE", "EXITING"))
-                       if not p["auto_paused"]]
-            faulted = sum((health.get(str(p["id"])) or {}).get("state", QH.OK) != QH.OK for p in watched)
-            if QH.is_broad(faulted, len(watched)):
-                reasons.append("quote_broad")
+        inc = self.store.runtime_get("quote_global_hold")
+        if inc:
+            for trigger in (inc.get("triggers") or ["quote_system"]):
+                if trigger not in reasons:
+                    reasons.append(trigger)
+        elif int(errs.get("quote", 0) or 0) >= thr:
+            reasons.append("quote_system")            # 기록 없는 임계 카운터: fail closed (이행 단계가 기록을 만든다)
         return reasons
+
+    def _check_broad(self) -> bool:
+        """광범위 조회 실패(감시 종목 중 장애 2개 이상이면서 절반 이상)면 incident 를 만들거나 넓힌다.
+        영향 대상은 그 시점의 장애 종목이며, 이후 종목이 늘어 비율이 낮아져도 대상은 빠지지 않는다."""
+        mode = self.settings.mode
+        if mode not in ("SHADOW", "LIVE"):
+            return False
+        health = self._health_load(mode)
+        watched = [p for p in self.store.positions(mode=mode, states=("ACTIVE", "EXITING")) if not p["auto_paused"]]
+        faulted = [p for p in watched if (health.get(str(p["id"])) or {}).get("state", QH.OK) != QH.OK]
+        if not QH.is_broad(len(faulted), len(watched)):
+            return False
+        now = self.now()
+        opened = {}
+
+        def fn(vals, db):
+            inc, audits, changed = vals["quote_global_hold"], [], False
+            if not inc:
+                inc = QH.incident_new(now, "quote_broad", "broad_fault", watched_at_start=len(watched))
+                audits.append(("engine", "quote_hold_on", "global",
+                               {"reason": "quote_broad", "faulted": [p["ticker"] for p in faulted],
+                                "watched": len(watched)}))
+                opened["on"] = changed = True
+            elif "quote_broad" not in inc.setdefault("triggers", []):
+                inc["triggers"].append("quote_broad")
+                audits.append(("engine", "quote_hold_extend", "global",
+                               {"trigger": "quote_broad", "faulted": [p["ticker"] for p in faulted]}))
+                changed = True
+            for p in faulted:
+                a = (inc.get("affected") or {}).get(str(p["id"]))
+                if a is None or QH.CAUSE_BROAD not in a["causes"]:
+                    QH.incident_add(inc, p, QH.CAUSE_BROAD, "broad_fault", now, reset=False)
+                    changed = True
+            return ({"quote_global_hold": inc}, audits) if changed else None
+        self.store.runtime_txn(now, ["quote_global_hold"], fn)
+        if opened:
+            self._alert(f"health:quote_broad:{int(now)}", "URGENT",
+                        f"[자동손절] 광범위 시세 장애 ({len(faulted)}/{len(watched)}종목) — 전체 신규 손절 진입을 "
+                        "보류합니다. 장애 종목이 실제로 회복될 때까지 해제하지 않습니다.")
+        return True
 
     def _track_global_hold(self, reasons):
         """전체 보류 사유 변화를 감사 기록에 남긴다 (일일 보고의 보류 시간 근거)."""
@@ -158,93 +199,190 @@ class Engine:
     def _migrate_quote_health(self):
         """이전 버전의 종목 공통 시세 카운터(api_errors.quote)를 새 구조로 옮긴다. 근거 없이 0으로 만들지 않는다.
 
-        - 공통 카운터가 임계값 이상이면 전체 시세 보류 레코드를 만든다 (카운터 값은 그대로 둔다).
-        - 처음 이행할 때 공통 카운터가 임계값 이상이었다면, 어느 종목의 오류였는지 알 수 없으므로 감시 중인 모든
-          종목을 FAULT(legacy_unattributed)로 두고 종목별 회복 확인(서로 다른 시세 시각 2회)을 요구한다.
+        한 SQLite 트랜잭션(BEGIN IMMEDIATE)에서 카운터 보존·전체 보류 기록·관련 종목 FAULT·완료 버전·감사 기록을
+        함께 쓴다. 도중에 실패하면 모두 롤백되어 부분 변환이 남지 않고, 다음 tick 에 같은 변환을 다시 시도한다.
+        완료 버전(quote_health_version=1)이 있으면 아무것도 하지 않는다 (반복 재시작에도 감사 기록 1건).
+
+        - 공통 카운터가 임계값 이상이면 전체 시세 보류 incident(legacy_common_counter)를 만들고 카운터는 그대로 둔다.
+        - 어느 종목의 오류였는지 알 수 없으므로 감시 중인 모든 종목을 FAULT(legacy_unattributed)이자 incident 영향
+          대상으로 두고, 종목별 회복 확인(서로 다른 시세 시각 2회)과 시스템 복구 증거를 요구한다.
         """
         now, thr = self.now(), self.settings.max_consecutive_errors
-        errs = self._errors()
-        legacy = int(errs.get("quote", 0) or 0)
-        if legacy >= thr and not self.store.runtime_get("quote_global_hold"):
-            self.store.runtime_set("quote_global_hold", {"since": now, "reason": "legacy_common_counter",
-                                                         "legacy_count": legacy, "rounds_ok": 0, "seen": []}, now)
-            self.store.audit(now, "engine", "quote_hold_on", "global",
-                             {"reason": "legacy_common_counter", "count": legacy})
-        if self.store.runtime_get("quote_health_version") == 1:
-            return
-        marked = []
-        if legacy >= thr:
-            for mode in ("SHADOW", "LIVE"):
-                health = self._health_load(mode)
-                for p in self.store.positions(mode=mode, states=("ACTIVE", "EXITING")):
-                    rec = health.get(str(p["id"])) or QH.new_record(now, p)
-                    rec.update(state=QH.FAULT, fault_started_at=now, fault_reason="legacy_unattributed",
-                               legacy_global_count=legacy, confirm_as_of=[])
-                    health[str(p["id"])] = rec
-                    marked.append(f"{mode}:{p['ticker']}")
-                if health:
-                    self._health_save(mode, health)
-        self.store.runtime_set("quote_health_version", 1, now)
-        self.store.audit(now, "engine", "quote_health_migrate", "global",
-                         {"legacy_api_errors": errs, "marked_fault": marked})
+        keys = ["quote_health_version", "api_errors", "quote_global_hold", "quote_health:SHADOW", "quote_health:LIVE"]
 
-    def _quote_global_error(self, record):
-        """SYSTEM/UNKNOWN 범위 시세 오류: 전체 공통 카운터 +1. 임계값이면 전체 시세 보류."""
+        def fn(vals, db):
+            errs = dict(vals["api_errors"] or {})
+            legacy = int(errs.get("quote", 0) or 0)
+            updates, audits = {}, []
+            inc = vals["quote_global_hold"]
+            done = vals["quote_health_version"] == 1
+            if done and (inc or legacy < thr):
+                return None
+            if not done:
+                marked = []
+                for mode in ("SHADOW", "LIVE"):
+                    health = dict(vals[f"quote_health:{mode}"] or {})
+                    rows = [dict(r) for r in db.execute(
+                        "SELECT * FROM auto_stop_positions WHERE mode=? AND state IN ('ACTIVE','EXITING') ORDER BY id",
+                        (mode,))]
+                    if legacy >= thr:
+                        for p in rows:
+                            rec = health.get(str(p["id"])) or QH.new_record(now, p)
+                            rec.update(state=QH.FAULT, fault_started_at=now, fault_reason="legacy_unattributed",
+                                       legacy_global_count=legacy, confirm_as_of=[])
+                            health[str(p["id"])] = rec
+                            marked.append((mode, p))
+                        if rows:
+                            updates[f"quote_health:{mode}"] = health
+                if legacy >= thr and not inc:
+                    inc = QH.incident_new(now, "quote_system", "legacy_common_counter", legacy_count=legacy)
+                    for _, p in marked:
+                        QH.incident_add(inc, p, QH.CAUSE_SYSTEM, "legacy_unattributed", now)
+                    updates["quote_global_hold"] = inc
+                    audits.append(("engine", "quote_hold_on", "global",
+                                   {"reason": "legacy_common_counter", "count": legacy}))
+                updates["quote_health_version"] = 1
+                audits.append(("engine", "quote_health_migrate", "global",
+                               {"legacy_api_errors": errs, "marked_fault": [f"{m}:{p['ticker']}" for m, p in marked]}))
+            else:
+                # 완료 후 임계 카운터만 남은 경우(카운터 기록 직후 중단 등): fail closed 로 incident 를 만든다.
+                inc = QH.incident_new(now, "quote_system", "counter_without_record", legacy_count=legacy)
+                updates["quote_global_hold"] = inc
+                audits.append(("engine", "quote_hold_on", "global",
+                               {"reason": "counter_without_record", "count": legacy}))
+            return updates, audits
+        self.store.runtime_txn(now, keys, fn)
+
+    def _quote_global_error(self, record, pos):
+        """SYSTEM/UNKNOWN 범위 시세 오류: 전체 공통 카운터 +1, 오류 종목을 연속 오류 범위(streak)에 기록.
+        임계값이면 incident 를 만들고 streak 의 종목을 영향 대상으로 둔다. incident 중이면 그 종목을 대상에
+        넣고(이미 있으면 증거를 처음부터) 미해결로 둔다. 한 트랜잭션에서 처리한다."""
         now, thr = self.now(), self.settings.max_consecutive_errors
-        errs = self._errors()
-        errs["quote"] = n = int(errs.get("quote", 0) or 0) + 1
-        self.store.runtime_set("api_errors", errs, now)
-        self.store.runtime_set("consecutive_api_errors", max(errs.values()), now)
-        if n < thr:
-            return
-        if not self.store.runtime_get("quote_global_hold"):
-            self.store.runtime_set("quote_global_hold", {"since": now, "reason": record.get("category"),
-                                                         "rounds_ok": 0, "seen": []}, now)
-            self.store.audit(now, "engine", "quote_hold_on", "global",
-                             {"reason": record.get("category"), "count": n, "ticker": record.get("ticker")})
-        self._alert(f"health:api_errors:quote:{int(now // 3600)}", "URGENT",
-                    f"[자동손절] 키움 시세 공통 오류 연속 {n}회 ({record.get('category')}) — 전체 신규 손절 진입을 "
-                    "보류합니다. 모든 종목 회복 조회와 기존 주문 대조는 계속합니다.")
+        out = {}
+
+        def fn(vals, db):
+            errs = dict(vals["api_errors"] or {})
+            errs["quote"] = n = int(errs.get("quote", 0) or 0) + 1
+            streak = dict(vals["quote_error_streak"] or {})
+            streak[str(pos["id"])] = {"id": pos["id"], "ticker": pos["ticker"], "exchange": pos["exchange"],
+                                      "mode": pos["mode"], "category": record.get("category")}
+            inc, audits = vals["quote_global_hold"], []
+            if inc:
+                if "quote_system" not in inc.setdefault("triggers", []):
+                    inc["triggers"].append("quote_system")
+                    audits.append(("engine", "quote_hold_extend", "global",
+                                   {"trigger": "quote_system", "ticker": pos["ticker"],
+                                    "category": record.get("category")}))
+                QH.incident_add(inc, pos, QH.CAUSE_SYSTEM, record.get("category"), now, reset=True)
+                inc["last_system_error_at"] = now
+            elif n >= thr:
+                inc = QH.incident_new(now, "quote_system", record.get("category"), count=n)
+                for e in streak.values():
+                    QH.incident_add(inc, e, QH.CAUSE_SYSTEM, e.get("category"), now)
+                audits.append(("engine", "quote_hold_on", "global",
+                               {"reason": record.get("category"), "count": n,
+                                "affected": sorted(e["ticker"] for e in streak.values())}))
+            out["n"] = n
+            updates = {"api_errors": errs, "consecutive_api_errors": max(errs.values()), "quote_error_streak": streak}
+            if inc:
+                updates["quote_global_hold"] = inc
+            return updates, audits
+        self.store.runtime_txn(now, ["api_errors", "quote_error_streak", "quote_global_hold"], fn)
+        if out.get("n", 0) >= thr:
+            self._alert(f"health:api_errors:quote:{int(now // 3600)}", "URGENT",
+                        f"[자동손절] 키움 시세 공통 오류 연속 {out['n']}회 ({record.get('category')}) — 전체 신규 손절 "
+                        "진입을 보류합니다. 장애 종목·공통 경로가 실제로 회복될 때까지 해제하지 않습니다.")
 
     def _quote_global_ok(self):
-        """증권사가 응답함(유효 시세 또는 종목 단위 검증 실패): 보류 중이 아니면 공통 카운터를 0으로."""
-        if self.store.runtime_get("quote_global_hold"):
-            return
-        errs = self._errors()
-        if errs.get("quote"):
+        """증권사가 응답함(유효 시세 또는 종목 단위 검증 실패): incident 가 없으면 공통 카운터·streak 을 0으로."""
+        def fn(vals, db):
+            if vals["quote_global_hold"]:
+                return None
+            errs = dict(vals["api_errors"] or {})
+            if not errs.get("quote") and not vals["quote_error_streak"]:
+                return None
             errs["quote"] = 0
-            self.store.runtime_set("api_errors", errs, self.now())
-            self.store.runtime_set("consecutive_api_errors", max(errs.values(), default=0), self.now())
+            return {"api_errors": errs, "consecutive_api_errors": max(errs.values(), default=0),
+                    "quote_error_streak": {}}, []
+        self.store.runtime_txn(self.now(), ["api_errors", "quote_error_streak", "quote_global_hold"], fn)
+
+    def _incident_update(self, fn_inc):
+        """incident 를 읽어 fn_inc(inc) 로 바꾸고 저장한다 (incident 가 없으면 아무것도 하지 않음)."""
+        def fn(vals, db):
+            inc = vals["quote_global_hold"]
+            if not inc or fn_inc(inc) is False:
+                return None
+            return {"quote_global_hold": inc}, []
+        self.store.runtime_txn(self.now(), ["quote_global_hold"], fn)
+
+    def _incident_observe(self, pid, kind, *, as_of=None, health_state=None, managed=True):
+        tick_at, now = self._tick_started or self.now(), self.now()
+
+        def apply(inc):
+            if str(pid) not in (inc.get("affected") or {}):
+                return False
+            QH.incident_observe(inc, pid, tick_at, kind, now, as_of=as_of, health_state=health_state,
+                                managed=managed)
+        self._incident_update(apply)
+
+    def _incident_status(self, pid, status):
+        """조회하지 않은 영향 대상의 상태(백오프·시간 예산 초과·일시중지 등). 증거로 쓰지 않는다."""
+        now = self.now()
+
+        def apply(inc):
+            a = (inc.get("affected") or {}).get(str(pid))
+            if a is None or a.get("last_status") == status:
+                return False
+            if not a.get("resolved"):
+                a.update(last_status=status, last_at=now)
+            else:
+                return False
+        self._incident_update(apply)
 
     def _evaluate_quote_hold(self, hold_at_start, rnd):
-        """전체 시세 보류 해제: 서로 다른 tick 2회 연속, 새 유효 시세(종목·시세 시각 쌍)가 있고 SYSTEM 오류가 없을 때.
-        특정 종목 하나의 정상 응답 1건만으로는 해제하지 않는다."""
-        hold = self.store.runtime_get("quote_global_hold")
-        if not hold_at_start or not hold or not rnd["attempts"]:
+        """incident 해제 판단. 서로 다른 tick 2회 연속 새 유효 시세가 있고 SYSTEM 오류가 없으며(공통 경로),
+        모든 영향 대상이 원인별 실제 복구 증거를 충족해야 한다. 조회하지 않은 대상은 증거가 없다."""
+        if not hold_at_start:
             return
         now = self.now()
-        if rnd["system"]:
-            hold["rounds_ok"] = 0                 # 공통 장애 신호: 처음부터 다시
-        elif rnd["new_ok"]:
-            hold["rounds_ok"] = int(hold.get("rounds_ok") or 0) + 1
-            hold["seen"] = (list(hold.get("seen") or []) + rnd["new_ok"])[-50:]
-        elif rnd["errors"]:
-            hold["rounds_ok"] = 0                 # 새 유효 시세 없이 실패만 있음
-        # 같은 시세 반복만 있던 라운드는 증거도 실패도 아니다: 그대로 둔다
-        if hold["rounds_ok"] < QH.GLOBAL_RECOVERY_ROUNDS:
-            self.store.runtime_set("quote_global_hold", hold, now)
-            return
-        errs = self._errors()
-        before = errs.get("quote", 0)
-        errs["quote"] = 0
-        self.store.runtime_set("api_errors", errs, now)
-        self.store.runtime_set("consecutive_api_errors", max(errs.values(), default=0), now)
-        self.store.runtime_set("quote_global_hold", None, now)
-        self.store.audit(now, "engine", "quote_hold_off", "global",
-                         {"since": hold.get("since"), "reason": hold.get("reason"), "counter_before": before,
-                          "confirmed": hold.get("seen", [])[-4:]})
-        self._alert(f"health:quote_hold_off:{int(now)}", "INFO",
-                    "[자동손절] 시세 공통 오류 보류 해제 — 서로 다른 시각의 유효 시세를 연속 확인했습니다.")
+        out = {}
+
+        def fn(vals, db):
+            inc = vals["quote_global_hold"]
+            if not inc:
+                return None
+            if rnd["attempts"]:
+                if rnd["system"]:
+                    inc["rounds_ok"] = 0                 # 공통 장애 신호: 처음부터 다시
+                elif rnd["new_ok"]:
+                    inc["rounds_ok"] = int(inc.get("rounds_ok") or 0) + 1
+                    inc["seen"] = (list(inc.get("seen") or []) + rnd["new_ok"])[-50:]
+                elif rnd["errors"]:
+                    inc["rounds_ok"] = 0                 # 새 유효 시세 없이 실패만 있음
+                # 같은 시세 반복만 있던 라운드는 증거도 실패도 아니다: 그대로 둔다
+            inc["last_round"] = {"at": now, "attempts": rnd["attempts"], "system": rnd["system"],
+                                 "errors": rnd["errors"], "new_ok": len(rnd["new_ok"]),
+                                 "skipped": dict(rnd.get("skipped") or {})}
+            if not QH.incident_releasable(inc):
+                return {"quote_global_hold": inc}, []
+            errs = dict(vals["api_errors"] or {})
+            out["before"] = errs.get("quote", 0)
+            errs["quote"] = 0
+            out["inc"] = inc
+            return ({"api_errors": errs, "consecutive_api_errors": max(errs.values(), default=0),
+                     "quote_error_streak": {}, "quote_global_hold": None},
+                    [("engine", "quote_hold_off", "global",
+                      {"since": inc.get("since"), "reason": inc.get("reason"), "triggers": inc.get("triggers"),
+                       "counter_before": out["before"], "rounds_ok": inc.get("rounds_ok"),
+                       "affected": {k: {"ticker": a["ticker"], "causes": a["causes"],
+                                        "evidence_ticks": a["evidence_ticks"][-2:]}
+                                    for k, a in (inc.get("affected") or {}).items()},
+                       "confirmed": inc.get("seen", [])[-4:]})])
+        self.store.runtime_txn(now, ["api_errors", "quote_error_streak", "quote_global_hold"], fn)
+        if out.get("inc"):
+            self._alert(f"health:quote_hold_off:{int(now)}", "INFO",
+                        "[자동손절] 시세 장애 보류 해제 — 영향 종목별 복구 증거와 공통 시세 경로의 연속 정상 응답을 "
+                        "확인했습니다.")
 
     def _review_event(self, ev, reason, *, position=True):
         self.store.review(self.now(), event_id=ev["id"], position_id=ev["position_id"] if position else None,
@@ -287,6 +425,7 @@ class Engine:
                 self.summary["schema_block"] = self.schema_block
             elif self.settings.mode in ("SHADOW", "LIVE") and mc.is_open:
                 self._session_notice(mc)
+                self._check_broad()
                 hold = self._hold_reasons()
                 self._track_global_hold(hold)
                 if "balance" in hold:
@@ -297,11 +436,14 @@ class Engine:
                     self._recover_orders()
                 # 보류 중에도 모든 종목을 예정 시각마다 같은 검증으로 조회한다 (트리거·주문 없이 회복 확인).
                 self._watch(mc, hold)
+                self._check_broad()
                 hold = self._hold_reasons()
                 self._track_global_hold(hold)
                 self.summary["hold"] = hold
                 if not hold:
                     self._advance(mc)
+                else:
+                    self._note_replace_waiting_under_hold(hold)
             self._finalize()
             if self.settings.mode in ("SHADOW", "LIVE") and mc.after_close and not self.schema_block:
                 self._session_summary(mc)
@@ -647,13 +789,14 @@ class Engine:
               "recovery": ("recovery_fail", "recovery_invalid", "quote_recovery"),
               "order": ("order_quote_fail", "order_quote_invalid", "quote_order")}
 
-    def _fetch_quote(self, pos, purpose):
-        """증권사 시세 1회. (quote, 오류 기록|None, 메타). 예외는 모두 분류해 돌려준다 (다음 종목 조회를 막지 않음)."""
+    def _fetch_quote(self, pos, purpose, broker_mode=None):
+        """증권사 시세 1회. (quote, 오류 기록|None, 메타). 예외는 모두 분류해 돌려준다 (다음 종목 조회를 막지 않음).
+        broker_mode 를 주면 그 모드의 조회 경로를 쓴다 (관리가 끝난 영향 종목의 읽기 전용 확인용)."""
         started = self.now()
         q, err, broker = None, None, None
         self._renew()
         try:
-            broker = self._broker(pos["mode"])
+            broker = self._broker(broker_mode or pos["mode"])
             q = broker.quote(pos["ticker"], pos["exchange"])
         except LeaseLost:
             raise
@@ -710,8 +853,8 @@ class Engine:
         self.store.runtime_set("last_quote_ok_at", self.now(), self.now())
         return q, None, None
 
-    def _quote_failed(self, pos, rec, purpose, err):
-        """종목별 오류 반영 + 구조화 기록 + 범위별 전체 카운터. 반환: quote_health 전이."""
+    def _record_quote_error(self, pos, purpose, err) -> dict:
+        """통계·구조화 기록·로그 (상태 전이 없음)."""
         now, ticker = self.now(), pos["ticker"]
         fail, invalid, api_key = self._STATS[purpose]
         validation = bool(err.get("validation"))
@@ -723,14 +866,20 @@ class Engine:
             self.store.runtime_set("last_api_error", {"at": now, "where": f"시세 {ticker} ({purpose})",
                                                       "type": err.get("error_type"),
                                                       "category": err.get("category")}, now)
-        if (rec.get("first_error") or {}).get("day") != record["day"]:
-            rec["first_error"] = record           # 그날 최초 오류 (원인 미확인 사고 재발 시 근거)
         recent = list(self.store.runtime_get("quote_errors_recent", []) or [])
         recent.append(record)
         self.store.runtime_set("quote_errors_recent", recent[-QH.RECENT_ERRORS_KEEP:], now)
+        log.warning("[자동손절] 시세 오류 (%s) %s", purpose, json.dumps(record, default=str, ensure_ascii=False))
+        return record
+
+    def _quote_failed(self, pos, rec, purpose, err):
+        """종목별 오류 반영 + 구조화 기록 + 범위별 전체 카운터·incident. 반환: quote_health 전이."""
+        now, ticker = self.now(), pos["ticker"]
+        record = self._record_quote_error(pos, purpose, err)
+        if (rec.get("first_error") or {}).get("day") != record["day"]:
+            rec["first_error"] = record           # 그날 최초 오류 (원인 미확인 사고 재발 시 근거)
         transition = QH.on_error(rec, now, record, self.settings.max_consecutive_errors)
-        log.warning("[자동손절] 시세 오류 (%s, 종목 연속 %d회) %s", purpose, rec["consecutive_errors"],
-                    json.dumps(record, default=str, ensure_ascii=False))
+        rec["last_observation"] = "failed"
         if transition == "fault":
             self.store.audit(now, "engine", "quote_fault", f"{pos['mode']}:{ticker}",
                              {"position_id": pos["id"], "category": err.get("category"), "scope": err.get("scope"),
@@ -738,26 +887,30 @@ class Engine:
             sev = "URGENT" if pos["mode"] == "LIVE" else "WARN"
             self._alert(f"health:quote_fault:{pos['mode']}:{pos['id']}:{int(now // 3600)}", sev,
                         f"[자동손절] {ticker} 시세 연속 오류 {rec['consecutive_errors']}회 ({err.get('category')}) — "
-                        "이 종목의 신규 손절 진입을 보류하고 회복 조회를 계속합니다. 다른 종목 감시는 계속합니다.")
+                        "이 종목의 신규 손절 진입을 보류하고 회복 조회를 계속합니다.")
         if err.get("scope") in (QH.SYSTEM, QH.UNKNOWN):
-            self._quote_global_error(record)
+            self._quote_global_error(record, pos)
         else:
             self._quote_global_ok()               # 증권사는 응답했다 (종목 단위 문제)
+            self._incident_observe(pos["id"], "symbol", health_state=rec.get("state"))
         return transition
 
-    def _quote_ok(self, pos, rec, purpose, q):
+    def _quote_ok(self, pos, rec, purpose, q, *, managed=True):
         """유효 시세 반영. 반환: quote_health 전이 (confirm/recovered/stale_repeat/None)."""
         now = self.now()
         result = QH.on_success(rec, now, q.as_of)
         rec["last_attempt"] = {"purpose": purpose, "at": now, "quote_as_of": q.as_of,
                                "quote_age_sec": None if q.as_of is None else round(now - q.as_of, 1)}
+        rec["last_observation"] = {"recovered": "recovered", "confirm": "recovering",
+                                   "stale_repeat": "recovering"}.get(result, "ok")
         self._quote_global_ok()
+        self._incident_observe(pos["id"], "ok", as_of=q.as_of, health_state=rec.get("state"), managed=managed)
         if result == "recovered":
             self.store.audit(now, "engine", "quote_recovered", f"{pos['mode']}:{pos['ticker']}",
                              {"position_id": pos["id"], "fault_started_at": rec.get("fault_started_at")})
             self._alert(f"health:quote_recovered:{pos['mode']}:{pos['id']}:{int(now)}", "INFO",
                         f"[자동손절] {pos['ticker']} 시세 회복 확인 (서로 다른 시각 유효 시세 "
-                        f"{QH.RECOVERY_CONFIRMATIONS}회) — 다음 감시 슬롯부터 손절 판단을 재개합니다.")
+                        f"{QH.RECOVERY_CONFIRMATIONS}회) — 전체 보류가 없으면 다음 감시 슬롯부터 손절 판단을 재개합니다.")
         return result
 
     def _watch(self, mc, hold=()):
@@ -766,6 +919,8 @@ class Engine:
         - 일반 감시(watch): 종목 상태 OK + 전체 보류 없음 + ACTIVE. 유효 시세 ≤ 손절가면 청산 이벤트.
         - 회복 조회(recovery): 종목 장애·회복 확인 중이거나 전체 보류 중. 같은 검증을 하되 트리거·주문은 없다.
           회복을 확정한 시세는 정상 감시 성공으로 세지 않고 손절 판단에도 쓰지 않는다 (다음 슬롯부터 일반 감시).
+        - incident 영향 대상이지만 일반 감시 대상이 아닌 포지션(일시중지·관리 종료·다른 모드)은 읽기 전용으로
+          계속 조회해 복구 증거를 모은다 (_incident_probe). 조회하지 않은 대상은 증거가 생기지 않는다.
         """
         mode, interval = self.settings.mode, self.settings.price_interval_sec
         hold = list(hold or [])
@@ -775,9 +930,16 @@ class Engine:
         for p in positions:
             health.setdefault(str(p["id"]), QH.new_record(self.now(), p))
         quote_hold = self.store.runtime_get("quote_global_hold")
-        rnd = {"attempts": 0, "system": 0, "errors": 0, "new_ok": []}
+        affected = set((quote_hold or {}).get("affected", {}).keys())
+        rnd = {"attempts": 0, "system": 0, "errors": 0, "new_ok": [], "skipped": {}, "probed": set()}
         budget_end = (self._tick_started or self.now()) + 1.5 * self.settings.tick_sec
         ordered = sorted(positions, key=lambda p: health[str(p["id"])].get("next_due_at") or 0)
+
+        def skipped(pid, status):
+            rnd["skipped"][status] = rnd["skipped"].get(status, 0) + 1
+            if str(pid) in affected:
+                self._incident_status(pid, status)
+
         for pos in ordered:
             pos = self.store.position(pos["id"])
             if pos["state"] not in ("ACTIVE", "EXITING"):
@@ -786,16 +948,30 @@ class Engine:
             if pos["auto_paused"]:
                 if pos["state"] == "ACTIVE" and QH.is_due(rec, now):
                     QH.enter_slot(rec, now, interval)
-                    self._stat("slot_paused", ticker)
+                    if QH.claim_slot_class(rec, "paused"):
+                        self._stat("slot_paused", ticker)
                     QH.schedule_next_slot(rec, now, interval)
-                    self._health_save(mode, health)
+                rec["last_observation"] = "paused"
+                self._health_save(mode, health)
+                if str(pos["id"]) in affected:
+                    # 일시중지는 트리거·주문만 멈춘다. 장애 영향 대상이면 읽기 전용 회복 조회는 계속한다.
+                    self._incident_probe(pos, mc, rnd, budget_end, health=health, rec=rec)
                 continue
             if pos["state"] == "EXITING" and rec["state"] == QH.OK and not hold:
                 continue                      # 청산 진행 중 정상 종목은 _send 가 주문 직전에 시세를 확인한다
             if not QH.is_due(rec, now):
+                status = QH.not_due_status(rec, now)
+                if status == "skipped_backoff" and rec.get("last_observation") != status:
+                    rec["last_observation"] = status
+                    self._health_save(mode, health)
+                if status == "skipped_backoff":
+                    skipped(pos["id"], status)
                 continue
             if now > budget_end:
                 self._stat("slot_deferred", ticker)     # 다음 tick 에 가장 먼저 (예정 시각 순)
+                rec["last_observation"] = "skipped_budget"
+                skipped(pos["id"], "skipped_budget")
+                self._health_save(mode, health)
                 continue
             purpose = "watch" if (rec["state"] == QH.OK and not hold and pos["state"] == "ACTIVE") else "recovery"
             if QH.enter_slot(rec, now, interval) == "failed":
@@ -806,10 +982,10 @@ class Engine:
                 rec["slot_purpose"] = rec.get("slot_purpose") or "watch"
             else:
                 self._stat("recovery_attempt", ticker)
-                if pos["state"] == "ACTIVE" and not rec.get("slot_held"):
+                if pos["state"] == "ACTIVE" and QH.claim_slot_class(rec, "held"):
                     self._stat("slot_held", ticker)       # 이 감시 슬롯은 보류로 일반 감시를 하지 못함
-                    rec["slot_held"] = True
                 rec["slot_purpose"] = "recovery"
+            rnd["probed"].add(str(pos["id"]))
             q, problem, err = self._confirmed_quote(pos, mc, purpose)
             rnd["attempts"] += 1
             if problem:
@@ -819,17 +995,19 @@ class Engine:
                 self._review_position(pos, problem)
                 continue
             if err:
-                self._quote_failed(pos, rec, purpose, err)
+                transition = self._quote_failed(pos, rec, purpose, err)
                 rnd["errors"] += 1
                 if err.get("scope") == QH.SYSTEM:
                     rnd["system"] += 1
-                if not hold and self.store.runtime_get("quote_global_hold"):
-                    hold = ["quote_system"]           # 이 tick 도중 전체 임계값 도달: 남은 종목도 트리거 없이 관측만
                 if rec["state"] == QH.OK:
                     QH.retry_next_tick(rec, now)
                 else:
                     QH.schedule_next_slot(rec, now, interval, QH.backoff_factor(rec))
                 self._health_save(mode, health)
+                if transition == "fault":
+                    self._check_broad()
+                if not hold and self.store.runtime_get("quote_global_hold"):
+                    hold = ["quote_system"]           # 이 tick 도중 전체 보류 진입: 남은 종목도 트리거 없이 관측만
                 continue
             result = self._quote_ok(pos, rec, purpose, q)
             key = [pos["id"], q.as_of]
@@ -838,9 +1016,8 @@ class Engine:
             fields = {"last_quote_price": str(q.price), "last_quote_at": q.as_of}
             if purpose == "watch":
                 fields["last_price_check_at"] = self.now()
-                if not rec.get("slot_ok"):
+                if QH.claim_slot_class(rec, "ok"):
                     self._stat("quote_ok", ticker)        # 슬롯당 1회: 유효 시세 감시 성공
-                    rec["slot_ok"] = True
             else:
                 self._stat("recovery_stale" if result == "stale_repeat" else "recovery_ok", ticker)
             QH.schedule_next_slot(rec, now, interval)
@@ -865,9 +1042,78 @@ class Engine:
                 self._alert(f"event:{eid}:trigger", "URGENT",
                             f"[자동손절 발생] {pos['ticker']} 현재가 {q.price} ≤ 손절가 {pos['stop_price']} "
                             f"· 관리 {pos['remaining_managed_qty']}주 ({pos['mode']}){note}")
+        # 일반 감시 대상이 아닌 영향 대상(관리 종료·확인 필요·다른 모드): 읽기 전용 확인 경로
+        watched_ids = {str(p["id"]) for p in positions}
+        for pid in sorted(affected - watched_ids, key=int):
+            row = self.store.position(int(pid))
+            if row is not None:
+                self._incident_probe(row, mc, rnd, budget_end)
         self._evaluate_quote_hold(quote_hold, rnd)
 
+    def _incident_probe(self, pos, mc, rnd, budget_end, *, health=None, rec=None):
+        """incident 영향 대상의 읽기 전용 회복 조회 (트리거·주문 없음). 일반 감시와 같은 시세 검증(validate_detail:
+        종목·거래소·가격·당일 정규장·개장 이후·120초)을 쓴다. 관리가 끝난 포지션은 거래 판단에 쓰이지 않으므로
+        급변 재조회·잔고 확인은 하지 않고, 같은 요청 경로의 정상 응답만 증거로 기록한다."""
+        inc = self.store.runtime_get("quote_global_hold") or {}
+        a = (inc.get("affected") or {}).get(str(pos["id"]))
+        # 증거를 다 모은 대상도 incident 가 끝날 때까지 계속 조회한다: 공통 경로의 정상 라운드 근거가 되고,
+        # 다시 실패하면 그 대상은 처음부터 재검증된다.
+        if a is None or str(pos["id"]) in rnd["probed"]:
+            return
+        now, interval = self.now(), self.settings.price_interval_sec
+        if not QH.is_due(a, now):
+            return
+        if now > budget_end:
+            rnd["skipped"]["skipped_budget"] = rnd["skipped"].get("skipped_budget", 0) + 1
+            self._incident_status(pos["id"], "skipped_budget")
+            return
+        managed = pos["state"] in ("ACTIVE", "EXITING") and pos["mode"] == self.settings.mode
+        rnd["probed"].add(str(pos["id"]))
+        self._stat("incident_probe", pos["ticker"])
+        q, err, meta = self._fetch_quote(pos, "recovery", broker_mode=self.settings.mode)
+        rnd["attempts"] += 1
+        if err is None:
+            found = validate_detail(q, self.now(), mc, self.settings, expect=(pos["ticker"], pos["exchange"]))
+            if found:
+                err = {**meta, **QH.validation_error(*found), "quote_as_of": q.as_of}
+        factor = 1
+        if err:
+            rnd["errors"] += 1
+            if err.get("scope") == QH.SYSTEM:
+                rnd["system"] += 1
+            record = self._record_quote_error(pos, "recovery", err)
+            if rec is not None:
+                QH.on_error(rec, self.now(), record, self.settings.max_consecutive_errors)
+                rec["last_observation"] = "failed"
+            if err.get("scope") in (QH.SYSTEM, QH.UNKNOWN):
+                self._quote_global_error(record, pos)
+            else:
+                self._incident_observe(pos["id"], "symbol", health_state=(rec or {}).get("state"), managed=managed)
+            inc2 = self.store.runtime_get("quote_global_hold") or {}
+            factor = QH.backoff_factor((inc2.get("affected") or {}).get(str(pos["id"])) or {})
+        else:
+            key = [pos["id"], q.as_of]
+            if key not in (inc.get("seen") or []) and key not in rnd["new_ok"]:
+                rnd["new_ok"].append(key)
+            state = None
+            if rec is not None:
+                QH.on_success(rec, self.now(), q.as_of)
+                rec["last_observation"] = "recovering" if rec["state"] != QH.OK else "ok"
+                state = rec["state"]
+            self._incident_observe(pos["id"], "ok", as_of=q.as_of, health_state=state, managed=managed)
+            self._stat("incident_probe_ok", pos["ticker"])
+        if health is not None:
+            self._health_save(pos["mode"], health)
+
+        def schedule(inc3):
+            a3 = (inc3.get("affected") or {}).get(str(pos["id"]))
+            if a3 is None:
+                return False
+            QH.schedule_next_slot(a3, now, interval, factor)
+        self._incident_update(schedule)
+
     def _ticker_ok(self, pos) -> bool:
+        """저장된 종목 상태가 OK 인지 (필요조건일 뿐이다: 주문·취소 직전에는 새 유효 시세를 따로 확인한다)."""
         rec = self._health_load(pos["mode"]).get(str(pos["id"]))
         return rec is None or rec.get("state", QH.OK) == QH.OK
 
@@ -922,7 +1168,13 @@ class Engine:
                                        f"{ev['session_replace_count']}/{self.settings.max_replaces_per_session}, 이벤트 "
                                        f"{ev['event_replace_count']}/{self.settings.max_replaces_per_event})")
                 continue
+            before = len(orders)
             self._send(mc, ev, pos)
+            if ev["next_order_kind"] == "REPLACE":
+                if len(self.store.orders(event_id=ev["id"])) > before:
+                    self.store.runtime_set(f"replace_waiting:{ev['id']}", None, self.now())
+                else:
+                    self._note_replace_waiting(ev, pos, "재주문 조건(종목 시세 상태·유효 시세·잔고·안전 조건)을 확인하지 못함")
 
     def _send(self, mc, ev, pos):
         mode, now = ev["mode"], self.now()
@@ -1057,15 +1309,22 @@ class Engine:
                     f"(체결 {o['filled_qty']}/{o['requested_qty']}주)")
         if o["cancel_rejected"] or not mc.before_cutoff:
             return
-        if not self._ticker_ok(pos):
-            # 시세 장애 종목은 재주문 근거 시세가 없으므로 취소도 하지 않는다 (걸려 있는 주문을 잃지 않게).
-            return
         blocked = self._cancel_guard(ev["mode"])()
         if blocked:
             return
         if not self._replace_allowed(ev):
             self._review_event(ev, "재주문 한도 도달 — 기존 주문은 계속 추적합니다")
             return
+        reason = self._replace_precheck(mc, ev, pos, o)
+        if reason:
+            # 어느 하나라도 확인하지 못하면 재주문 목적 취소를 하지 않는다. 기존 주문 유지·대조만 계속한다.
+            self._stat("replace_precheck_fail", reason.split(":")[0])
+            self._alert(f"order:{o['id']}:cancel_held:{int(now // 3600)}", "WARN",
+                        f"[자동손절] {o['ticker']} 미체결 주문 {o['order_number']} 재주문용 취소 보류 — {reason}. "
+                        "기존 주문은 유지하고 체결·상태 대조를 계속합니다.")
+            return
+        if self.killed() or self._hold_reasons():
+            return                            # 사전 검증 직후 다시 확인 (취소 선점 트랜잭션도 긴급 중지를 본다)
         try:
             order = self.store.claim_cancel(now, owner=self.owner, order_id=o["id"], expect_state=o["state"],
                                             guard=self._cancel_guard(ev["mode"]),
@@ -1098,6 +1357,114 @@ class Engine:
             self.summary["cancels"] += 1
             self._alert(f"order:{o['id']}:cancel_requested", "INFO",
                         f"[자동손절] {o['ticker']} 미체결 잔여 취소 요청 — 취소 확정 후 최신 시세로 잔여만 재주문합니다.")
+
+    def _replace_precheck(self, mc, ev, pos, o) -> str | None:
+        """재주문 목적 취소 전 검증. 취소하면 걸려 있던 매도 주문을 잃으므로, 취소 후 곧바로 안전하게 재주문할 수
+        있다는 현재 증거가 모두 있어야 한다. 실패 사유 문자열(코드: 설명) 또는 None.
+
+        저장된 과거 종목 상태 OK 만으로 허용하지 않는다: 새로 조회한 시세를 일반 감시·주문 직전과 같은
+        _confirmed_quote 로 검증한다 (종목·거래소, 가격, 당일 정규장, 개장 이후, 120초, 급변 재조회)."""
+        mode = ev["mode"]
+        if self.killed():
+            return "kill_switch: 전체 긴급 중지"
+        hold = self._hold_reasons()
+        if hold:
+            return f"global_hold: 전체 보류({', '.join(hold)})"
+        if not self._ticker_ok(pos):
+            return "symbol_hold: 종목 시세 장애·회복 확인 중"
+        if o["state"] not in ("SUBMITTED", "PARTIAL_FILLED") or not o["order_number"]:
+            return f"order_state: 주문 상태 {o['state']}"
+        open_remaining = int(o["requested_qty"]) - int(o["filled_qty"])
+        if open_remaining <= 0:
+            return "order_state: 미체결 잔량 없음"
+        if mode == "LIVE":
+            if self.store.scanner_buy_in_flight(pos["ticker"]):
+                return "buy_in_flight: 스캐너 매수 주문 미확정"
+            try:
+                self._renew()
+                ours = {x["order_number"] for x in self.store.orders(mode="LIVE") if x["order_number"]}
+                external = [r for r in self._broker(mode).day_orders(pos["ticker"])
+                            if r["state"] in ("OPEN", "PARTIAL") and r["order_number"] not in ours]
+                self._renew()
+                self._api_ok("orders")
+            except LeaseLost:
+                raise
+            except Exception as exc:
+                self._api_error("orders", f"주문내역 {pos['ticker']}", exc)
+                return "orders_unavailable: 주문내역 확인 실패"
+            if external:
+                return f"external_orders: 같은 종목 외부 미체결 {len(external)}건"
+        holdings = self._balance_sync(force=True)
+        if holdings is None:
+            return "balance_unavailable: 잔고 확인 실패"
+        pos = self.store.position(pos["id"])
+        if pos["state"] != "EXITING" or pos["auto_paused"]:
+            return f"position_state: {pos['state']}"
+        h = holdings.get(pos["ticker"])
+        if h is None:
+            return "balance_unavailable: 잔고에 종목 없음"
+        # 미체결 매도가 예약한 수량: 브로커 매도가능수량이 미체결분을 이미 뺐는지는 미검증(UST21070_SELLABLE)이다.
+        # 취소 후 매도가능 = min(보유, 매도가능 + 미체결 잔량) 으로 보수적으로 추정하고, 실제 재주문 직전에는
+        # _send 가 브로커 값을 다시 조회해 판단한다. 취소 전 매도가능 0 만으로 재주문을 영구 차단하지 않는다.
+        after_cancel = min(int(h["qty"]), int(h["sellable"]) + open_remaining)
+        qty = min(int(pos["remaining_managed_qty"]), after_cancel)
+        if qty <= 0:
+            return f"sellable: 취소 후 매도가능 추정 {after_cancel}주"
+        health = self._health_load(mode)
+        rec = health.setdefault(str(pos["id"]), QH.new_record(self.now(), pos))
+        q, problem, err = self._confirmed_quote(pos, mc, "order")
+        if problem:
+            return f"quote_problem: {problem}"
+        if err:
+            self._quote_failed(pos, rec, "order", err)
+            self._health_save(mode, health)
+            return f"quote_invalid: {err.get('category')}"
+        self._quote_ok(pos, rec, "order", q)
+        self._health_save(mode, health)
+        self.store.update_position(pos["id"], self.now(), last_quote_price=str(q.price), last_quote_at=q.as_of)
+        ref, src = reference_price(q, allow_bid=(mode != "LIVE" or self.settings.verified("USA20101_BID")))
+        if ref < MIN_AUTO_PRICE:
+            return f"price: 기준가 {ref} < $1"
+        price = limit_price(ref, self.settings.slip_bps)
+        if price <= 0:
+            return "price: 지정가 계산 결과 무효"
+        if qty > self.settings.max_order_qty or price * qty > self.settings.max_order_notional_usd:
+            return f"order_cap: 주문 상한 초과 ({qty}주 × {price})"
+        if mode == "LIVE" and qty > self.settings.live_qty_cap():
+            return f"order_cap: LIVE 1주 상한 ({qty}주)"
+        if self.killed() or self._hold_reasons():
+            return "global_hold: 검증 중 보류 발생"
+        self.store.add_order_evidence(o["id"], self.now(), "replace_precheck",
+                                      {"at": self.now(), "quote_as_of": q.as_of, "ref": str(ref), "ref_source": src,
+                                       "limit": str(price), "replace_qty": qty, "sellable": int(h["sellable"]),
+                                       "held": int(h["qty"]), "open_remaining": open_remaining})
+        return None
+
+    def _note_replace_waiting(self, ev, pos, reason):
+        """취소 확정 뒤 재주문을 못 하고 있음: 청산 이벤트·트리거는 그대로 두고 대기 상태를 기록, 긴급 알림."""
+        now = self.now()
+        key = f"replace_waiting:{ev['id']}"
+        prev = self.store.runtime_get(key) or {}
+        detail = {"since": prev.get("since") or now, "at": now, "reason": reason, "ticker": pos["ticker"],
+                  "remaining": pos["remaining_managed_qty"], "last_quote_issue": self.store.runtime_get("last_quote_issue"),
+                  "last_api_error": self.store.runtime_get("last_api_error")}
+        self.store.runtime_set(key, detail, now)
+        self._stat("replace_waiting", pos["ticker"])
+        self._alert(f"event:{ev['id']}:replace_waiting:{int(now // 3600)}", "URGENT",
+                    f"[자동손절 재주문 대기] {pos['ticker']} 취소 확정 후 잔여 {pos['remaining_managed_qty']}주 재주문 "
+                    f"보류 — {reason}. 청산 이벤트는 유지되며 조건이 확인되면 최신 시세로 재주문합니다.")
+
+    def _note_replace_waiting_under_hold(self, hold):
+        """전체 보류로 청산 진행을 하지 않는 동안, 취소 확정 뒤 재주문을 기다리는 이벤트를 기록·알린다."""
+        for ev in self.store.events(states=("OPEN",), mode=self.settings.mode):
+            if ev["next_order_kind"] != "REPLACE":
+                continue
+            pos = self.store.position(ev["position_id"])
+            if pos["state"] != "EXITING" or pos["remaining_managed_qty"] <= 0:
+                continue
+            orders = self.store.orders(event_id=ev["id"])
+            if orders and orders[-1]["state"] == "CANCELLED":
+                self._note_replace_waiting(ev, pos, f"전체 보류({', '.join(hold)})")
 
     def _cancel_unknown(self, order):
         self.store.transition(order["id"], self.now(), frm="CANCEL_SENDING", to="CANCEL_UNKNOWN")

@@ -151,6 +151,32 @@ class AutoStopStore:
             db.execute("INSERT OR REPLACE INTO auto_stop_runtime(key,value,updated_at) VALUES(?,?,?)",
                        (key, json.dumps(value), now))
 
+    def runtime_txn(self, now, keys, fn):
+        """여러 runtime 키를 한 BEGIN IMMEDIATE 트랜잭션에서 읽고 바꾼다 (DDL 없음).
+
+        fn(values: dict, db) → (updates: dict, audits: list[(actor, action, target, details)]) 이거나 None.
+        fn 이나 쓰기 도중 예외가 나면 전부 롤백된다 (부분 변경 없음). 반환: updates (None 이면 변경 없음)."""
+        with self.tx() as db:
+            values = {}
+            for key in keys:
+                r = db.execute("SELECT value FROM auto_stop_runtime WHERE key=?", (key,)).fetchone()
+                values[key] = json.loads(r["value"]) if r and r["value"] is not None else None
+            result = fn(values, db)
+            if not result:
+                return None
+            updates, audits = result
+            for key, value in (updates or {}).items():
+                db.execute("INSERT OR REPLACE INTO auto_stop_runtime(key,value,updated_at) VALUES(?,?,?)",
+                           (key, json.dumps(value, default=str), now))
+            for actor, action, target, details in (audits or []):
+                self._audit_db(db, now, actor, action, target, details)
+            return updates
+
+    @staticmethod
+    def _audit_db(db, now, actor, action, target, details):
+        db.execute("INSERT INTO auto_stop_audit(at,actor,action,target,details) VALUES(?,?,?,?,?)",
+                   (now, actor, action, str(target), json.dumps(details, default=str)))
+
     def audit(self, now, actor, action, target, details):
         with self.tx() as db:
             db.execute("INSERT INTO auto_stop_audit(at,actor,action,target,details) VALUES(?,?,?,?,?)",

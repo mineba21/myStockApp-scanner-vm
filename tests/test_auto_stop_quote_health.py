@@ -93,18 +93,27 @@ def test_both_fail_global_hold_probes_every_ticker(h):
 
 
 # ── D: 두 번째 종목만 먼저 정상화 ─────────────────────────────────
-def test_second_ticker_recovers_first_and_resumes_alone(h):
+def test_second_ticker_recovers_first_but_hold_kept_until_cause_resolves(h):
+    # 2026-11-27 Codex P1: 장애를 일으킨 종목(CINF)이 미해결이면 다른 종목(EVRG)의 정상 조회만으로 해제하지 않는다.
     c, e = both_fail(h)
     h.broker.quote_exc_by["EVRG"] = None
-    run(h, 2, step=60)                                        # 서로 다른 시세 시각 2회
-    assert rec(h, e)["state"] == QH.OK and rec(h, c)["state"] == QH.FAULT
-    assert "quote_system" not in h.engine._hold_reasons()    # 장애 종목 1/2 → 광범위 아님
     h.broker.prices = {"CINF": "40", "EVRG": "44"}
-    run(h, 1)
-    assert len(sells_of(h, "EVRG")) == 1 and sells_of(h, "CINF") == []
+    run(h, 4, step=60)
+    assert rec(h, e)["state"] == QH.OK and rec(h, c)["state"] == QH.FAULT
+    assert "quote_system" in h.engine._hold_reasons()
+    inc = h.store.runtime_get("quote_global_hold")
+    assert inc["affected"][str(e)]["resolved"] and not inc["affected"][str(c)]["resolved"]
+    assert h.broker.sells == [] and h.store.events() == []
+    assert stat(h, "held_trigger", "EVRG") >= 1
     before = stat(h, "recovery_attempt", "CINF")
     run(h, 2, step=60)
     assert stat(h, "recovery_attempt", "CINF") == before + 2              # 장애 종목도 계속 회복 확인
+    h.broker.quote_exc_by = {}
+    h.broker.prices = {"CINF": "50", "EVRG": "44"}
+    run(h, 2, step=60)                                        # CINF 서로 다른 tick 2회 정상 → 해제
+    assert h.engine._hold_reasons() == []
+    run(h, 1)
+    assert len(sells_of(h, "EVRG")) == 1 and sells_of(h, "CINF") == []
 
 
 # ── E: 두 종목 모두 정상화 ────────────────────────────────────────
@@ -415,7 +424,7 @@ def test_report_separates_watch_and_recovery_and_counts_all_errors(tmp_path, mon
     assert rep["api"]["by_category"]["quote_recovery"] == r["fail"]
     assert w["ok"] == stat(h, "quote_ok", mode="SHADOW")
     assert w["missed"] == w["expected"] - w["ok"]                      # 누락 합계는 축소하지 않는다
-    assert w["missed"] == w["held_slots"] + w["failed_slots"] + w["schedule_missed"]
+    assert w["missed"] == w["held_slots"] + w["paused_slots"] + w["failed_slots"] + w["schedule_missed"]
     assert w["held_slots"] > 0 and w["attempts"] > 0
     assert rep["holds"]["global_seconds"] > 0 and rep["holds"]["periods"]
     cinf = [p for p in w["positions"] if p["ticker"] == "CINF"][0]
@@ -482,10 +491,16 @@ def test_shadow_first_day_pattern_recovers_healthy_ticker(tmp_path, monkeypatch)
     run(h, 10)
     assert "quote_system" in h.engine._hold_reasons()
     # 이후 CINF(첫 포지션)는 계속 실패, EVRG 는 정상화. 이전 코드는 CINF 만 반복 조회해 장 종료까지 보류됐다.
+    # 수정 후: 두 종목 모두 계속 회복 조회하고, 원인 종목 CINF 가 미해결인 동안 보류를 유지한다.
     h.broker.quote_exc_by = {"CINF": unknown()}
+    evrg_before = stat(h, "recovery_attempt", "EVRG", day, "SHADOW")
     run(h, 8)
-    assert h.engine._hold_reasons() == []
+    assert "quote_system" in h.engine._hold_reasons()
+    assert stat(h, "recovery_attempt", "EVRG", day, "SHADOW") > evrg_before          # 첫 포지션 고정 조회 아님
     assert rec(h, e, "SHADOW")["state"] == QH.OK and rec(h, c, "SHADOW")["state"] == QH.FAULT
+    h.broker.quote_exc_by = {}                                # CINF 원인 해소
+    run(h, 6)
+    assert h.engine._hold_reasons() == []
     ok_before = stat(h, "quote_ok", "EVRG", day, "SHADOW")
     run(h, 10)
     assert stat(h, "quote_ok", "EVRG", day, "SHADOW") >= ok_before + 4   # EVRG 정상 감시 재개
@@ -493,6 +508,7 @@ def test_shadow_first_day_pattern_recovers_healthy_ticker(tmp_path, monkeypatch)
     run(h, 4)
     orders = h.orders()
     assert [o["ticker"] for o in orders] == ["EVRG"] and orders[0]["mode"] == "SHADOW"
+    assert h.store.audits("quote_hold_off", 0, h.clock() + 1)
     assert orders[0]["order_number"].startswith("V")         # 가상 주문
     rep = service.daily_report(h.store, day, "SHADOW", h.st, now=h.clock())
     per = {p["ticker"]: p for p in rep["watch"]["positions"]}

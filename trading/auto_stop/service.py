@@ -306,6 +306,12 @@ def health(store, settings=None, now=None) -> dict:
         "api_errors": store.runtime_get("api_errors", {}) or {},
         "global_hold": store.runtime_get("global_hold_state") or {"reasons": [], "since": None},
         "quote_global_hold": store.runtime_get("quote_global_hold"),
+        "quote_incident_unresolved": [
+            {"position_id": a.get("position_id"), "ticker": a.get("ticker"), "causes": a.get("causes"),
+             "category": a.get("category"), "evidence": len(a.get("evidence_ticks") or []),
+             "last_status": a.get("last_status")}
+            for a in ((store.runtime_get("quote_global_hold") or {}).get("affected") or {}).values()
+            if not a.get("resolved")],
         "quote_health": _quote_health_view(store, settings.mode),
         "recent_quote_errors": (store.runtime_get("quote_errors_recent", []) or [])[-10:],
         "unresolved_orders": len(unresolved),
@@ -326,7 +332,8 @@ def _quote_health_view(store, mode) -> list:
         return []
     health = store.runtime_get(f"quote_health:{mode}", {}) or {}
     keys = ("position_id", "ticker", "state", "consecutive_errors", "last_ok_at", "last_ok_as_of", "next_due_at",
-            "fault_started_at", "fault_reason", "recovered_at", "confirm_as_of", "last_error", "first_error")
+            "fault_started_at", "fault_reason", "recovered_at", "confirm_as_of", "last_error", "first_error",
+            "last_observation", "rate_limit_streak")
     return [{k: rec.get(k) for k in keys} for _, rec in sorted(health.items(), key=lambda kv: int(kv[0]))]
 
 
@@ -394,7 +401,14 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         held = int(stat("slot_held", t))
         paused = int(stat("slot_paused", t))
         failed_slots = int(stat("slot_failed", t))
-        missed = max(0, expected - ok)            # 누락 합계 (아래 보류·실패·스케줄 지연으로 분해)
+        # 기대 슬롯은 기존 기준(장중 등록~트리거 구간 ÷ 감시 주기, 일시중지 구간 포함)을 유지한다.
+        # 누락 = 기대 - 정상. 누락을 보류 → 일시중지 → 감시 실패 → 스케줄 지연 순으로 나눠 합이 항상 누락과 같게 한다
+        # (보고 시점이 슬롯 중간이면 원시 슬롯 수가 기대보다 1 클 수 있어 각 항목을 남은 누락으로 자른다).
+        missed = max(0, expected - ok)
+        held_m = min(held, missed)
+        paused_m = min(paused, missed - held_m)
+        failed_m = min(failed_slots, missed - held_m - paused_m)
+        schedule_m = missed - held_m - paused_m - failed_m
         total_expected += expected
         total_ok += ok
         rec = health.get(str(p["id"])) or {}
@@ -406,8 +420,9 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         positions.append({
             "id": p["id"], "ticker": t, "state": p["state"], "expected_checks": expected,
             # 슬롯 기준 (감시 슬롯 = 감시 주기 1칸, 성공은 슬롯당 1회만 센다)
-            "ok_checks": ok, "missed_checks": missed, "held_slots": held, "paused_slots": paused,
-            "failed_slots": failed_slots, "schedule_missed": max(0, missed - held - paused - failed_slots),
+            "ok_checks": ok, "missed_checks": missed, "held_slots": held_m, "paused_slots": paused_m,
+            "failed_slots": failed_m, "schedule_missed": schedule_m,
+            "slot_counts_raw": {"ok": ok, "held": held, "paused": paused, "failed": failed_slots},
             "deferred": int(stat("slot_deferred", t)),
             "normal_rate_pct": round(ok / expected * 100, 1) if expected else None,
             # 시도 기준 (일반 감시 1회 = 증권사 시세 조회 1회 + 검증. HTTP 요청 수와 다를 수 있다)
@@ -455,7 +470,8 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         "session": {"open_at": start, "close_at": session.close_ts, "early_close": session.early_close},
         "watched_positions": len(positions),
         "watch": {"expected": total_expected, "ok": total_ok, "missed": sum_pos("missed_checks"),
-                  "held_slots": sum_pos("held_slots"), "failed_slots": sum_pos("failed_slots"),
+                  "held_slots": sum_pos("held_slots"), "paused_slots": sum_pos("paused_slots"),
+                  "failed_slots": sum_pos("failed_slots"),
                   "schedule_missed": sum_pos("schedule_missed"), "attempts": sum_pos("watch_attempts"),
                   "api_errors": sum_pos("quote_fail"), "invalid": sum_pos("quote_invalid"),
                   "normal_rate_pct": round(total_ok / total_expected * 100, 1) if total_expected else None,
@@ -560,8 +576,9 @@ def report_text(rep: dict) -> str:
                      + (f" 장애 {p['health_state']}" if p.get("health_state") not in (None, "OK") else "")
                      for p in w.get("positions", []))
     return (f"[자동손절 일일 보고 {rep['day']} {rep['mode']}] 감시 {rep['watched_positions']}종목 · "
-            f"정상 감시 {w['ok']}/{w['expected']} (누락 {w['missed']} = 보류 미실행 {w.get('held_slots', 0)} + 감시 실패 "
-            f"{w.get('failed_slots', 0)} + 스케줄 지연 {w.get('schedule_missed', 0)}) · 일반 감시 시도 {w.get('attempts', 0)} "
+            f"정상 감시 {w['ok']}/{w['expected']} (누락 {w['missed']} = 보류 미실행 {w.get('held_slots', 0)} + 일시중지 "
+            f"{w.get('paused_slots', 0)} + 감시 실패 {w.get('failed_slots', 0)} + 스케줄 지연 "
+            f"{w.get('schedule_missed', 0)}) · 일반 감시 시도 {w.get('attempts', 0)} "
             f"(API 오류 {w.get('api_errors', 0)}, 무효 {w.get('invalid', 0)}) · 회복 조회 {r.get('ok', 0)}/"
             f"{r.get('attempts', 0)} (실패 {r.get('fail', 0)}, 무효 {r.get('invalid', 0)}, 동일시세 "
             f"{r.get('stale_repeat', 0)}) · 전체 보류 {int(hd.get('global_seconds', 0))}초"

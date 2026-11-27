@@ -815,7 +815,10 @@
               시세 <span x-text="q.ticker"></span>: <span :class="q.state === 'OK' ? '' : 'text-red-700 font-semibold'" x-text="q.state"></span>
               · 연속 오류 <span x-text="q.consecutive_errors"></span> · 마지막 정상 <span x-text="fmt(q.last_ok_at)"></span>
               <span x-show="q.state !== 'OK'"> · 장애 시작 <span x-text="fmt(q.fault_started_at)"></span> (<span x-text="q.fault_reason"></span>) · 회복 확인 <span x-text="(q.confirm_as_of || []).length"></span>/2</span>
+              <span x-show="q.last_observation"> · 최근 조회 <span x-text="q.last_observation"></span></span>
               <span x-show="q.last_error"> · 최근 오류 <span x-text="q.last_error?.category"></span></span></div></template>
+            <div x-show="(health.quote_incident_unresolved || []).length" class="text-xs text-red-700" data-testid="incident-unresolved">
+              미해결 장애 대상: <template x-for="a in (health.quote_incident_unresolved || [])" :key="a.position_id"><span><span x-text="a.ticker"></span>(<span x-text="(a.causes || []).join('+')"></span>, 증거 <span x-text="a.evidence"></span>/2, <span x-text="a.last_status"></span>) </span></template></div>
           </div>
         </template>
         <p x-show="!health.journal" class="text-amber-700">주문 저널(SCANNER_ORDER_JOURNAL_PATH)이 설정되지 않아 자동 손절을 쓸 수 없습니다.</p>
@@ -923,7 +926,7 @@
         <div class="font-semibold">운영 보고 <span x-text="report.day + ' ' + report.mode"></span></div>
         <template x-if="!report.trading_day"><p>휴장일입니다.</p></template>
         <template x-if="report.trading_day"><div class="space-y-1">
-          <div>감시 <span x-text="report.watched_positions"></span>종목 · 정상 감시 <strong x-text="report.watch.ok + '/' + report.watch.expected"></strong> (누락 <span x-text="report.watch.missed"></span> = 보류 미실행 <span x-text="report.watch.held_slots ?? 0"></span> + 감시 실패 <span x-text="report.watch.failed_slots ?? 0"></span> + 스케줄 지연 <span x-text="report.watch.schedule_missed ?? 0"></span>)
+          <div>감시 <span x-text="report.watched_positions"></span>종목 · 정상 감시 <strong x-text="report.watch.ok + '/' + report.watch.expected"></strong> (누락 <span x-text="report.watch.missed"></span> = 보류 미실행 <span x-text="report.watch.held_slots ?? 0"></span> + 일시중지 <span x-text="report.watch.paused_slots ?? 0"></span> + 감시 실패 <span x-text="report.watch.failed_slots ?? 0"></span> + 스케줄 지연 <span x-text="report.watch.schedule_missed ?? 0"></span>)
             · tick <span x-text="report.ticks.actual + '/' + report.ticks.expected"></span> (최대 간격 <span x-text="report.ticks.max_gap_sec ?? '-'"></span>초)</div>
           <div x-show="report.recovery" data-testid="report-recovery">일반 감시 시도 <span x-text="report.watch.attempts ?? 0"></span> (API 오류 <span x-text="report.watch.api_errors ?? 0"></span>, 무효 <span x-text="report.watch.invalid ?? 0"></span>)
             · 회복 조회 <span x-text="(report.recovery?.ok ?? 0) + '/' + (report.recovery?.attempts ?? 0)"></span> (실패 <span x-text="report.recovery?.fail ?? 0"></span>, 무효 <span x-text="report.recovery?.invalid ?? 0"></span>, 동일 시세 <span x-text="report.recovery?.stale_repeat ?? 0"></span>)

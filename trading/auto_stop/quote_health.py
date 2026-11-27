@@ -154,16 +154,29 @@ def slot_start(rec: dict, now: float, interval: int) -> float:
 
 
 def enter_slot(rec: dict, now: float, interval: int) -> str | None:
-    """현재 슬롯으로 이동한다. 이전 일반 감시 슬롯이 시도는 있었으나 성공 없이 끝났으면 'failed'."""
+    """현재 슬롯으로 이동한다. 이전 슬롯이 일반 감시 시도만 있고 분류(ok/held/paused) 없이 끝났으면 'failed'.
+
+    슬롯 분류(slot_class)는 배타적이다: 한 슬롯은 정상(ok)·보류(held)·일시중지(paused)·실패(failed)·
+    스케줄 누락(시도 없음) 중 정확히 하나로만 센다 (회복 조회·재시도로 중복 집계하지 않는다)."""
     cur = slot_start(rec, now, interval)
     if rec.get("cur_slot") == cur:
         return None
     closed = None
     if (rec.get("cur_slot") is not None and rec.get("slot_purpose") == "watch"
-            and rec.get("slot_attempts") and not rec.get("slot_ok")):
+            and rec.get("slot_attempts") and not rec.get("slot_class")):
         closed = "failed"
-    rec.update(cur_slot=cur, slot_ok=False, slot_attempts=0, slot_held=False, slot_purpose=None)
+    rec.update(cur_slot=cur, slot_ok=False, slot_attempts=0, slot_held=False, slot_purpose=None, slot_class=None)
     return closed
+
+
+def claim_slot_class(rec: dict, cls: str) -> bool:
+    """현재 슬롯에 분류를 처음 붙일 때만 True (이미 분류된 슬롯은 다시 세지 않는다)."""
+    if rec.get("slot_class"):
+        return False
+    rec["slot_class"] = cls
+    rec["slot_ok"] = cls == "ok"
+    rec["slot_held"] = cls == "held"
+    return True
 
 
 def schedule_next_slot(rec: dict, now: float, interval: int, factor: int = 1) -> None:
@@ -171,12 +184,22 @@ def schedule_next_slot(rec: dict, now: float, interval: int, factor: int = 1) ->
     놓친 슬롯을 한꺼번에 만회하지 않는다 (지난 슬롯은 건너뛰고 '현재 이후' 첫 슬롯)."""
     if interval <= 0:
         rec["next_due_at"] = now
+        rec["base_due_at"] = None
         return
     base = slot_start(rec, now, interval)
     nxt = base + interval * max(1, factor)
     while nxt + SLOT_TOLERANCE_SEC <= now:
         nxt += interval
     rec["next_due_at"] = nxt
+    # 백오프가 없었다면 조회했을 시각. 이 시각이 지나도 조회하지 않은 tick 은 '백오프로 조회하지 않음'이다.
+    rec["base_due_at"] = base + interval if factor > 1 else None
+
+
+def not_due_status(rec: dict, now: float) -> str:
+    base = rec.get("base_due_at")
+    if base is not None and now + SLOT_TOLERANCE_SEC >= base:
+        return "skipped_backoff"
+    return "not_due"
 
 
 def retry_next_tick(rec: dict, now: float) -> None:
@@ -231,3 +254,84 @@ def backoff_factor(rec: dict) -> int:
 
 def is_broad(faulted: int, watched: int) -> bool:
     return watched >= 2 and faulted >= BROAD_FAULT_MIN and faulted >= watched * BROAD_FAULT_RATIO
+
+
+# ── 시스템 장애(incident): 발생 원인·영향 범위·대상별 복구 증거 ───────────────
+# auto_stop_runtime.quote_global_hold 에 보존한다 (tick·재시작 사이 유지). 종목 추가·일시중지·관리 종료로는
+# 영향 대상이 빠지지 않는다. 조회하지 않은 대상(백오프·시간 예산·장외)은 증거가 생기지 않으므로 해제되지 않는다.
+CAUSE_SYSTEM = "system"     # SYSTEM/UNKNOWN 오류로 영향 대상이 됨 → 같은 요청 경로의 정상 응답 증거 필요
+CAUSE_BROAD = "broad"       # 광범위 조회 실패의 장애 종목 → 종목별 회복(서로 다른 유효 시세 시각 2회) 필요
+
+
+def incident_new(now: float, trigger: str, category, **extra) -> dict:
+    return {"since": now, "reason": category, "triggers": [trigger], "rounds_ok": 0, "seen": [],
+            "affected": {}, "last_system_error_at": now if trigger != "quote_broad" else None, **extra}
+
+
+def incident_add(inc: dict, position: dict, cause: str, category, now: float, *, reset: bool = True) -> dict:
+    """영향 대상 추가. reset=True(새 SYSTEM/UNKNOWN 오류)면 그 대상의 증거를 처음부터 다시 모은다."""
+    key = str(position["id"])
+    affected = inc.setdefault("affected", {})
+    a = affected.get(key)
+    if a is None:
+        a = affected[key] = {"position_id": position["id"], "ticker": position["ticker"],
+                             "exchange": position["exchange"], "mode": position["mode"], "causes": [],
+                             "category": category, "since": now, "anchor": now, "next_due_at": now,
+                             "evidence_ticks": [], "evidence_as_of": [], "resolved": False,
+                             "last_status": "failed", "last_at": now, "rate_limit_streak": 0}
+        reset = True
+    if cause not in a["causes"]:
+        a["causes"].append(cause)
+        a["resolved"] = False
+    if reset:
+        a.update(category=category, evidence_ticks=[], evidence_as_of=[], resolved=False,
+                 last_status="failed", last_at=now)
+        a["rate_limit_streak"] = (int(a.get("rate_limit_streak") or 0) + 1) if category == "rate_limit" else 0
+    return a
+
+
+def incident_observe(inc: dict, position_id, tick_at: float, kind: str, now: float, *, as_of=None,
+                     health_state=None, managed=True) -> None:
+    """영향 대상의 실제 조회 결과 1건. kind: 'ok'(유효 시세) / 'symbol'(응답은 왔으나 그 종목 시세 무효).
+
+    - 같은 tick 의 두 번째 응답은 증거가 아니다 (서로 다른 tick 필요).
+    - 유효 시세는 이전 증거보다 새로운 시세 시각일 때만 증거다 (같은 시세 반복 차단).
+    - SYSTEM/UNKNOWN 오류는 incident_add(reset=True)로 들어온다.
+    """
+    a = (inc.get("affected") or {}).get(str(position_id))
+    if a is None:
+        return
+    a["last_at"] = now
+    if tick_at in a["evidence_ticks"]:
+        return
+    if kind == "ok":
+        if a["evidence_as_of"] and as_of is not None and as_of <= max(a["evidence_as_of"]):
+            a["last_status"] = "stale_repeat"
+            return
+        a["evidence_as_of"].append(as_of)
+    a["evidence_ticks"].append(tick_at)
+    a["rate_limit_streak"] = 0
+    refresh_resolved(a, health_state=health_state, managed=managed)
+
+
+def refresh_resolved(a: dict, *, health_state=None, managed=True) -> bool:
+    ok = True
+    if CAUSE_SYSTEM in a["causes"]:
+        ok = ok and len(a["evidence_ticks"]) >= RECOVERY_CONFIRMATIONS
+    if CAUSE_BROAD in a["causes"]:
+        # 관리 중(ACTIVE/EXITING)이면 그 종목의 회복 상태(OK)가 필요하다. 관리가 끝난 종목은 거래 판단에 쓰이지
+        # 않으므로 같은 요청 경로의 정상 응답 증거(서로 다른 tick 2회)로 대신한다 (관리 종료만으로 해제 안 됨).
+        ok = ok and ((health_state == OK) if managed else len(a["evidence_ticks"]) >= RECOVERY_CONFIRMATIONS)
+    a["resolved"] = ok
+    a["last_status"] = "recovered" if ok else "recovering"
+    return ok
+
+
+def incident_unresolved(inc: dict) -> list:
+    return [a for a in (inc.get("affected") or {}).values() if not a.get("resolved")]
+
+
+def incident_releasable(inc: dict) -> bool:
+    """해제 조건: (1) 모든 영향 대상이 원인별 복구 증거를 충족, (2) 공통 시세 경로가 서로 다른 tick 2회 연속
+    새 유효 시세를 내고 그 사이 SYSTEM 오류가 없음."""
+    return not incident_unresolved(inc) and int(inc.get("rounds_ok") or 0) >= GLOBAL_RECOVERY_ROUNDS
