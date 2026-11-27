@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
+from trading.auto_stop import quote_health as QH
 from trading.auto_stop import settings as S
 from trading.auto_stop.quotes import MIN_AUTO_PRICE, QuoteUnavailable, validate
 from trading.auto_stop.store import UNRESOLVED, ClaimRefused
@@ -385,6 +387,14 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     day_start = datetime.combine(d, datetime.min.time(), tzinfo=NEW_YORK).timestamp()
     fault_audits = store.audits("quote_fault", day_start, day_start + 86400) + \
         store.audits("quote_recovered", day_start, day_start + 86400)
+    pause_audits = store.audits("pause", day_start, day_start + 86400) + \
+        store.audits("resume", day_start, day_start + 86400)
+    hold_periods = _hold_periods(store, start, end)["periods"]
+    interval = int(settings.price_interval_sec)
+
+    def pstat(metric, pid):
+        return int(stat("pos_" + metric, str(pid)))
+
     for p in store.positions(mode=mode):
         if p["created_at"] >= end:
             continue
@@ -392,49 +402,50 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         stop_at = min([e["triggered_at"] for e in p_events] + [end])
         if p["state"] not in ("ACTIVE", "EXITING", "NEEDS_REVIEW") and not p_events:
             stop_at = min(stop_at, p["updated_at"])
-        window = max(0.0, stop_at - max(start, p["created_at"]))
+        ws = max(start, p["created_at"])
+        window = max(0.0, stop_at - ws)
         if window <= 0 and not p_events:
             continue
-        expected = int(window // max(1, settings.price_interval_sec))
-        t = p["ticker"]
-        ok = int(stat("quote_ok", t))
-        held = int(stat("slot_held", t))
-        paused = int(stat("slot_paused", t))
-        failed_slots = int(stat("slot_failed", t))
-        # 기대 슬롯은 기존 기준(장중 등록~트리거 구간 ÷ 감시 주기, 일시중지 구간 포함)을 유지한다.
-        # 누락 = 기대 - 정상. 누락을 보류 → 일시중지 → 감시 실패 → 스케줄 지연 순으로 나눠 합이 항상 누락과 같게 한다
-        # (보고 시점이 슬롯 중간이면 원시 슬롯 수가 기대보다 1 클 수 있어 각 항목을 남은 누락으로 자른다).
-        missed = max(0, expected - ok)
-        held_m = min(held, missed)
-        paused_m = min(paused, missed - held_m)
-        failed_m = min(failed_slots, missed - held_m - paused_m)
-        schedule_m = missed - held_m - paused_m - failed_m
-        total_expected += expected
-        total_ok += ok
-        rec = health.get(str(p["id"])) or {}
+        t, pid = p["ticker"], p["id"]
+        rec = health.get(str(pid)) or {}
+        slots, per_slot, quality = _slot_view(pid, stats, rec, ws, stop_at, interval)
         target = f"{mode}:{t}"
         faults = [{"at": a["at"], "kind": "fault" if a["action"] == "quote_fault" else "recovered",
                    "category": a["details"].get("category")}
                   for a in sorted(fault_audits, key=lambda a: a["at"])
-                  if a["target"] == target and a["details"].get("position_id") in (None, p["id"])]
+                  if a["target"] == target and a["details"].get("position_id") in (None, pid)]
+        transitions = sorted(
+            [{"at": f["at"], "action": "quote_fault" if f["kind"] == "fault" else "quote_recovered"} for f in faults]
+            + [{"at": a["at"], "action": a["action"]} for a in pause_audits if str(a["target"]) == str(pid)]
+            + [{"at": hp["from"], "action": "global_hold_on"} for hp in hold_periods]
+            + [{"at": hp["to"], "action": "global_hold_off"} for hp in hold_periods if hp["to"]],
+            key=lambda x: x["at"])
+        gaps = _gap_view(pid, stats, ws, stop_at, per_slot, interval, transitions, hold_periods)
+        ok = slots["ok"]
+        expected = slots["expected"]
+        total_expected += expected
+        total_ok += ok
+        recovery = {"attempts": pstat("attempt_recovery", pid), "ok": pstat("recovery_ok", pid),
+                    "fail": pstat("recovery_fail", pid), "invalid": pstat("recovery_invalid", pid),
+                    "stale_repeat": pstat("recovery_stale", pid)}
         positions.append({
-            "id": p["id"], "ticker": t, "state": p["state"], "expected_checks": expected,
-            # 슬롯 기준 (감시 슬롯 = 감시 주기 1칸, 성공은 슬롯당 1회만 센다)
-            "ok_checks": ok, "missed_checks": missed, "held_slots": held_m, "paused_slots": paused_m,
-            "failed_slots": failed_m, "schedule_missed": schedule_m,
-            "slot_counts_raw": {"ok": ok, "held": held, "paused": paused, "failed": failed_slots},
-            "deferred": int(stat("slot_deferred", t)),
+            "id": pid, "ticker": t, "state": p["state"], "window": {"start": ws, "end": stop_at},
+            # 감시 슬롯 (거래일 + 모드 + position_id + 슬롯 시작). 완료 슬롯마다 분류 하나, 진행 중 슬롯은 따로.
+            "slots": slots, "expected_checks": expected, "ok_checks": ok, "missed_checks": expected - ok,
+            "held_slots": slots["held"], "paused_slots": slots["paused"],
+            "failed_slots": slots["watch_fail"] + slots["invalid"], "schedule_missed": slots["missed"],
             "normal_rate_pct": round(ok / expected * 100, 1) if expected else None,
-            # 시도 기준 (일반 감시 1회 = 증권사 시세 조회 1회 + 검증. HTTP 요청 수와 다를 수 있다)
-            "watch_attempts": int(stat("watch_attempt", t)),
-            "quote_fail": int(stat("quote_fail", t)), "quote_invalid": int(stat("quote_invalid", t)),
-            "recovery": {"attempts": int(stat("recovery_attempt", t)), "ok": int(stat("recovery_ok", t)),
-                         "fail": int(stat("recovery_fail", t)), "invalid": int(stat("recovery_invalid", t)),
-                         "stale_repeat": int(stat("recovery_stale", t))},
-            "order_quote": {"ok": int(stat("order_quote_ok", t)), "fail": int(stat("order_quote_fail", t)),
-                            "invalid": int(stat("order_quote_invalid", t)),
-                            "held": int(stat("order_held_symbol", t))},
-            "held_triggers": int(stat("held_trigger", t)),
+            "data_quality": quality,
+            # 조회 시도 (목적별, 같은 슬롯의 재시도 포함. HTTP 요청 수와 다를 수 있다)
+            "attempts": {k: pstat(f"attempt_{k}", pid) for k in ("watch", "recovery", "order", "cancel_check",
+                                                                  "incident")},
+            "watch_attempts": pstat("attempt_watch", pid),
+            "quote_fail": pstat("watch_fail", pid), "quote_invalid": pstat("watch_invalid", pid),
+            "recovery": recovery,
+            "order_quote": {"ok": pstat("order_ok", pid), "fail": pstat("order_fail", pid),
+                            "invalid": pstat("order_invalid", pid), "held": int(stat("order_held_symbol", t))},
+            "held_triggers": pstat("held_trigger", pid), "deferred": pstat("deferred", pid),
+            "gaps": gaps,
             "max_quote_age_sec": maxstat("max_quote_age_sec", t),
             "last_quote_at": p["last_quote_at"], "last_check_at": p["last_price_check_at"],
             "health_state": rec.get("state"), "fault_started_at": rec.get("fault_started_at"),
@@ -463,13 +474,22 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     sum_pos = lambda key: sum(int(p[key]) for p in positions)       # noqa: E731
     recovery_tot = {k: sum(int(p["recovery"][k]) for p in positions)
                     for k in ("attempts", "ok", "fail", "invalid", "stale_repeat")}
+    slot_tot = {c: sum(p["slots"][c] for p in positions) for c in QH.SLOT_CLASSES + ("expected",)}
+    normal_gaps = [p["gaps"]["max_normal_sec"] for p in positions if p["gaps"]["max_normal_sec"] is not None]
+    gap_tot = {"max_sec": max([p["gaps"]["max_sec"] for p in positions], default=None),
+               "max_normal_sec": max(normal_gaps, default=None),
+               "over_120": sum(p["gaps"]["over_120"] for p in positions),
+               "normal_over_120": sum(p["gaps"]["normal_over_120"] for p in positions)}
+    quality = [f"{p['ticker']}#{p['id']}: {q}" for p in positions for q in p["data_quality"]]
     heartbeat = store.runtime_get("heartbeat_at")
     unresolved_orders = store.orders(mode=mode, states=UNRESOLVED)
     return {
         **base,
         "session": {"open_at": start, "close_at": session.close_ts, "early_close": session.early_close},
         "watched_positions": len(positions),
+        "data_quality": quality,
         "watch": {"expected": total_expected, "ok": total_ok, "missed": sum_pos("missed_checks"),
+                  "slots": slot_tot, "gaps": gap_tot,
                   "held_slots": sum_pos("held_slots"), "paused_slots": sum_pos("paused_slots"),
                   "failed_slots": sum_pos("failed_slots"),
                   "schedule_missed": sum_pos("schedule_missed"), "attempts": sum_pos("watch_attempts"),
@@ -478,7 +498,7 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
                   "positions": positions},
         # 일반 감시와 따로 센다. 회복 확정에 쓴 시세는 정상 감시 성공(watch.ok)에 넣지 않는다.
         "recovery": recovery_tot,
-        "holds": {**holds, "held_triggers": int(stat("held_trigger"))},
+        "holds": {**holds, "held_triggers": sum(p["held_triggers"] for p in positions)},
         # Scheduler heartbeat (tick) 은 종목별 시세 감시와 별개로 평가한다.
         "ticks": {"expected": expected_ticks, "actual": int(stat("ticks")), "max_gap_sec": max_gap},
         "api": {"errors": int(stat("api_error")), "by_category": {r["key"]: int(r["value"]) for r in stats
@@ -505,6 +525,96 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         "heartbeat": {"last_at": heartbeat, "max_tick_gap_sec": max_gap,
                       "ok": bool(heartbeat) and (max_gap is None or max_gap <= 3 * settings.tick_sec)},
     }
+
+
+def _slot_view(pid, stats, rec, ws, we, interval):
+    """position 의 감시 슬롯 분류. 기대 슬롯 = 그날 슬롯 격자(slot_anchor + k×주기) 중 감시 구간 [ws, we) 안에서
+    끝난 슬롯 + 트리거·관리 종료로 일찍 확정된 슬롯. 각 슬롯은 기록된 최종 분류를 그대로 쓴다 (임의 절삭 없음).
+    끝났지만 다음 tick 이 아직 없어 확정 기록 전인 슬롯은 진행 중 레코드의 플래그로 분류하고, 기록이 없는 슬롯은
+    스케줄 누락(missed, missed_unrecorded 로 따로 표시)이다. 구간 밖 기록은 데이터 품질 오류로 표시한다."""
+    empty = {c: 0 for c in QH.SLOT_CLASSES}
+    if interval <= 0:
+        return {"expected": 0, **empty, "missed_unrecorded": 0, "in_progress": None, "interval": interval}, {}, []
+    key = f"{pid}:"
+    recorded = {}
+    for r in stats:
+        if r["metric"] == "slot" and r["key"].startswith(key):
+            recorded[round(float(r["key"][len(key):]), 3)] = QH.CODE_SLOTS.get(int(r["value"]), "missed")
+    anchor = next((r["value"] for r in stats if r["metric"] == "slot_anchor" and r["key"] == str(pid)), None)
+    quality = []
+    if anchor is None:
+        anchor = rec.get("anchor") or (min(recorded) if recorded else None)
+    if anchor is None:
+        anchor = ws
+        quality.append("anchor_missing: 슬롯 기록이 없어 감시 시작 시각을 격자 기준으로 사용")
+    tol = QH.SLOT_TOLERANCE_SEC
+    k = math.ceil((ws - anchor - tol) / interval - 1e-9)
+    expected, s = [], anchor + k * interval
+    while s + interval - tol <= we + 1e-6:
+        if s + tol >= ws:
+            expected.append(round(s, 3))
+        s += interval
+    exp = set(expected)
+    for rs in recorded:                               # 트리거·관리 종료로 끝나기 전에 확정된 마지막 슬롯
+        if rs not in exp and ws - tol <= rs < we:
+            expected.append(rs)
+            exp.add(rs)
+    outside = [rs for rs in recorded if rs not in exp]
+    if outside:
+        quality.append(f"slot_out_of_window: 감시 구간 밖 슬롯 기록 {len(outside)}건")
+    cur = rec.get("slot_start")
+    cur = round(cur, 3) if cur is not None else None
+    classes, unrecorded, per_slot = dict(empty), 0, {}
+    for s in sorted(expected):
+        cls = recorded.get(s)
+        if cls is None and cur is not None and abs(s - cur) < 1e-3:
+            cls = QH.slot_final_class(rec.get("slot_flags"))
+        if cls is None:
+            cls, unrecorded = "missed", unrecorded + 1
+        classes[cls] += 1
+        per_slot[s] = cls
+    in_progress = cur if (cur is not None and cur not in exp and ws - tol <= cur < we) else None
+    return ({"expected": len(expected), **classes, "missed_unrecorded": unrecorded, "in_progress": in_progress,
+             "interval": interval}, per_slot, quality)
+
+
+GAP_LIMIT_SEC = 120
+
+
+def _gap_view(pid, stats, ws, we, per_slot, interval, transitions, hold_periods):
+    """최대 연속 감시 공백. 기준점 = 감시 시작(ws), 일반 감시 실제 성공 완료 시각들, 감시 종료(we).
+    회복 조회는 성공에 넣지 않는다. 공백 안의 슬롯 분류·상태 전이로 원인을 붙이고, 종목 장애·전체 보류·일시중지가
+    없던 공백을 '정상 상태 공백'으로 따로 센다. (Scheduler tick 간격·시세 신선도와는 별개 지표)"""
+    key = f"{pid}:"
+    succ = sorted(r["value"] for r in stats
+                  if r["metric"] == "watch_ok_at" and r["key"].startswith(key) and ws <= r["value"] <= we)
+    pts = [ws] + succ + [we]
+    tol = QH.SLOT_TOLERANCE_SEC
+    items, max_sec, max_normal = [], None, None
+    over = normal_over = 0
+    for a, b in zip(pts, pts[1:]):
+        dur = round(b - a, 1)
+        classes = {}
+        for s, c in per_slot.items():
+            if c != "ok" and s - tol < b and s + interval - tol > a:
+                classes[c] = classes.get(c, 0) + 1
+        trans = [x for x in transitions if a <= x["at"] <= b]
+        on_hold = any(hp["from"] < b and (hp["to"] is None or hp["to"] > a) for hp in hold_periods)
+        normal = not classes.get("held") and not classes.get("paused") and not on_hold
+        cause = ("held" if classes.get("held") or on_hold else "paused" if classes.get("paused")
+                 else "watch_fail" if classes.get("watch_fail") else "invalid" if classes.get("invalid")
+                 else "schedule_missed" if classes.get("missed") else "interval")
+        max_sec = dur if max_sec is None else max(max_sec, dur)
+        if normal:
+            max_normal = dur if max_normal is None else max(max_normal, dur)
+        if dur > GAP_LIMIT_SEC:
+            over += 1
+            normal_over += 1 if normal else 0
+            items.append({"start": a, "end": b, "duration": dur, "normal": normal, "cause": cause,
+                          "classes": classes, "transitions": trans})
+    return {"successes": len(succ), "first_success_at": succ[0] if succ else None,
+            "last_success_at": succ[-1] if succ else None, "max_sec": max_sec, "max_normal_sec": max_normal,
+            "over_120": over, "normal_over_120": normal_over, "items": items}
 
 
 def _hold_periods(store, start, end) -> dict:
@@ -572,13 +682,18 @@ def report_text(rep: dict) -> str:
         return f"[자동손절 일일 보고 {rep['day']} {rep['mode']}] 휴장일"
     w, o = rep["watch"], rep["orders"]
     r, hd = rep.get("recovery") or {}, rep.get("holds") or {}
-    per = " · ".join(f"{p['ticker']} {p['ok_checks']}/{p['expected_checks']}"
+    per = " · ".join(f"{p['ticker']}#{p['id']} {p['ok_checks']}/{p['expected_checks']}"
+                     + (f" 최대공백 {p['gaps']['max_sec']}초" if p.get("gaps", {}).get("max_sec") is not None else "")
                      + (f" 장애 {p['health_state']}" if p.get("health_state") not in (None, "OK") else "")
                      for p in w.get("positions", []))
+    g = w.get("gaps") or {}
+    gap_text = (f" · 최대 감시 공백 {g.get('max_sec')}초 (정상 상태 {g.get('max_normal_sec')}초, 120초 초과 "
+                f"{g.get('over_120', 0)}건 중 정상 상태 {g.get('normal_over_120', 0)}건)" if g else "")
+    dq = rep.get("data_quality") or []
     return (f"[자동손절 일일 보고 {rep['day']} {rep['mode']}] 감시 {rep['watched_positions']}종목 · "
             f"정상 감시 {w['ok']}/{w['expected']} (누락 {w['missed']} = 보류 미실행 {w.get('held_slots', 0)} + 일시중지 "
             f"{w.get('paused_slots', 0)} + 감시 실패 {w.get('failed_slots', 0)} + 스케줄 지연 "
-            f"{w.get('schedule_missed', 0)}) · 일반 감시 시도 {w.get('attempts', 0)} "
+            f"{w.get('schedule_missed', 0)}){gap_text} · 일반 감시 시도 {w.get('attempts', 0)} "
             f"(API 오류 {w.get('api_errors', 0)}, 무효 {w.get('invalid', 0)}) · 회복 조회 {r.get('ok', 0)}/"
             f"{r.get('attempts', 0)} (실패 {r.get('fail', 0)}, 무효 {r.get('invalid', 0)}, 동일시세 "
             f"{r.get('stale_repeat', 0)}) · 전체 보류 {int(hd.get('global_seconds', 0))}초"
@@ -588,7 +703,8 @@ def report_text(rep: dict) -> str:
             f"(HTTP 요청 {rep['api'].get('http_requests', 0)}, 429 {rep['api']['http_429']}) · 손절 {rep['triggers']} · "
             f"주문 {o['total']} (재주문 {o['by_kind']['REPLACE']}, "
             f"체결 {o['filled']}, 미체결 {o['partial_or_open']}) · 미해결 이벤트 {rep['unresolved_events']} · "
-            f"알림 실패 {rep['alerts']['failed']}" + _shadow_text(rep.get("shadow"))
+            f"알림 실패 {rep['alerts']['failed']}" + (f" · 데이터 품질 오류 {len(dq)}건" if dq else "")
+            + _shadow_text(rep.get("shadow"))
             + (f" · {rep['note']}" if rep["note"] else ""))
 
 

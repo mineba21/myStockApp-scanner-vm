@@ -272,7 +272,7 @@ def test_no_cancel_while_global_hold(r):
     assert r.broker.cancels == []
     ev, pos, o = r.event(r.pid), r.pos(r.pid), r.orders()[0]
     from trading.auto_stop.us_calendar import market_clock
-    assert r.engine._replace_precheck(market_clock(r.clock(), r.st), ev, pos, o).startswith("global_hold")
+    assert r.engine._replace_precheck(market_clock(r.clock(), r.st), ev, pos, o)[0].startswith("global_hold")
 
 
 def test_no_cancel_when_kill_switch(r):
@@ -402,7 +402,7 @@ def test_paused_then_resumed_day_slot_totals_reconcile(tmp_path, monkeypatch):
         total_key = {"missed_checks": "missed", "ok_checks": "ok", "expected_checks": "expected"}.get(k, k)
         assert w[total_key] == sum(p[k] for p in w["positions"])
     cinf = [p for p in w["positions"] if p["ticker"] == "CINF"][0]
-    assert cinf["slot_counts_raw"]["paused"] == 6
+    assert cinf["slots"]["paused"] == 6                          # 완료 슬롯의 실제 분류 (절삭 없음)
     assert cinf["paused_slots"] == 6 and cinf["held_slots"] == 0 and cinf["expected_checks"] == 16
     evrg = [p for p in w["positions"] if p["ticker"] == "EVRG"][0]
     assert evrg["failed_slots"] + evrg["held_slots"] >= 1 and evrg["paused_slots"] == 0

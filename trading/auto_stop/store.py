@@ -307,10 +307,23 @@ class AutoStopStore:
         with self.tx() as db:
             return _row(db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (oid,)).fetchone())
 
+    @staticmethod
+    def rt(db, key, default=None):
+        """트랜잭션 안에서 runtime 값 읽기 (공통 실행 게이트용)."""
+        r = db.execute("SELECT value FROM auto_stop_runtime WHERE key=?", (key,)).fetchone()
+        return json.loads(r["value"]) if r and r["value"] is not None else default
+
     def claim_sell(self, now, *, owner, event_id, kind, qty, ref_price, ref_source, quote_as_of, limit_price,
-                   settings, guard) -> dict:
-        """한 트랜잭션에서 모든 조건을 확인하고 SENDING 행을 만든다. guard()는 실거래 스위치 재검증."""
+                   settings, guard, clock=None, gate=None, sent_evidence=None) -> dict:
+        """한 트랜잭션에서 모든 조건을 확인하고 SENDING 행을 만든다. guard()는 실거래 스위치 재검증.
+
+        clock 을 주면 쓰기 잠금(BEGIN IMMEDIATE)을 얻은 뒤의 실제 현재 시각으로 lease·게이트를 판단한다 (잠금 대기
+        동안 흐른 시간을 반영). gate(db, now) 는 공통 실행 게이트(정규장·cutoff·모드·보류·스냅샷·시세 신선도)이며
+        사유 문자열을 돌려주면 선점을 거부한다. 선점과 같은 트랜잭션에서 sent_at·증거를 기록하므로 커밋 직후 곧바로
+        증권사 요청을 보낸다 (선점과 전송 사이에 다른 DB·API 작업이 없다)."""
         with self.tx() as db:
+            if clock is not None:
+                now = clock()
             self._check_lease(db, owner, now)
             kill = self._kill(db)
             if kill:
@@ -318,6 +331,10 @@ class AutoStopStore:
             reason = guard()
             if reason:
                 raise ClaimRefused(reason)
+            if gate is not None:
+                reason = gate(db, now)
+                if reason:
+                    raise ClaimRefused(reason)
             self._extend_lease(db, owner, now, settings.lease_sec)
             ev = db.execute("SELECT * FROM auto_stop_exit_events WHERE id=?", (event_id,)).fetchone()
             if ev is None or ev["state"] != "OPEN":
@@ -345,20 +362,27 @@ class AutoStopStore:
                 if ev["event_replace_count"] >= settings.max_replaces_per_event:
                     raise ClaimRefused("이벤트 재주문 한도 도달")
             attempt = 0 if last is None else last["attempt_no"] + 1
+            details = json.dumps(sent_evidence or {}, default=str)
             cur = db.execute(
                 '''INSERT INTO auto_stop_orders(exit_event_id,mode,account_profile,attempt_no,kind,parent_order_id,
                    ticker,exchange,ref_price,ref_source,quote_as_of,limit_price,requested_qty,remaining_order_qty,
-                   state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'SENDING',?,?)''',
+                   state,sent_at,details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'SENDING',?,?,?,?)''',
                 (event_id, ev["mode"], "account1", attempt, kind, last["id"] if last else None, pos["ticker"],
-                 pos["exchange"], str(ref_price), ref_source, quote_as_of, str(limit_price), qty, qty, now, now))
+                 pos["exchange"], str(ref_price), ref_source, quote_as_of, str(limit_price), qty, qty,
+                 now if clock is not None else None, details, now, now))
             inc = ", session_replace_count=session_replace_count+1, event_replace_count=event_replace_count+1" \
                 if kind == "REPLACE" else ""
             db.execute(f"UPDATE auto_stop_exit_events SET next_order_kind='REPLACE'{inc}, updated_at=? WHERE id=?",
                        (now, event_id))
             return dict(db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (cur.lastrowid,)).fetchone())
 
-    def claim_cancel(self, now, *, owner, order_id, expect_state, guard, lease_sec=90) -> dict:
+    def claim_cancel(self, now, *, owner, order_id, expect_state, guard, lease_sec=90, clock=None, gate=None,
+                     evidence=None) -> dict:
+        """재주문 목적 취소 선점. clock·gate 의미는 claim_sell 과 같다. 사전 검증 스냅샷이 최신 DB 상태와 다르면
+        gate 가 거부한다 (상태가 같은 PARTIAL_FILLED 여도 누적 체결·잔량이 바뀌었으면 거부)."""
         with self.tx() as db:
+            if clock is not None:
+                now = clock()
             self._check_lease(db, owner, now)
             kill = self._kill(db)
             if kill:
@@ -366,15 +390,36 @@ class AutoStopStore:
             reason = guard()
             if reason:
                 raise ClaimRefused(reason)
+            if gate is not None:
+                reason = gate(db, now)
+                if reason:
+                    raise ClaimRefused(reason)
             self._extend_lease(db, owner, now, lease_sec)
             o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (order_id,)).fetchone()
             if o is None or o["state"] != expect_state or o["cancel_rejected"] or not o["order_number"]:
                 raise ClaimRefused("취소 조건이 맞지 않습니다.")
             details = json.loads(o["details"])
             details["cancel_from_state"] = expect_state
+            if evidence:
+                details.setdefault("cancel_claim", []).append(evidence)
             db.execute("UPDATE auto_stop_orders SET state='CANCEL_SENDING', cancel_sent_at=?, details=?, updated_at=? "
-                       "WHERE id=? AND state=?", (now, json.dumps(details), now, order_id, expect_state))
+                       "WHERE id=? AND state=?", (now, json.dumps(details, default=str), now, order_id, expect_state))
             return dict(db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (order_id,)).fetchone())
+
+    def stat_set(self, day, mode, metric, key, value):
+        """일별 통계 한 행을 지정 값으로 쓴다 (감시 슬롯 최종 분류·성공 시각 등, 재기록 시 덮어씀)."""
+        with self.tx() as db:
+            db.execute("INSERT INTO auto_stop_daily_stats(day,mode,metric,key,value) VALUES(?,?,?,?,?) "
+                       "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=excluded.value",
+                       (day, mode, metric, key, value))
+
+    def stat_set_many(self, rows):
+        """여러 통계 행을 한 트랜잭션에서 쓴다. rows: [(day, mode, metric, key, value)]."""
+        if not rows:
+            return
+        with self.tx() as db:
+            db.executemany("INSERT INTO auto_stop_daily_stats(day,mode,metric,key,value) VALUES(?,?,?,?,?) "
+                           "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=excluded.value", rows)
 
     def transition(self, oid, now, *, frm, to, **fields) -> bool:
         """조건부 상태 전이. frm 은 상태 하나 또는 튜플."""

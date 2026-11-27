@@ -938,7 +938,11 @@
           <template x-for="w in report.watch.positions" :key="w.id"><div class="text-xs">
             <span x-text="w.ticker"></span>: 정상 <span x-text="w.ok_checks + '/' + w.expected_checks"></span> (<span x-text="w.normal_rate_pct ?? '-'"></span>%), 실패 <span x-text="w.quote_fail"></span>, 무효 <span x-text="w.quote_invalid"></span>, 보류 <span x-text="w.held_slots ?? 0"></span>, 회복 <span x-text="w.recovery ? (w.recovery.ok + '/' + w.recovery.attempts) : '-'"></span>, 최대 시세 지연 <span x-text="w.max_quote_age_sec ?? '-'"></span>초, 마지막 정상 <span x-text="fmt(w.last_check_at)"></span>
             <span x-show="w.health_state && w.health_state !== 'OK'" class="text-red-700"> · 시세 <span x-text="w.health_state"></span> (장애 시작 <span x-text="fmt(w.fault_started_at)"></span>)</span>
-            <span x-show="w.recovered_at" class="text-green-700"> · 복구 <span x-text="fmt(w.recovered_at)"></span></span></div></template>
+            <span x-show="w.recovered_at" class="text-green-700"> · 복구 <span x-text="fmt(w.recovered_at)"></span></span>
+            <span x-show="w.gaps"> · 최대 공백 <span x-text="w.gaps?.max_sec ?? '-'"></span>초 (정상 상태 <span x-text="w.gaps?.max_normal_sec ?? '-'"></span>초, 120초 초과 <span x-text="w.gaps?.over_120 ?? 0"></span>건)</span>
+            <span x-show="w.slots?.in_progress" class="text-gray-500"> · 진행 중 슬롯 1</span>
+            <span x-show="(w.data_quality || []).length" class="text-red-700"> · 데이터 품질: <span x-text="(w.data_quality || []).join(', ')"></span></span></div></template>
+          <div x-show="report.watch.gaps" class="text-xs" data-testid="report-gaps">최대 감시 공백 <span x-text="report.watch.gaps?.max_sec ?? '-'"></span>초 · 정상 상태 최대 <span x-text="report.watch.gaps?.max_normal_sec ?? '-'"></span>초 · 120초 초과 <span x-text="report.watch.gaps?.over_120 ?? 0"></span>건 (정상 상태 <span x-text="report.watch.gaps?.normal_over_120 ?? 0"></span>건)</div>
           <template x-for="f in report.fills_vs_stop" :key="f.order_id"><div class="text-xs"><span x-text="f.ticker"></span> 가상 체결 <span x-text="f.filled_qty"></span>주 @ <span x-text="f.fill_price"></span> (손절가 대비 <span x-text="f.vs_stop_pct"></span>%)</div></template>
           <template x-if="report.shadow && report.shadow.by_model"><div class="text-xs space-y-1" data-testid="report-by-model">
             <div>현재 모델 <span x-text="report.shadow.current?.fill_model"></span> · SHADOW 재주문 <span x-text="report.shadow.current?.shadow_replace_enabled ? '켜짐' : '꺼짐'"></span>
