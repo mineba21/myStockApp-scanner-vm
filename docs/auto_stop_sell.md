@@ -452,12 +452,24 @@ RECOVERING ──(오류)──> FAULT          RECOVERING ──(같은·더 �
 
 - Scanner 매수의 미확정 정의(`trading/scanner_buy_orders.py`, `store.SCANNER_IN_FLIGHT_SQL`): SENDING, UNKNOWN, 그리고 SUBMITTED 이면서 브로커 최종 상태(FILLED·CANCELLED·REJECTED)가 확인되지 않은 주문(미체결 OPEN·부분체결 PARTIAL·미조회 포함). PREPARED(미전송)·BLOCKED·REJECTED·ABANDONED·RESOLVED_MANUAL 은 증권사에 살아 있는 주문이 아니다.
 - LIVE `claim_sell`·`claim_cancel` 의 선점 트랜잭션 안에서 같은 `db` 객체로 확인한다 (`AutoStopStore.scanner_buy_in_flight_db`, 새 연결·중첩 트랜잭션 없음). 사전 검사(`_send`, 취소 전 검증)도 같은 SQL 을 쓴다.
-- 표가 없으면 미확정 없음으로 본다: Scanner 매수 모듈은 첫 사용 때 같은 저널에 `CREATE TABLE IF NOT EXISTS` 로 표를 만들므로, 표가 없다는 것은 그 저널에서 Scanner 매수가 한 번도 준비되지 않았다는 뜻이다. 선점 트랜잭션이 쓰기 잠금을 쥐고 있는 동안 다른 연결은 표를 만들거나 행을 넣을 수 없다.
-- 표가 있는데 조회가 실패하면(열 누락 등 스키마 불일치, SQLite 오류) `ScannerJournalUnreadable` 로 선점을 거부한다.
+- **객체 판정 (2026-11-27 Codex 4차 리뷰 P1 반영)** — 선점 트랜잭션과 같은 `db` 로 확인하며 스키마를 바꾸지 않는다.
+  - 이름은 대소문자 구분 없이 찾는다 (`main.sqlite_master` 에서 `name = 'scanner_buy_orders' COLLATE NOCASE`, SQLite 식별자 규칙과 동일). 유형으로 미리 거르지 않는다.
+  - `main` 스키마를 명시한다. 미확정 조회도 `main.scanner_buy_orders` 로 하므로 같은 연결의 TEMP 객체가 실제 표를 가릴 수 없다.
+  - `main` 에 그 이름의 객체가 **하나도 없을 때만** "실제 부재 = 미확정 없음"이다. Scanner 매수 모듈은 첫 사용 때 같은 저널에 표를 만들므로, 없다는 것은 그 저널에서 Scanner 매수가 한 번도 준비되지 않았다는 뜻이다. 선점 트랜잭션이 쓰기 잠금을 쥐고 있는 동안 다른 연결은 표를 만들거나 행을 넣을 수 없다.
+  - `main` 에 객체가 없는데 TEMP 에만 있으면 신뢰하지 않고 거부한다.
+  - 객체 유형이 표 하나가 아니면(VIEW, 같은 이름의 INDEX·TRIGGER 등) 거부한다.
+  - 메타데이터 조회 실패, 표가 있는데 미확정 조회 실패(열 누락 등 스키마 불일치, SQLite 오류)는 "부재"로 보지 않고 거부한다.
+  - 거부는 모두 `ScannerJournalUnreadable` 이며 LIVE ORIGINAL·REPLACE·CARRY_OVER 매도와 CANCEL_FOR_REPLACE 취소의 선점을 막는다 (sell/cancel 전송 0회). SHADOW 는 증권사로 보내지 않으므로 이 확인을 하지 않는다.
 
-**반대 방향 경쟁 (Scanner 매수 선점 → 자동손절 매도) — 교차 시스템 LIVE 차단 조건**
-- Scanner 매수의 `prepare()` 는 Scanner 미확정만, `execute()` 의 선점 갱신(PREPARED→SENDING)은 아무 교차 확인 없이 진행한다. 자동손절 LIVE 매도가 SENDING·SUBMITTED·CANCEL_* 인 같은 종목에 Scanner 매수가 나갈 수 있다 (이번 PR 범위 밖, 코드 변경 없음).
-- 같은 종목에 매수·매도 주문이 동시에 살아 있을 수 있으므로, **LIVE 전환 전 Scanner 매수 경로에 자동손절 미확정 주문 확인을 추가하는 별도 승인 작업이 필요하다.** 그전까지 LIVE 는 다른 게이트(미검증 API 계약)로도 차단되어 있다.
+**반대 방향 경쟁 (Scanner 매수 선점 → 자동손절 매도) — 교차 시스템 LIVE 차단 조건 (미해결)**
+- 현재 상태: Scanner 매수의 `prepare()` 는 Scanner 미확정만 보고, `execute()` 의 선점 갱신(PREPARED→SENDING)은 아무 교차 확인 없이 진행한다. 자동손절 LIVE 매도·취소가 진행 중인 같은 종목에 Scanner 매수가 나갈 수 있다. 이 PR 은 자동손절 쪽(정방향)만 막으며 Scanner 매수 코드는 바꾸지 않는다.
+- 필요한 수정 (별도 작업 제안, 자동매수 PR #14 와 병합하지 않음):
+  1. Scanner 매수의 PREPARED→SENDING 선점 갱신과 **같은 쓰기 트랜잭션 안에서** 역방향 확인을 한다.
+  2. 범위: 같은 `account_profile='account1'`·같은 ticker (대소문자 정규화 기준).
+  3. 차단할 자동손절 상태: 미해결 매도 주문 `SENDING`·`SUBMITTED`·`UNKNOWN`·부분체결, 취소 진행 `CANCEL_SENDING`·`CANCEL_SUBMITTED`·`CANCEL_UNKNOWN`, 열린 청산 이벤트가 재주문 대기인 경우. 자동손절 표·객체를 읽을 수 없으면 Scanner 매수 선점도 거부(fail closed)한다.
+  4. 양방향 동시 선점 방지: 두 시스템이 같은 SQLite 저널에서 `BEGIN IMMEDIATE` 쓰기 잠금 안에서 서로의 미확정을 확인하고 자기 선점을 커밋하므로, 한쪽이 커밋하면 다른 쪽은 그 행을 보고 거부한다. 두 확인 중 하나라도 잠금 밖에서 하면 이 보장이 깨진다.
+  5. 테스트: 양방향 각 상태별 차단, 동시 선점 경쟁, 객체 부재·VIEW·TEMP·조회 실패의 fail closed.
+- **이 역방향 확인이 구현·검증되기 전에는 account1 자동손절 LIVE 를 켜지 않는다.** 그전까지 LIVE 는 다른 게이트(미검증 API 계약, 기본 `AUTO_STOP_US_MODE=OFF`)로도 차단되어 있다.
 - 두 시스템의 확인을 각각의 쓰기 트랜잭션 안에 두면 선점 시점의 상호 배제는 보장되지만, SQLite 트랜잭션과 증권사 API 를 원자적으로 묶을 수는 없다 (아래 "보장 범위").
 
 **선점과 외부 전송의 보장 범위 (원자성의 한계)**
@@ -619,15 +631,35 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
   - 종목 장애: `quote_fault`/`quote_recovered` (대상 `mode:ticker`, position_id) + 기존 카운터 이행 `quote_health_migrate`. 대체 조회 경로의 장애·복구도 감사 기록을 남긴다.
   - 전체 보류: `global_hold`
 - 정상 상태 공백 = 공백 전 구간이 위 어떤 상태와도 겹치지 않고 보류·일시중지 슬롯도 없는 공백. 상태가 섞인 공백은 정상 상태가 아니다. 각 공백에 겹친 상태(`states`), 상태 전이, 원인(`global_hold`/`symbol_fault`/`paused`/`watch_fail`/`invalid`/`schedule_missed`/`interval`)을 붙이고, 감시 시작 시점의 상태(`state_at_start`)를 보인다.
-- 오늘 보고서에서 현재 상태(포지션 `auto_paused`, 종목 상태)가 복원 결과와 맞지 않으면(감사 기록 없는 변경) 정상 상태 판정을 하지 않는다: `gaps.measurable=false`, `max_normal_sec=null`, `data_quality: state_unaudited`. 실제 전체 공백(`max_sec`, `over_120`)은 그대로 보인다.
+- 감사 기록 없는 상태 변경 확인 (2026-11-27 Codex 4차 리뷰 P2 반영) — 조회 시각에 따라 과거 결과가 바뀌지 않게 한다.
+  - **마감 시점 근거 보존**: 엔진의 장 마감 처리(슬롯 확정과 같은 지점, 보고서 조회 경로가 아님)가 포지션마다 현재 상태(`auto_paused`, 종목 상태)를 감사 기록 복원 결과와 비교해 `metric='state_audit'`(key=position_id, 1=일치, 0=불일치)로 남기고, 끝에 `state_audit_done`(시각)을 남긴다. 기존 표·기존 지표 방식이며 스키마 변경은 없다.
+  - 과거 날짜(마감 처리 완료)는 이 근거만 쓴다. 현재 시각·현재 포지션 상태·다음 날 감사 기록으로 판정을 바꾸지 않는다. `state_audit=0` 이면 `state_unaudited`, 마감 근거가 없는 과거 날짜(앱 중단 등)는 `state_evidence_missing` 이며 둘 다 정상 상태 판정 불가로 고정된다.
+  - 당일 장중(마감 처리 전)만 현재 상태로 확인한다.
+  - 슬롯 분류와 복원 구간도 대조한다: 일시중지 구간 밖의 `paused` 슬롯, 장애·보류 구간 밖의 `held` 슬롯이 있으면 `state_unaudited`.
+  - 판정 불가 포지션: `gaps.measurable=false`, `max_normal_sec=null`. 실제 전체 공백(`max_sec`, `over_120`)은 그대로 보인다.
 - 지표: 전체 실제 최대 공백(`max_sec`), 정상 상태 공백의 최대(`max_normal_sec`), 120초 초과 전체 공백 수(`over_120`), 120초 초과 정상 상태 공백 수(`normal_over_120`).
 
 ### 보고서 데이터 형식 (LEGACY / SLOT_V2 / MIXED)
 
 - 엔진은 그 거래일·모드에서 처음 tick 을 돌 때 `metric='slot_v2_since'` 에 시각을 남긴다 (장 전 tick 포함, 한 번만).
-- `LEGACY`: 표식이 없는 날 (예: 2026-11-25). 기존 집계로 복원한다 — 기대 = 감시 구간 ÷ 감시 주기 내림, 정상 = 티커별 `quote_ok`, 누락 = 기대 − 정상. 슬롯 분류·성공 시각·최대 공백은 측정 불가(`null`, `gaps.measurable=false`). 같은 날 같은 티커 포지션이 여럿이면 포지션별로 나누지 않고(`ok_checks=null`, `data_quality: legacy_ticker_shared`) `watch.legacy_ticker_totals` 에 티커 합계로 한 번만 센다.
-- `SLOT_V2`: 모든 포지션의 감시 시작이 표식 이후(허용 오차 = tick 주기 + 3초). position_id 슬롯·성공 시각으로 전부 측정한다.
-- `MIXED`: 표식이 있지만 감시가 표식 전에 시작된 포지션이 있음 (장중 버전 전환). 그 포지션의 정상·기대는 기존 일계 집계 기준(전 구간, 신규 코드도 같은 `quote_ok` 를 슬롯당 1회 올리므로 중복 없음), 슬롯·공백은 표식 이후만 측정(`gaps.partial=true`, `measured_from`, `data_quality: mixed_format`).
+- 형식은 **포지션별**로 정한다 (2026-11-27 Codex 4차 리뷰 P2 반영). 집계 단위가 둘이다: 구버전 정상 횟수는 티커 단위(`quote_ok`, key=ticker), 신버전 슬롯은 position_id 단위.
+  - `LEGACY`: 표식이 없거나 감시가 표식 전에 끝난 포지션 (예: 2026-11-25 전체). 기대 = 감시 구간 ÷ 감시 주기 내림.
+  - `SLOT_V2`: 감시 시작이 표식 이후. 표식 직전 허용 오차(tick 주기 + 3초) 안에서 시작했더라도 아래 잔여가 0일 때만 SLOT_V2 다.
+  - `MIXED`: 감시가 표식 전에 시작해 표식 이후까지 이어진 포지션 (장중 버전 전환), 또는 허용 오차 안 시작이지만 구버전 성공이 남아 있는 포지션. 기대 = 표식 전 구간 ÷ 주기 올림 + 표식 이후 슬롯 기대. 슬롯·공백은 표식 이후만 측정(`gaps.partial=true`, `measured_from`).
+- 티커별 잔여 = `quote_ok`(티커) − 그 티커 SLOT_V2·MIXED 포지션의 신버전 성공(완료 슬롯 ok + 진행 중 슬롯 성공 1회. 신버전도 같은 `quote_ok` 를 슬롯당 1회 올리므로 빼야 중복이 없다).
+  - 잔여를 받을 수 있는 포지션(LEGACY·MIXED)이 하나면 그 포지션에 준다 (MIXED 는 잔여 + 신버전 완료 슬롯 ok).
+  - 둘 이상이면 나누지 않는다: 포지션 `ok_checks=null`, `legacy_ticker_shared`, `watch.legacy_ticker_totals` 에 티커 합계(정상·기대)로 한 번만 센다.
+  - 잔여를 받을 포지션이 없는데 잔여가 남으면 `unattributed_legacy_ok` 로 보이고 어디에도 더하지 않는다.
+  - 잔여 < 0(일계가 상세보다 작음)이면 0 으로 자르지 않고 `ok_checks=null`, `aggregate_mismatch`, 측정 불가로 센다.
+  - 정상 > 기대이면 100% 로 자르지 않고 `missed=null`, 감시율 `null`, `aggregate_exceeds_expected`.
+- 예: 같은 티커 구버전 2/2 후 관리 종료 → 신버전 재등록 3/3 = 전체 5/5, 누락 0, 100%. 허용 오차 안 전환인데 구버전 성공 1회가 있으면 MIXED 로 그 1회를 보존한다.
+- 구버전 몫(일시중지·보류·감시 실패·무효 슬롯 수, 최대 공백)은 측정할 수 없으므로 `null` 이다.
+
+### 측정 불가·부분 측정 표시 (API · Slack · 웹 공통)
+
+- `0` 은 실제로 측정한 0 이다. 측정할 수 없는 값은 `null` 이며 Slack·웹에는 "측정 불가"로 쓴다.
+- 누락 원인 분해(보류·일시중지·감시 실패·스케줄 지연)는 측정 가능한 포지션 합만 보이고, 원인을 측정할 수 없는 누락은 `cause_unmeasured_missed` 로 따로 보인다. 모두 측정 불가면 "누락 661 (세부 원인 측정 불가)"처럼 쓰고 `= 0 + 0 + 0 + 0` 식의 가짜 분해를 쓰지 않는다.
+- 커버리지: `ok_coverage`(정상 횟수), `gaps.coverage`(실제 공백), `gaps.normal_coverage`(정상 상태 공백) 각각 `full` / `partial` / `none`, 측정·부분 측정·미측정 포지션 수를 함께 보인다. 부분 측정이면 `max_sec`·`max_normal_sec` 은 측정된 포지션 기준의 하한이다. 측정 포지션이 하나도 없으면 `null`.
 - 보고서 생성은 읽기 전용이다. 기존 저널·저장된 보고서를 바꾸지 않는다.
 
 ### 저장량과 보고서 성능 (측정)

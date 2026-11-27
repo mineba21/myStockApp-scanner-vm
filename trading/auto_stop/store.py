@@ -42,7 +42,7 @@ class ScannerJournalUnreadable(Exception):
 # Scanner 매수의 미확정 정의 (trading/scanner_buy_orders.py): 전송 중·접수 불명(SENDING/UNKNOWN), 그리고
 # 접수(SUBMITTED)됐지만 브로커 최종 상태(FILLED/CANCELLED/REJECTED)가 확인되지 않은 주문(미체결·부분체결 포함).
 # PREPARED(미리보기, 미전송)·BLOCKED·REJECTED·ABANDONED·RESOLVED_MANUAL 은 증권사에 살아 있는 주문이 아니다.
-SCANNER_IN_FLIGHT_SQL = ("SELECT 1 FROM scanner_buy_orders WHERE account_profile='account1' AND ticker=? AND "
+SCANNER_IN_FLIGHT_SQL = ("SELECT 1 FROM main.scanner_buy_orders WHERE account_profile='account1' AND ticker=? AND "
                          "(state IN ('SENDING','UNKNOWN') OR (state='SUBMITTED' AND "
                          "COALESCE(broker_state,'') NOT IN ('FILLED','CANCELLED','REJECTED'))) LIMIT 1")
 
@@ -521,14 +521,28 @@ class AutoStopStore:
         표가 없다는 것은 이 저널에서 Scanner 매수가 한 번도 준비되지 않았다는 뜻이다. 선점 트랜잭션은 쓰기 잠금을
         쥐고 있어 그 사이 다른 연결이 표를 만들거나 행을 넣을 수 없다. 표가 있는데 조회가 실패하면(열 누락 등)
         ScannerJournalUnreadable 로 올려 선점을 거부하게 한다."""
+        # 1) 객체 존재·유형: main 스키마 메타데이터에서 SQLite 식별자 규칙(대소문자 무시)으로 찾는다.
+        #    유형으로 미리 거르지 않는다 (VIEW·INDEX 등 동명 객체를 '표 없음'으로 오판하지 않게).
         try:
-            exists = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scanner_buy_orders'"
-                                ).fetchone()
-            if not exists:
-                return False
+            objects = db.execute("SELECT type, name FROM main.sqlite_master "
+                                 "WHERE name = 'scanner_buy_orders' COLLATE NOCASE").fetchall()
+            temp = db.execute("SELECT type FROM temp.sqlite_master "
+                              "WHERE name = 'scanner_buy_orders' COLLATE NOCASE").fetchall()
+        except sqlite3.Error as exc:
+            raise ScannerJournalUnreadable(f"메타데이터 조회 실패: {exc}") from exc
+        types = sorted({r[0] for r in objects})
+        if not types:
+            if temp:
+                # main 에는 없고 TEMP 에만 같은 이름이 있음: 정상 저널 구조가 아니다 (부재로 보지 않는다)
+                raise ScannerJournalUnreadable("TEMP 스키마에만 scanner_buy_orders 가 있습니다")
+            return False                    # 실제 부재: Scanner 매수가 이 저널에서 준비된 적 없음
+        if types != ["table"]:
+            raise ScannerJournalUnreadable(f"scanner_buy_orders 객체 유형이 표가 아닙니다: {types}")
+        # 2) 미확정 주문: main 스키마를 명시해 TEMP 동명 객체가 가리지 못하게 한다. 열 누락·오류는 fail closed.
+        try:
             return db.execute(SCANNER_IN_FLIGHT_SQL, (ticker,)).fetchone() is not None
         except sqlite3.Error as exc:
-            raise ScannerJournalUnreadable(str(exc)) from exc
+            raise ScannerJournalUnreadable(f"미확정 주문 조회 실패: {exc}") from exc
 
     def scanner_buy_in_flight(self, ticker) -> bool:
         """같은 SQLite 의 스캐너 매수 저널에 account1 같은 종목의 미확정·미체결 매수가 있는지."""

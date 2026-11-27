@@ -973,6 +973,14 @@ class Engine:
             if start is not None and ny_date(start).isoformat() == day:
                 self._persist_slots(int(k), mode, rec.get("ticker"), QH.close_slot(rec))
         self._health_save(mode, health)
+        # 마감 당시 상태 이력의 완전성 근거: 현재 일시중지·종목 장애 상태가 감사 기록과 맞는지 저장한다.
+        # 과거 거래일 보고서는 이 기록으로 판정한다 (조회 시각·다음 날 상태를 쓰지 않는다).
+        from trading.auto_stop.service import current_state_issues
+        now = self.now()
+        for p in self.store.positions(mode=mode, states=("ACTIVE", "EXITING")):
+            issues = current_state_issues(self.store, mode, p, health.get(str(p["id"])), now)
+            self.store.stat_set(day, mode, "state_audit", str(p["id"]), 0 if issues else 1)
+        self.store.stat_set(day, mode, "state_audit_done", "", now)
         self.store.runtime_set(key, True, self.now())
 
     def _watch(self, mc, hold=()):
