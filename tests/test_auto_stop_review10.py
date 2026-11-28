@@ -716,3 +716,25 @@ def test_full_fill_kill_keeps_terminal(tmp_path, monkeypatch):
     assert after_ticks(h, SAME_DAY[R_IN][:1]) == (0, 0)
     assert h.pos(pid)["state"] == "SOLD" and h.event(pid)["state"] == "DONE"
     assert [r["applied_delta"] for r in h.store.fill_ledger([o["id"]])] == [10]
+
+
+# ═════════════════════ 최종 리뷰 반영: 불충분·이전 형식 증거도 확인 필요로 ═════════════════════
+def test_guard_blocks_manual_evidence_with_broken_linkage(tmp_path, monkeypatch):
+    """수동 해제 증거는 있지만 주문 티커가 포지션과 다름 → 증거 불충분: 자동 청산 재개 대신 확인 필요."""
+    h = sh(tmp_path, monkeypatch)
+    pid, o = legacy_partial(h)
+    with sqlite3.connect(h.st.journal_path) as db:          # 테스트 임시 저널의 손상 기록
+        db.execute("UPDATE auto_stop_orders SET ticker='OTHER' WHERE id=?", (o["id"],))
+    restart(h)
+    assert after_ticks(h, SAME_DAY[R_IN] + NEXT_DAY) == (0, 0)
+    ev = h.event(pid)
+    assert ev["state"] == "NEEDS_REVIEW" and "연결 불일치" in ev["review_reason"]
+
+
+def test_guard_blocks_pre9_ledger_manual_fill(tmp_path, monkeypatch):
+    """9차 이전 버전: details.final·감사 없이 체결 원장의 manual_resolve 증거만 남은 최종 주문 → 확인 필요."""
+    h = sh(tmp_path, monkeypatch)
+    pid, o = legacy_partial(h, filled=4, final=False)
+    restart(h)
+    assert after_ticks(h, SAME_DAY[R_IN] + NEXT_DAY) == (0, 0)
+    assert h.event(pid)["state"] == "NEEDS_REVIEW" and h.pos(pid)["remaining_managed_qty"] == 6

@@ -568,12 +568,12 @@ RECOVERING ──(오류)──> FAULT          RECOVERING ──(같은·더 �
 
 - **이전 버전 부분 저장 차단** (`Engine._guard_manual_resolved`, tick에서 주문 대조 직후·이월(`_rollover`) 전)
   - 대상: OPEN·CARRY_OVER 이벤트(잔여 > 0)의 FILLED·CANCELLED·REJECTED 주문 중, 그 주문 자체에 수동 해제 증거가 있는 것.
-    - `details.final`의 `source=manual_resolve`(현재 상태와 같은 상태), 또는 target이 그 주문인 `resolve_unknown` 감사(증권사 상태가 현재 상태와 같음).
-    - 모드·티커·계좌가 이벤트·포지션과 맞아야 한다.
+    - `details.final`의 `source=manual_resolve`(현재 상태와 같은 상태), target이 그 주문인 `resolve_unknown` 감사(증권사 상태가 현재 상태와 같음), 또는 그 주문의 체결 원장 증거 `source=manual_resolve`(9차 이전 버전도 남김).
+    - 모드·티커·계좌가 이벤트·포지션과 맞지 않으면 대응을 입증하지 못하므로 증거 불충분으로 보고 역시 확인 필요로 둔다(사유에 "연결 불일치" 표시).
   - 기존 정책상 사람 확인 완료의 명시 증거는 관리 해제(이벤트 DONE)뿐이므로, 위 대상은 확인 기록 누락으로 보고 기존 review 경로로 NEEDS_REVIEW로 바꾼다. 주문 상태는 바꾸지 않는다.
   - 증거 없는 일반 취소·소멸은 대상이 아니다. 잔여 0은 기존 종료 판정에 맡긴다.
   - 한계
-    - 9차 이전 버전에서 해제 중 중단된 주문은 `details.final`과 감사 기록이 없어 일반 취소와 구분할 수 없다.
+    - 9차 이전 버전에서 해제 중 중단된 주문 가운데 체결이 0주인 경우는 `details.final`·감사·체결 원장 증거가 모두 없어 일반 취소와 구분할 수 없다. 체결이 있었다면 체결 원장의 `manual_resolve` 증거로 차단한다.
     - 9차 버전의 외부 취소 부분 저장은 `details.final` 출처가 `status`라 우리 취소 확정이나 마감 소멸과 구분할 수 없다.
     - 이 경우들은 자동 판정하지 않는다. 운영 저널을 직접 조회·변경하지 않았다.
 

@@ -744,9 +744,10 @@ class Engine:
         """이전 버전 부분 저장 차단: 수동 UNKNOWN 해제가 주문 최종 상태만 커밋하고 NEEDS_REVIEW 저장 전에 중단된 경우,
         자동 이월·재주문(_rollover·_advance)보다 먼저 사람 확인 상태로 되돌린다.
 
-        증거는 그 주문 자체의 수동 해제 기록만 쓴다: details.final 의 source=manual_resolve(현재 상태와 같은 상태) 또는
-        target 이 그 주문인 resolve_unknown 감사 기록(증권사 상태가 현재 상태와 같음). 주문의 모드·티커·계좌가 이벤트·
-        포지션과 맞아야 한다. 기존 정책상 사람 확인 완료의 명시 증거는 관리 해제(이벤트 DONE)뿐이므로, OPEN·CARRY_OVER
+        증거는 그 주문 자체의 수동 해제 기록만 쓴다: details.final 의 source=manual_resolve(현재 상태와 같은 상태),
+        target 이 그 주문인 resolve_unknown 감사 기록(증권사 상태가 현재 상태와 같음), 또는 그 주문의 체결 원장 증거
+        source=manual_resolve (9차 이전 버전도 남김). 주문의 모드·티커·계좌가 이벤트·포지션과 맞지 않으면 대응을 입증하지
+        못하므로 증거 불충분으로 보고 역시 확인 필요로 둔다 (사유에 표시). 기존 정책상 사람 확인 완료의 명시 증거는 관리 해제(이벤트 DONE)뿐이므로, OPEN·CARRY_OVER
         이벤트에 이런 증거가 있으면 확인 기록이 누락된 것이다. 증거 없는 일반 취소·소멸은 대상이 아니다. 잔여 0 은 기존
         종료(SOLD/DONE) 판정에 맡긴다. 주문 상태는 바꾸지 않는다 (읽기 + 기존 review 경로만)."""
         events = self.store.events(states=("OPEN", "CARRY_OVER"))
@@ -760,17 +761,23 @@ class Engine:
             pos = self.store.position(ev["position_id"])
             if not pos or pos["remaining_managed_qty"] <= 0:
                 continue
-            for o in self.store.orders(event_id=ev["id"], states=("FILLED", "CANCELLED", "REJECTED")):
-                if o["mode"] != ev["mode"] or o["ticker"] != pos["ticker"] or o["account_profile"] != pos["account_profile"]:
-                    continue
+            orders = self.store.orders(event_id=ev["id"], states=("FILLED", "CANCELLED", "REJECTED"))
+            ledger_manual = {r["order_id"] for r in self.store.fill_ledger([o["id"] for o in orders])
+                             if (json.loads(r["evidence"] or "{}") or {}).get("source") == "manual_resolve"}
+            for o in orders:
                 finals = json.loads(o["details"] or "{}").get("final") or []
                 manual = any(f.get("source") == "manual_resolve" and f.get("state") == o["state"] for f in finals) \
-                    or o["state"] in resolved.get(str(o["id"]), ())
-                if manual:
-                    self._review_event(ev, f"이전 버전 수동 UNKNOWN 해제({o['state']}) 후 사람 확인 기록 누락 — "
-                                           "사람 확인 후 해제/재등록", position=False)
-                    blocked += 1
-                    break
+                    or o["state"] in resolved.get(str(o["id"]), ()) or o["id"] in ledger_manual
+                if not manual:
+                    continue
+                linked = (o["mode"] == ev["mode"] and o["ticker"] == pos["ticker"]
+                          and o["account_profile"] == pos["account_profile"])
+                # 연결이 맞지 않는 증거는 대응을 입증하지 못한다: 증거 불충분이므로 자동 청산을 재개하지 않고 확인 필요로 둔다.
+                note = "" if linked else " (주문·포지션 연결 불일치, 증거 불충분)"
+                self._review_event(ev, f"이전 버전 수동 UNKNOWN 해제({o['state']}) 후 사람 확인 기록 누락{note} — "
+                                       "사람 확인 후 해제/재등록", position=False)
+                blocked += 1
+                break
         return blocked
 
     def _after_order_session(self, o) -> bool:
