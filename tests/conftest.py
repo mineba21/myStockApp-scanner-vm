@@ -47,6 +47,8 @@ _FORCED = {
     "KIWOOM_WEB_ENABLED":      "false",
     "AUTO_STOP_US_MODE":       "OFF",
     "AUTO_STOP_US_REPLACE_ENABLED": "false",
+    "AUTO_BUY_US_MODE":        "OFF",
+    "AUTO_BUY_SHADOW_JOURNAL_PATH": "",
     "ALLOCATION_JOURNAL_PATH": os.path.join(_TMPDIR, "allocation.sqlite"),
     "ALLOCATION_LIQUIDATION_SCOPE": "",
     # 홈 디렉터리의 실제 캐시/자격증명 파일을 건드리지 않도록.
@@ -93,6 +95,18 @@ def _no_sector_providers(request, monkeypatch):
         monkeypatch.setattr(sector_trends, "yahoo_gics_sector", lambda ticker, fetcher=None: None)
     yield
     sector_trends._cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_yahoo_chart_http(monkeypatch):
+    """자동매수 SHADOW 일봉 원본 조회(Yahoo chart HTTP)를 테스트에서 실제로 호출하지 않는다.
+
+    수집 경로 테스트는 ``http_get`` 인자나 ``market_data._http_get`` 교체로 원본 응답을 주입한다."""
+    def _blocked(url, params, timeout=15):
+        raise RuntimeError("테스트에서 Yahoo chart 실제 호출 금지 — 원본 응답을 주입하세요")
+    monkeypatch.setattr("trading.auto_buy.shadow.market_data._http_get", _blocked)
+    monkeypatch.setattr("trading.auto_buy.shadow.market_data._sleep", lambda sec: None)   # 재시도 대기 생략
+    yield
 
 
 def pytest_configure(config):

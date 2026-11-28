@@ -43,6 +43,7 @@ from web.scanner_order_api import router as scanner_order_router
 from web.scanner_read_api import router as scanner_read_router
 from web.portfolio_read_api import router as portfolio_read_router
 from web.auto_stop_api import router as auto_stop_router
+from web.auto_buy_api import router as auto_buy_router
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
@@ -67,6 +68,7 @@ app.include_router(scanner_order_router)
 app.include_router(scanner_read_router)
 app.include_router(portfolio_read_router)
 app.include_router(auto_stop_router)
+app.include_router(auto_buy_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))

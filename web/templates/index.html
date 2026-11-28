@@ -1472,6 +1472,304 @@
   </div>
 </div>
 
+<!-- ══════════════════════════════════════════════════════════
+     AUTO BUY MONITOR (자동매수 SHADOW · 가상 계좌 전용, 조회만)
+═══════════════════════════════════════════════════════════ -->
+<div x-show="activeTab==='autobuy'" x-cloak>
+  <section class="card p-4 mb-4" x-data="autoBuyPanel()" x-effect="if (activeTab==='autobuy' && !loaded) load()" data-testid="auto-buy-panel">
+    <div class="flex flex-wrap items-center gap-2">
+      <h2 class="font-bold">AUTO BUY MONITOR · account1 미국 Scanner 자동매수 (SHADOW)</h2>
+      <span class="text-xs px-2 py-0.5 rounded-full font-semibold" data-testid="auto-buy-mode"
+        :class="h.mode==='SHADOW' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-600'" x-text="h.mode || '-'"></span>
+      <button class="btn btn-ghost ml-auto" @click="load()" :disabled="busy">새로고침</button>
+    </div>
+    <p class="text-sm text-slate-600 mt-2">운영 Scanner 신호의 불변 스냅샷으로 전략별 독립 <strong>가상 계좌</strong>를 돌립니다. 이 화면과 기능은 실제 매수·매도·취소 주문을 보내지 않습니다.</p>
+    <p class="text-xs text-amber-700 mt-1" x-text="h.notice"></p>
+    <p class="text-sm mt-2 text-red-700" role="status" x-show="message" x-text="message"></p>
+
+    <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-2 mt-3 text-sm" data-testid="auto-buy-health">
+      <div class="p-2 rounded bg-slate-50">
+        <div class="text-xs text-slate-500">운영 모드</div>
+        <div><strong x-text="h.mode"></strong> <span class="text-xs text-slate-500" x-text="'· 전략 ' + (h.strategy_version||'') + ' · ' + (h.fill_model||'')"></span></div>
+        <div class="text-xs text-red-700" x-show="h.config_error" x-text="h.config_error"></div>
+      </div>
+      <div class="p-2 rounded bg-slate-50">
+        <div class="text-xs text-slate-500">SHADOW 저널</div>
+        <div x-text="h.schema_ready ? ('준비됨 (' + h.schema_version + ')') : (h.journal_configured ? 'Migration 필요' : '미설정')"
+          :class="h.schema_ready ? '' : 'text-amber-700'"></div>
+        <div class="text-xs text-amber-700" x-show="!h.schema_ready && h.schema_error" x-text="h.schema_error"></div>
+      </div>
+      <div class="p-2 rounded bg-slate-50">
+        <div class="text-xs text-slate-500">Heartbeat · 마지막 job</div>
+        <div :class="staleJob() ? 'text-red-700 font-semibold' : ''" x-text="(h.heartbeat_age_sec==null ? '-' : age(h.heartbeat_age_sec) + ' 전') + (h.heartbeat ? ' · ' + h.heartbeat.status : '')"></div>
+        <div class="text-xs" x-show="h.heartbeat" :class="h.heartbeat?.processing==='LAGGING' ? 'text-red-700 font-semibold' : 'text-slate-500'"
+          x-text="'최근 정규장 ' + (h.heartbeat?.last_session||'-') + (h.heartbeat?.last_session_early_close ? ' (조기폐장)' : '') + ' · 처리 ' + (h.heartbeat?.last_processed_day||'-') + ' · ' + (h.heartbeat?.processing||'')"></div>
+        <div class="text-xs text-slate-500" x-text="h.last_job?.waiting || ((h.last_job?.days||[]).length ? '처리일 ' + h.last_job.days.join(', ') : '')"></div>
+        <div class="text-xs text-red-700" x-show="h.last_error" x-text="'최근 오류: ' + (h.last_error?.type||'') + ' ' + fmtTs(h.last_error?.at)"></div>
+      </div>
+      <div class="p-2 rounded bg-emerald-50" data-testid="auto-buy-real-orders">
+        <div class="text-xs text-slate-500">실제 자동매수 주문</div>
+        <div class="font-semibold text-emerald-700">0건 — 실주문 경로 없음</div>
+        <div class="text-xs text-slate-600" x-text="'가상 주문 ' + (h.virtual_orders ?? 0) + '건 · 비가상 행 ' + (h.non_virtual_rows ?? 0)"></div>
+      </div>
+      <div class="p-2 rounded bg-slate-50 sm:col-span-2" data-testid="auto-buy-version">
+        <div class="text-xs text-slate-500">판정 로직 버전 · 재계산 run</div>
+        <div class="text-xs" x-text="'로직 해시 ' + (h.logic_hash||'-') + ' · 기록 ' + ((h.recorded_logic_hashes||[]).join(', ')||'-') + ' · 설정 ' + (h.config_hash||'-')"></div>
+        <div class="text-xs" x-text="'현재 run #' + (h.current_run ?? '-') + (h.replay_state && h.replay_state.status === 'RUNNING' ? ' · 재계산 진행 중 (결과 미완료)' : (h.replay_state && h.replay_state.status === 'STALLED' ? ' · 재계산 작업자 응답 없음 (자동 탈취 안 함, 수동 확인 필요)' : (h.replay_state ? ' · 재계산 비정상 종료 확인 (다음 job 이 정리)' : '')))"
+          :class="h.replay_state ? (h.replay_state.status === 'RUNNING' ? 'text-amber-700 font-semibold' : 'text-red-700 font-semibold') : 'text-slate-600'"></div>
+        <div class="text-xs text-red-700 font-semibold" x-show="h.version_block" x-text="'처리 중단: ' + (h.version_block?.message||'')"></div>
+        <div class="text-xs text-red-700 font-semibold" x-show="h.signal_set_integrity" x-text="'동결 신호 집합 무결성 오류 — 신규 처리 중단: ' + (h.signal_set_integrity?.message||'')"></div>
+        <div class="text-xs text-slate-600" x-show="h.costs" data-testid="auto-buy-costs"
+          x-text="'비용 기준 ' + (h.costs?.basis||'-') + ' (P7 과 동일: 수수료 ' + pct(h.costs?.simulation?.buy_commission, 2) + '/' + pct(h.costs?.simulation?.sell_commission, 2) + ', 슬리피지 ' + (h.costs?.simulation?.slippage_bp ?? '-') + 'bp, 매도세 ' + (h.costs?.simulation?.sell_tax ?? '-') + ') · 운영 추정 비용 ' + (h.costs?.ops_estimate?.status||'-') + ' — 별도 기록, 손익 미사용'"></div>
+      </div>
+      <div class="p-2 rounded bg-slate-50 sm:col-span-2" data-testid="auto-buy-scan-reconcile">
+        <div class="text-xs text-slate-500">미국 스캔 대조 (수집 시작 이후 운영 ScanLog 기준)</div>
+        <template x-if="h.scan_reconciliation">
+          <div class="text-xs flex flex-wrap gap-x-3">
+            <span x-text="'전체 ' + h.scan_reconciliation.scanner_total"></span>
+            <span x-text="'수집 ' + h.scan_reconciliation.captured + ' (완전 ' + h.scan_reconciliation.captured_complete + ')'"></span>
+            <span x-text="'진행 중 ' + h.scan_reconciliation.scanner_running"></span>
+            <span x-text="'실패(ERROR) ' + h.scan_reconciliation.scanner_error"></span>
+            <span :class="h.scan_reconciliation.abandoned ? 'text-red-700 font-semibold' : ''" x-text="'중단(ABANDONED) ' + h.scan_reconciliation.abandoned"></span>
+            <span :class="h.scan_reconciliation.unrecoverable ? 'text-red-700 font-semibold' : ''" x-text="'복구 불가 ' + h.scan_reconciliation.unrecoverable"></span>
+            <span :class="h.scan_reconciliation.uncaptured ? 'text-red-700 font-semibold' : ''" x-text="'미수집 ' + h.scan_reconciliation.uncaptured"></span>
+            <span x-text="'확정 후 스캔 ' + h.scan_reconciliation.late_after_decision"></span>
+          </div>
+        </template>
+        <div class="text-xs text-slate-500" x-show="!h.scan_reconciliation">대조 기록 없음</div>
+      </div>
+    </div>
+
+    <template x-if="s.validation">
+      <div class="mt-3 p-2 border rounded text-sm" data-testid="auto-buy-validation">
+        <div class="font-semibold">전향적 검증 진행</div>
+        <div class="flex flex-wrap gap-4 mt-1">
+          <span>거래일 <strong x-text="s.validation.trading_days"></strong>
+            <span class="text-xs text-slate-500" x-text="'(' + (s.validation.first_day||'-') + ' ~ ' + (s.validation.last_day||'-') + ')'"></span></span>
+          <template x-for="m in [['기능·안전성',5],['신호·체결·위험',20],['중간 평가',60]]" :key="m[1]">
+            <span :class="s.validation.trading_days>=m[1] ? 'text-emerald-700' : 'text-slate-500'" x-text="m[0] + ' ' + Math.min(s.validation.trading_days, m[1]) + '/' + m[1]"></span>
+          </template>
+          <template x-for="(n, p) in s.validation.b01_closed_trades" :key="p">
+            <span x-text="'B01 종료 거래 (' + profLabel(p) + ') ' + n + '/40'"></span>
+          </template>
+        </div>
+        <div class="text-xs mt-1" :class="s.validation.complete ? 'text-emerald-700' : 'text-amber-700 font-semibold'"
+          x-text="'기간 데이터 ' + (s.validation.complete ? '완전' : '미완료') + ' · 일봉 미완료일 ' + s.validation.data_incomplete_days + ' · 결정 스캔 없는 날 ' + s.validation.no_decision_days + (s.validation.replay_in_progress ? ' · 재계산 진행 중' : '') + (s.validation.replay_abandoned_suspected ? ' · 재계산 비정상 종료 확인' : '') + (s.validation.replay_stalled ? ' · 재계산 작업자 응답 없음' : '') + ' (' + s.validation.basis + ')'"></div>
+        <div class="text-xs text-slate-500 mt-1" x-text="s.validation.notes"></div>
+      </div>
+    </template>
+
+    <template x-if="s.s5">
+      <div class="mt-3 p-2 border rounded text-sm" data-testid="auto-buy-s5">
+        <div class="font-semibold">S5 채택 검토 기준 (평가 시작 전 고정 · 검토 자료)</div>
+        <div class="text-xs mt-1"><strong x-text="'판정: ' + s.s5.verdict + ' · B01 ' + s.s5.b01_status"></strong> <span class="text-slate-500" x-text="s.s5.note"></span></div>
+        <div class="text-xs text-slate-600" x-text="'시장 상태별 판단일 ' + Object.entries(s.s5.regime_days||{}).map(e => e[0] + ' ' + e[1]).join(', ') + (s.s5.regime_skew!=null ? ' · 편중 ' + pct(s.s5.regime_skew) : '')"></div>
+        <div class="overflow-x-auto"><table class="w-full text-xs mt-1">
+          <thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">프로필</th><th>단계</th><th class="text-right">B01 종료</th><th>수익≥B00-N</th><th>PF&gt;1·≥B00-N</th><th>평균R&gt;0·≥B00-N</th><th class="text-right">MDD 악화(pp)</th><th class="text-right">B02 백분위</th><th>평균R 95%CI</th><th class="text-right">필터효과</th><th class="text-right">순위효과</th><th class="text-right">안전위반</th></tr></thead>
+          <tbody class="divide-y divide-slate-100"><template x-for="(c, p) in s.s5.profiles" :key="p"><tr>
+            <td class="px-1" x-text="profLabel(p)"></td><td x-text="c.milestone"></td><td class="text-right" x-text="c.b01_closed_trades + '/40'"></td>
+            <td x-text="yn(c.return_ge_b00n)"></td><td x-text="yn(c.pf_gt_1) + '·' + yn(c.pf_ge_b00n)"></td><td x-text="yn(c.avg_r_gt_0) + '·' + yn(c.avg_r_ge_b00n)"></td>
+            <td class="text-right" x-text="num(c.mdd_worsening_pp)"></td><td class="text-right" x-text="num(c.b02_percentile, 0) + (c.ranking_review ? ' 검토' : '')"></td>
+            <td x-text="c.avg_r_ci95 ? num(c.avg_r_ci95[0]) + ' ~ ' + num(c.avg_r_ci95[1]) : '-'"></td>
+            <td class="text-right" x-text="pct(c.filter_effect_return)"></td><td class="text-right" x-text="pct(c.ranking_effect_vs_b02_median)"></td>
+            <td class="text-right" :class="c.safety_violations ? 'text-red-700 font-semibold' : ''" :title="c.safety_breakdown ? ('운영 안전 ' + c.safety_breakdown.operational_total + ' (실제 행 ' + c.safety_breakdown.non_virtual_rows + ' · 오류 이벤트 ' + c.safety_breakdown.error_events + ' · heartbeat 지연 ' + c.safety_breakdown.heartbeat_stale + ' · 버전 차단 ' + c.safety_breakdown.version_block + ' · 재계산 비정상 종료 ' + c.safety_breakdown.replay_abandoned_suspected + ' · 재계산 응답 없음 ' + c.safety_breakdown.replay_stalled + ') / 데이터 완전성 ' + c.safety_breakdown.data_integrity_total + ' (중단 스캔 ' + c.safety_breakdown.abandoned_scans + ' · 복구 불가 ' + c.safety_breakdown.unrecoverable_scans + ' · 미수집 ' + c.safety_breakdown.uncaptured_scans + ' · 불완전 거래일 ' + c.safety_breakdown.data_incomplete_days + ' · 체결 불명 ' + c.safety_breakdown.fill_unknown_orders + ' · 미평가 포지션 ' + c.safety_breakdown.unresolved_positions + ' · 수동 검토 일봉 ' + c.safety_breakdown.manual_review_bars + ') — 관찰 기간 위반 ' + c.safety_breakdown.observation_period_total + ' / 현재 미해결 ' + c.safety_breakdown.current_unresolved_total + ' / 복구됨 ' + c.safety_breakdown.recovered_total + ' / 복구 불가 ' + c.safety_breakdown.unrecoverable_total + ' / 연속 정상 ' + c.safety_breakdown.continuity.current_clean_streak + '일 (필요 ' + c.safety_breakdown.continuity.required_consecutive_clean_days + '일)') : ''" x-text="c.safety_violations"></td></tr></template></tbody></table></div>
+        <div class="text-xs text-slate-500 mt-1">미청산 평가손익 포함 · 필터 효과 = B01 − B00-N · 순위 효과 = B01 − B02 중앙값 · 40건 확보만으로 LIVE 승인 없음</div>
+      </div>
+    </template>
+
+    <template x-if="s.accounts">
+      <div class="mt-4">
+        <div class="flex items-center gap-2">
+          <span class="font-semibold">전략별 가상 계좌</span>
+          <template x-for="p in ['P7C','OPS']" :key="p">
+            <button class="btn" :class="profile===p ? 'btn-primary' : 'btn-ghost'" @click="profile=p" x-text="profLabel(p)"></button>
+          </template>
+        </div>
+        <p class="text-xs text-slate-500 mt-1" x-show="profile==='P7C'">P7 비교형: 독립 $50,000 · 거래당 0.75% · Entry Heat 4% · 종목 15% · 현금 하한 20% (기존 P7 계산)</p>
+        <p class="text-xs text-slate-500 mt-1" x-show="profile==='OPS'">운영 검증형: account1 순자산 30% 전용 예산 · 위험·종목 15%·섹터 35%는 예산 기준 · 계좌 현금 하한 20% · 수익률은 시작 예산 기준</p>
+        <div class="overflow-x-auto mt-2">
+          <table class="w-full text-xs" data-testid="auto-buy-accounts">
+            <thead class="bg-slate-50 text-slate-500">
+              <tr><th class="px-2 py-2 text-left">전략</th><th class="px-2 text-right">누적수익률</th><th class="px-2 text-right">MDD</th>
+                <th class="px-2 text-right">PF</th><th class="px-2 text-right">R 종료/미청산포함</th><th class="px-2 text-right">종료·보유</th>
+                <th class="px-2 text-right">주문·체결률</th><th class="px-2 text-right">Entry Heat</th><th class="px-2 text-right">Current Heat</th>
+                <th class="px-2 text-right" x-show="profile==='OPS'">Sleeve 사용</th><th class="px-2 text-right">최대 종목/섹터</th>
+                <th class="px-2 text-right" x-text="profile==='OPS' ? '계좌현금(가상반영)·예약' : '현금·예약'"></th><th class="px-2 text-left">데이터</th><th class="px-2 text-left">매수 차단</th></tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <template x-for="a in s.accounts.filter(x => x.profile===profile)" :key="a.id">
+                <tr class="hover:bg-slate-50 cursor-pointer" :class="detail?.metrics?.id===a.id ? 'bg-indigo-50' : ''" @click="loadAccount(a.id)">
+                  <td class="px-2 py-1.5 font-semibold" x-text="a.strategy"></td>
+                  <td class="px-2 text-right" :class="cls(a.cum_return)" x-text="pct(a.cum_return)"></td>
+                  <td class="px-2 text-right" x-text="pct(a.mdd)"></td>
+                  <td class="px-2 text-right" x-text="num(a.pf)"></td>
+                  <td class="px-2 text-right" x-text="num(a.avg_r_closed) + ' / ' + num(a.avg_r_incl_open)"></td>
+                  <td class="px-2 text-right" x-text="a.closed_trades + ' · ' + a.open_positions"></td>
+                  <td class="px-2 text-right" x-text="a.orders + ' · ' + pct(a.fill_rate)"></td>
+                  <td class="px-2 text-right" x-text="pct(a.entry_heat)"></td>
+                  <td class="px-2 text-right" :class="heatCls(a.current_heat_level)" x-text="pct(a.current_heat) + (a.current_heat_level && a.current_heat_level!=='OK' ? ' ' + a.current_heat_level : '')"></td>
+                  <td class="px-2 text-right" x-show="profile==='OPS'" x-text="pct(a.sleeve_usage)"></td>
+                  <td class="px-2 text-right" x-text="pct(a.max_pos_w) + ' / ' + pct(a.max_sector_w)"></td>
+                  <td class="px-2 text-right" x-text="usd(profile==='OPS' ? a.account_level?.cash_as_if : a.cash) + ' · ' + usd(a.reserved)"></td>
+                  <td class="px-2" :class="a.data_status==='INCOMPLETE' || a.incomplete_days ? 'text-amber-700 font-semibold' : 'text-slate-500'"
+                    x-text="(a.data_status||'-') + (a.incomplete_days ? ' · 미완료 ' + a.incomplete_days + '일' : '') + (a.unresolved_positions || a.unresolved_orders ? ' · 미확정 ' + (a.unresolved_positions + a.unresolved_orders) + ' · 전액손실 가정 ' + usd(a.stress_full_loss) : '')"></td>
+                  <td class="px-2 text-amber-700" x-text="(a.safety_blocks||[]).join(', ')"></td>
+                </tr>
+              </template>
+              <tr class="text-slate-600" x-show="s.b02 && s.b02[profile]">
+                <td class="px-2 py-1.5 font-semibold">B02 ×<span x-text="s.b02[profile]?.accounts"></span></td>
+                <td class="px-2 text-right" colspan="13" x-text="'무작위 Top-2 수익률 중앙값 ' + pct(s.b02[profile]?.median_return) + ' (최소 ' + pct(s.b02[profile]?.min_return) + ' ~ 최대 ' + pct(s.b02[profile]?.max_return) + ') · B01 백분위 ' + num(s.b02[profile]?.b01_percentile, 0) + ' · 종료 거래 중앙값 ' + (s.b02[profile]?.median_closed_trades ?? '-')"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-xs text-slate-500 mt-1">Current Heat 10% 경고·15% 위험 경고는 관찰용이며 매수를 차단하지 않습니다. 매수 차단은 손절선 이탈 미청산·시세 결측·미확정 주문·계좌 조회 불가 같은 안전 조건만입니다.</p>
+      </div>
+    </template>
+
+    <template x-if="(s.unresolved?.positions||[]).length || (s.unresolved?.orders||[]).length">
+      <div class="mt-3 p-2 border border-amber-300 rounded text-sm" data-testid="auto-buy-unresolved">
+        <div class="font-semibold text-amber-800">가격 미확정 포지션 · 체결 불명 주문 (삭제·위험 0 처리 없음)</div>
+        <div class="text-xs mt-1" x-text="'종목 ' + s.unresolved.tickers.join(', ') + ' · 전액 손실 가정 합계 ' + usd(s.unresolved.stress_full_loss_total)"></div>
+        <div class="overflow-x-auto"><table class="w-full text-xs mt-1">
+          <thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">계좌</th><th>종목</th><th class="text-right">수량</th><th class="text-right">마지막 확인 종가</th><th>미확정 시작</th><th class="text-right">결측 거래일</th><th>분류(판정 아님)</th><th class="text-right">진입 위험</th><th class="text-right">평가(전액손실 가정)</th><th>검토</th></tr></thead>
+          <tbody class="divide-y divide-slate-100"><template x-for="(u, i) in s.unresolved.positions" :key="i"><tr>
+            <td class="px-1" x-text="u.account_id"></td><td x-text="u.ticker"></td><td class="text-right" x-text="u.qty"></td>
+            <td class="text-right" x-text="num(u.last_close) + ' (' + (u.last_close_day||'-') + ')'"></td><td x-text="u.unresolved_since"></td>
+            <td class="text-right" x-text="u.missing_trading_days"></td><td x-text="u.classification"></td><td class="text-right" x-text="usd(u.entry_risk)"></td>
+            <td class="text-right" x-text="usd(u.value_at_last_close)"></td>
+            <td :class="u.manual_review ? 'text-red-700 font-semibold' : 'text-slate-500'" x-text="u.manual_review ? 'MANUAL_REVIEW' : '자동 복구 중'"></td></tr></template>
+            <template x-for="(o, i) in s.unresolved.orders" :key="'o'+i"><tr class="text-slate-600">
+              <td class="px-1" x-text="o.account_id"></td><td x-text="o.ticker + ' (체결 불명 주문)'"></td><td class="text-right" x-text="o.qty"></td>
+              <td class="text-right" x-text="'지정가 ' + num(o.limit_price)"></td><td x-text="o.target_day"></td><td colspan="4"></td>
+              <td :class="o.manual_review ? 'text-red-700 font-semibold' : 'text-slate-500'" x-text="o.manual_review ? 'MANUAL_REVIEW' : '자동 복구 중'"></td></tr></template></tbody></table></div>
+        <div class="text-xs text-red-700 mt-1" x-show="(s.unresolved.manual_review_bars||[]).length" data-testid="auto-buy-manual-review"
+          x-text="'수동 검토 대상 (자동 복구 ' + s.unresolved.recovery_window_days + '거래일 경과, 불완전·위험 유지): ' + s.unresolved.manual_review_bars.map(b => b.day + ' ' + b.ticker + ' ' + b.status).join(', ')"></div>
+        <div class="text-xs text-slate-500 mt-1" x-text="s.unresolved.policy"></div>
+      </div>
+    </template>
+
+    <template x-if="opsLevel()">
+      <div class="mt-3 p-2 border rounded text-sm" data-testid="auto-buy-account-level">
+        <div class="font-semibold">계좌 전체 (운영 검증형 기준, 수동 보유 포함 · 표시 전용)</div>
+        <div class="flex flex-wrap gap-4 mt-1 text-xs">
+          <span x-text="'순자산(가상 반영) ' + usd(opsLevel().equity_as_if)"></span>
+          <span x-text="'수동 보유 ' + usd(opsLevel().manual_value) + ' (' + opsLevel().manual_count + '종목)'"></span>
+          <span class="text-amber-700" x-text="'손절가 없는 수동 보유 미확정 위험(15% 추정) ' + usd(opsLevel().manual_uncertain_risk)"></span>
+          <span x-text="'계좌 전체 위험 ' + pct(opsLevel().account_total_risk_pct) + ' (관찰 기준 ' + pct(opsLevel().account_total_risk_watch) + ', LIVE 전 확정 필요)'"></span>
+          <span x-text="'총 투자 ' + pct(opsLevel().invested_pct) + ' · 현금 ' + pct(opsLevel().cash_pct)"></span>
+          <span x-text="'최대 종목 ' + pct(opsLevel().max_stock_w) + ' · 최대 섹터 ' + pct(opsLevel().max_sector_w) + ' (' + (opsLevel().max_sector||'-') + ')'"></span>
+        </div>
+      </div>
+    </template>
+
+    <template x-if="detail">
+      <div class="mt-4 p-3 border rounded" data-testid="auto-buy-detail">
+        <div class="font-semibold" x-text="detail.metrics.id + ' — 가상 계좌 상세'"></div>
+        <div class="grid md:grid-cols-2 gap-3 mt-2">
+          <div><div class="text-xs text-slate-500">평가금액 (가상)</div><svg viewBox="0 0 300 80" class="w-full h-20 bg-slate-50 rounded"><polyline fill="none" stroke="#6366f1" stroke-width="1.5" :points="spark(detail.daily.map(d => d.equity))"></polyline></svg></div>
+          <div><div class="text-xs text-slate-500">Entry Heat(남색) · Current Heat(주황)</div><svg viewBox="0 0 300 80" class="w-full h-20 bg-slate-50 rounded">
+            <polyline fill="none" stroke="#6366f1" stroke-width="1.5" :points="spark(detail.daily.map(d => d.entry_heat), heatMax())"></polyline>
+            <polyline fill="none" stroke="#f59e0b" stroke-width="1.5" :points="spark(detail.daily.map(d => d.current_heat), heatMax())"></polyline></svg></div>
+        </div>
+        <div class="grid lg:grid-cols-2 gap-3 mt-3">
+          <div class="overflow-x-auto"><div class="text-xs font-semibold mb-1">가상 주문·체결</div>
+            <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">판단일</th><th>종목</th><th class="text-right">지정가</th><th class="text-right">손절가</th><th class="text-right">수량</th><th>상태</th><th class="text-right">가상 체결가</th></tr></thead>
+              <tbody class="divide-y divide-slate-100"><template x-for="o in detail.orders" :key="o.id"><tr>
+                <td class="px-1" x-text="o.decision_day"></td><td x-text="o.ticker"></td><td class="text-right" x-text="num(o.limit_price)"></td>
+                <td class="text-right" x-text="num(o.stop_price)"></td><td class="text-right" x-text="o.filled_qty + '/' + o.qty"></td>
+                <td x-text="o.state"></td><td class="text-right" x-text="num(o.avg_fill_price)"></td></tr></template></tbody></table></div>
+          <div class="overflow-x-auto"><div class="text-xs font-semibold mb-1">S01 가상 손절 이력</div>
+            <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">일자</th><th>종목</th><th>사유</th><th class="text-right">손절가</th><th class="text-right">가상 청산가</th><th class="text-right">수량</th><th class="text-right">매수잔량 취소</th></tr></thead>
+              <tbody class="divide-y divide-slate-100"><template x-for="(e, i) in detail.stops" :key="i"><tr>
+                <td class="px-1" x-text="e.day"></td><td x-text="e.ticker"></td><td x-text="e.reason"></td><td class="text-right" x-text="num(e.stop_price)"></td>
+                <td class="text-right" x-text="num(e.exit_price)"></td><td class="text-right" x-text="e.qty"></td><td class="text-right" x-text="e.cancelled_buy_qty"></td></tr></template></tbody></table>
+            <div class="text-xs font-semibold mb-1 mt-3">가상 포지션</div>
+            <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">종목</th><th>진입일</th><th class="text-right">진입가</th><th class="text-right">손절가(고정)</th><th class="text-right">수량</th><th>상태</th><th class="text-right">R</th></tr></thead>
+              <tbody class="divide-y divide-slate-100"><template x-for="p in detail.positions" :key="p.id"><tr>
+                <td class="px-1" x-text="p.ticker"></td><td x-text="p.entry_day"></td><td class="text-right" x-text="num(p.entry_price)"></td><td class="text-right" x-text="num(p.stop_price)"></td>
+                <td class="text-right" x-text="p.qty"></td><td :class="p.price_status==='UNRESOLVED' ? 'text-amber-700 font-semibold' : ''" x-text="p.state + (p.exit_reason ? ' · ' + p.exit_reason : '') + (p.price_status==='UNRESOLVED' ? ' · 가격 미확정(' + p.unresolved_since + '~)' : '')"></td><td class="text-right" :class="cls(p.r_multiple)" x-text="num(p.r_multiple)"></td></tr></template></tbody></table></div>
+        </div>
+        <div class="overflow-x-auto mt-3" x-show="(detail.fills||[]).length"><div class="text-xs font-semibold mb-1">가상 체결 근거 (사용한 일봉)</div>
+          <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">일자</th><th>종목</th><th class="text-right">체결가</th><th class="text-right">수량</th><th>근거</th><th class="text-right">시·고·저·종</th><th>공급자·리비전</th><th>조회 시각</th></tr></thead>
+            <tbody class="divide-y divide-slate-100"><template x-for="(f, i) in detail.fills" :key="i"><tr>
+              <td class="px-1" x-text="f.day"></td><td x-text="f.ticker"></td><td class="text-right" x-text="num(f.price)"></td><td class="text-right" x-text="f.applied_delta"></td>
+              <td x-text="f.basis"></td><td class="text-right" x-text="[f.bar_open, f.bar_high, f.bar_low, f.bar_close].map(v => num(v)).join(' / ')"></td>
+              <td x-text="(f.bar_provider||'-') + ' r' + (f.bar_input_rev ?? '-')"></td><td x-text="fmtTs(f.bar_fetched_at)"></td></tr></template></tbody></table></div>
+        <div class="overflow-x-auto mt-3"><div class="text-xs font-semibold mb-1">매수 판단 (최근)</div>
+          <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">판단일</th><th>종목</th><th>유형</th><th>Grade·Quality</th><th>결과</th><th>사유</th><th class="text-right">수량</th></tr></thead>
+            <tbody class="divide-y divide-slate-100"><template x-for="(d, i) in detail.decisions" :key="i"><tr>
+              <td class="px-1" x-text="d.day"></td><td x-text="d.ticker"></td><td x-text="d.signal_type"></td><td x-text="(d.grade||'-') + '·' + (d.signal_quality||'-')"></td>
+              <td :class="d.outcome==='ORDERED' ? 'text-emerald-700' : 'text-slate-500'" x-text="d.outcome"></td><td x-text="d.reason || ''"></td><td class="text-right" x-text="d.qty"></td></tr></template></tbody></table></div>
+        <div class="text-xs text-slate-500 mt-1" x-show="Object.keys(detail.metrics.block_reasons||{}).length"
+          x-text="'차단·제외 사유 누계: ' + Object.entries(detail.metrics.block_reasons).map(e => e[0] + ' ' + e[1]).join(', ')"></div>
+      </div>
+    </template>
+
+    <template x-if="s.captures">
+      <div class="grid lg:grid-cols-2 gap-3 mt-4">
+        <div class="overflow-x-auto" data-testid="auto-buy-captures">
+          <div class="font-semibold text-sm">Scanner 신호 수집 이력</div>
+          <p class="text-xs text-amber-800 bg-amber-50 rounded p-2 my-1" data-testid="auto-buy-s1-limit" x-text="s.s1_limit_notice || h.s1_limit_notice"></p>
+          <div class="text-xs text-slate-500" x-text="'총 ' + (s.capture_stats?.total||0) + '회 · 불완전 ' + (s.capture_stats?.incomplete||0) + ' · 중단 ' + (s.capture_stats?.abandoned||0) + ' · 복구 불가 ' + (s.capture_stats?.unrecoverable||0) + ' · 확정 후 스캔 ' + (s.capture_stats?.late||0) + ' · 보충(CATCHUP) ' + (s.capture_stats?.catchup||0) + ' · 행 ' + (s.capture_stats?.rows||0) + ' · 수집 시작 ' + (h.collection_started_at||'-')"></div>
+          <template x-if="(s.late_scans||[]).length">
+            <div class="text-xs mt-1 p-2 rounded bg-slate-50" data-testid="auto-buy-late-scans">
+              <div class="font-semibold">당일 후보 확정 이후 스캔 (LATE_SCAN_AFTER_DECISION · 당일 후보에 추가하지 않음)</div>
+              <template x-for="e in s.late_scans" :key="e.id">
+                <div x-text="(e.details.day||'-') + ' · 스캔 #' + e.details.scan_log_id + ' (' + (e.details.triggered_by||'-') + ', ' + (e.details.scan_started_at||'') + ' UTC) · 확정 후보에 없던 Strict ' + (e.details.new_strict_tickers||[]).length + '건: ' + ((e.details.new_strict_tickers||[]).join(', ')||'없음')"></div>
+              </template>
+            </div>
+          </template>
+          <table class="w-full text-xs mt-1"><thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">스캔</th><th>판단일</th><th>경로</th><th>완전</th><th class="text-right">행</th><th class="text-right">Strict</th><th>비고</th></tr></thead>
+            <tbody class="divide-y divide-slate-100"><template x-for="c in s.captures" :key="c.scan_log_id"><tr>
+              <td class="px-1" x-text="'#' + c.scan_log_id + ' ' + c.scan_status"></td><td x-text="(c.trading_day||'-') + (c.intraday ? ' 장중' : '')"></td><td x-text="c.source"></td>
+              <td :class="c.complete ? 'text-emerald-700' : 'text-red-700 font-semibold'" x-text="(c.complete ? '예' : '누락 가능 · ' + c.recoverability) + (c.late_after_decision ? ' · 확정 후' : '')"></td>
+              <td class="text-right" x-text="c.rows_captured"></td><td class="text-right" x-text="c.strict_rows"></td><td class="text-slate-500" x-text="c.note || ''"></td></tr></template></tbody></table>
+        </div>
+        <div data-testid="auto-buy-eligibility">
+          <div class="font-semibold text-sm">매수 적격·제외 사유 <span class="text-xs text-slate-500" x-text="'(' + (s.eligibility?.window||'') + ')'"></span></div>
+          <template x-for="p in ['B00','B01']" :key="p">
+            <div class="text-xs mt-1"><strong x-text="p + ' 적격 ' + (s.eligibility?.eligible?.[p] ?? 0)"></strong>
+              <span class="text-slate-600" x-text="' · ' + Object.entries(s.eligibility?.reasons?.[p] || {}).sort((a,b)=>b[1]-a[1]).map(e => e[0] + ' ' + e[1]).join(', ')"></span></div>
+          </template>
+          <div class="flex gap-2 items-end mt-2">
+            <label class="text-xs">판단일<input class="input" type="date" x-model="sigDay"></label>
+            <button class="btn btn-ghost" @click="loadSignals()" :disabled="busy">신호 보기</button>
+          </div>
+          <div class="overflow-x-auto max-h-64 overflow-y-auto mt-1" x-show="sigs">
+            <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">종목</th><th>유형</th><th>Strict</th><th>최초통과</th><th>역할</th><th>B00</th><th>B01 / 제외 사유</th></tr></thead>
+              <tbody class="divide-y divide-slate-100"><template x-for="r in (sigs?.rows||[])" :key="r.id"><tr>
+                <td class="px-1" x-text="r.ticker"></td><td x-text="r.signal_type"></td><td x-text="r.strict_passed==null ? '미평가' : (r.strict_passed ? '통과' : '거부')"></td>
+                <td x-text="r.first_strict_pass==null ? '-' : (r.first_strict_pass ? '예' : '아니오') + ' (' + r.first_pass_basis + ')'"></td>
+                <td x-text="r.role || '-'"></td><td x-text="r.b00 ? '적격' : '-'"></td><td :class="r.b01 ? 'text-emerald-700' : 'text-slate-500'" x-text="r.b01 ? '적격' : (r.b01r||[]).join(', ')"></td></tr></template></tbody></table>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <template x-if="(s.runs||[]).length > 1">
+      <div class="mt-4 text-xs overflow-x-auto" data-testid="auto-buy-runs">
+        <div class="font-semibold text-sm">재계산 이력 (이전 run 은 감사 이력으로 보존)</div>
+        <table class="w-full text-xs mt-1"><thead class="bg-slate-50 text-slate-500"><tr><th class="px-1 text-left">run</th><th>상태</th><th>사유</th><th>부모</th><th>처리 거래일까지</th><th>결과 달라진 계좌</th><th>최초 차이일</th><th>손절 전·후</th></tr></thead>
+          <tbody class="divide-y divide-slate-100"><template x-for="r in s.runs" :key="r.run_id"><tr>
+            <td class="px-1" x-text="'#' + r.run_id"></td><td :class="r.status==='CURRENT' ? 'text-emerald-700 font-semibold' : (r.status==='FAILED' ? 'text-red-700' : 'text-slate-500')" x-text="r.status"></td>
+            <td x-text="r.reason"></td><td x-text="r.parent_run ?? '-'"></td><td x-text="r.through_day || '-'"></td>
+            <td x-text="r.summary?.changed_accounts ?? '-'"></td><td x-text="r.summary?.first_divergent_day || '-'"></td>
+            <td x-text="r.summary?.stops_before!=null ? r.summary.stops_before + ' → ' + r.summary.stops_after : '-'"></td></tr></template></tbody></table>
+      </div>
+    </template>
+
+    <template x-if="(s.events||[]).length">
+      <div class="mt-4 text-xs" data-testid="auto-buy-events">
+        <div class="font-semibold text-sm">오류·누락·경고</div>
+        <template x-for="e in s.events" :key="e.id">
+          <div :class="e.severity==='ERROR' ? 'text-red-700' : (e.severity==='WARN' ? 'text-amber-700' : 'text-slate-600')" x-text="fmtTs(e.at) + ' [' + e.severity + '] ' + e.message"></div>
+        </template>
+      </div>
+    </template>
+  </section>
+</div>
+
 </main>
 
 <div x-show="showHoldingEdit" x-cloak class="modal-bg" @click.self="showHoldingEdit=false">
@@ -2167,6 +2465,7 @@ function app() {
       {id:'holdings',label:'📈 보유 주식'},
       {id:'journal',label:'📋 거래 일지'},
       {id:'watch',  label:'👁 감시 목록'},
+      {id:'autobuy', label:'🤖 AUTO BUY MONITOR'},
     ],
 
     // 스캔
@@ -3559,6 +3858,61 @@ function allocationRebalancePanel() {
         CANCELLED:'취소 확인', ABANDONED:'미전송 · 정리됨', SUPERSEDED:'재계산된 계획으로 대체',
         CANCEL_SENDING:'취소 전송 중 · 응답 미확정', CANCEL_UNKNOWN:'취소 응답 불명 · 재전송 금지'})[state] || state;
     }
+  };
+}
+function autoBuyPanel() {
+  return {
+    busy:false, loaded:false, message:'', h:{}, s:{}, detail:null, profile:'P7C', sigDay:'', sigs:null,
+    async request(path) {
+      const r = await fetch('/api/auto-buy' + path);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || ('요청을 처리하지 못했습니다 (HTTP ' + r.status + ')'));
+      return d;
+    },
+    async load() {
+      this.busy = true; this.message = '';
+      try {
+        this.s = await this.request('/summary'); this.h = this.s.health || {}; this.loaded = true;
+        if (this.detail) await this.loadAccount(this.detail.metrics.id);
+      } catch (e) { this.message = e.message; }
+      finally { this.busy = false; }
+    },
+    async loadAccount(id) {
+      try { this.detail = await this.request('/accounts/' + encodeURIComponent(id)); }
+      catch (e) { this.message = e.message; }
+    },
+    async loadSignals() {
+      this.busy = true;
+      try { this.sigs = await this.request('/signals' + (this.sigDay ? '?day=' + this.sigDay : '')); if (!this.sigDay) this.sigDay = this.sigs.day || ''; }
+      catch (e) { this.message = e.message; }
+      finally { this.busy = false; }
+    },
+    opsLevel() {
+      const a = (this.s.accounts || []).find(x => x.profile === 'OPS' && x.strategy === 'B01');
+      return a && a.account_level && a.account_level.equity_as_if ? a.account_level : null;
+    },
+    profLabel(p) { return p === 'OPS' ? '운영 검증형' : 'P7 비교형'; },
+    staleJob() { return this.h.mode === 'SHADOW' && (this.h.heartbeat?.status === 'STALE' || this.h.heartbeat?.processing === 'LAGGING'); },
+    yn(v) { return v == null ? '-' : (v ? '충족' : '미충족'); },
+    pct(v, d = 1) { return v == null ? '-' : (v * 100).toFixed(d) + '%'; },
+    num(v, d = 2) { return v == null ? '-' : Number(v).toFixed(d); },
+    usd(v) { return v == null ? '-' : '$' + Math.round(v).toLocaleString(); },
+    cls(v) { return v == null ? '' : (v > 0 ? 'pct-pos' : (v < 0 ? 'pct-neg' : 'pct-zero')); },
+    heatCls(l) { return l === 'DANGER' ? 'text-red-700 font-semibold' : (l === 'WARN' ? 'text-amber-700' : ''); },
+    age(s) { return s < 90 ? s + '초' : (s < 5400 ? Math.round(s / 60) + '분' : Math.round(s / 3600) + '시간'); },
+    fmtTs(t) { return t ? new Date(t * 1000).toLocaleString('ko-KR') : ''; },
+    heatMax() {
+      const v = (this.detail?.daily || []).flatMap(d => [d.entry_heat, d.current_heat]).filter(x => x != null);
+      return Math.max(0.05, ...v);
+    },
+    spark(vals, max) {
+      const v = vals.map(x => x == null ? null : Number(x));
+      const ok = v.filter(x => x != null);
+      if (ok.length < 2) return '';
+      const lo = max != null ? 0 : Math.min(...ok), hi = max != null ? max : Math.max(...ok);
+      const span = hi - lo || 1;
+      return v.map((x, i) => x == null ? null : (i / (v.length - 1) * 300).toFixed(1) + ',' + (78 - (x - lo) / span * 74).toFixed(1)).filter(Boolean).join(' ');
+    },
   };
 }
 </script>

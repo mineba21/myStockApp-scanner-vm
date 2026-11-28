@@ -1,0 +1,131 @@
+# Entry Strategy Backtest — 사전 등록 설정 (2026-11-25, 결과 확인 전 고정)
+# 연구용. 운영 스캐너·운영 DB·VM·S01 저널·주문 경로와 연결되지 않는다.
+# 매도는 S01 Scanner Stop 으로 고정하고 매수 조건만 바꾼다.
+
+data:
+  # backtest/exit_strategy 의 캐시를 읽기만 한다 (replay 재실행 없음).
+  exit_config: backtest/exit_strategy/configs/exit_backtest.yaml
+  signals_pkl: backtest/exit_strategy/data/cache/reconstructed_US.pkl
+  ohlcv_pkl: backtest/exit_strategy/data/cache/ohlcv_US.pkl
+  market: US
+  benchmark: SPY
+
+costs:              # exit_strategy 와 같은 가정값 (ASSUMED)
+  buy_commission: 0.0025
+  sell_commission: 0.0025
+  sell_tax: 0.0000278
+  slippage_bp: 10
+  slippage_sensitivity_bp: [25, 50]
+
+order:
+  min_r_pct: 3.0              # 시가 확인: (시가-손절)/시가 < 3% 이거나 시가 ≤ 손절이면 신규 진입 안 함
+  primary_timing: T1_100
+  timings:
+    T0:     {kind: market_open}                       # 탐지 다음 날 시가 (연속성)
+    T1_050: {kind: limit_next_day, limit_pct: 0.005}  # 탐지일 종가 +0.5% 지정가, 1일
+    T1_100: {kind: limit_next_day, limit_pct: 0.010}  # 탐지일 종가 +1.0% 지정가, 1일 (주 모델)
+    T2:     {kind: upthrust_confirm, limit_pct: 0.010, check_days: 3}   # D+3 돌파 유지 확인 후 D+4 지정가
+    T3:     {kind: pullback, limit_pct: 0.010, days: 5}  # 피벗 +1% 이내 눌림 지정가, 최대 5일 (종가+1% 상한)
+  # 같은 봉 매수 후 손절: conservative=당일 저가가 손절가 이하이면 당일 손절, next_day=등록 지연 가정(다음 날부터 감시)
+  primary_scenario: conservative
+  alt_scenario: next_day
+
+horizons:
+  primary: H60          # 기존 백테스트 비교 기준
+  sensitivity: [H120]
+  operational: UNL      # 기간 제한 없이 S01 손절만 (운영형, 채택 필수 확인)
+
+profiles:               # 같은 프로필 안에서만 전략을 비교한다
+  P_A: {label: "기존 비교 $100k · 위험1% · 비중20% · Heat6%", equity: 100000, RISK_PCT: 1.0, MAX_POSITION_PCT: 20.0, MAX_TOTAL_HEAT_PCT: 6.0}
+  P_B: {label: "account1 규모 $50k · 위험1% · 비중20% · Heat6%", equity: 50000, RISK_PCT: 1.0, MAX_POSITION_PCT: 20.0, MAX_TOTAL_HEAT_PCT: 6.0}
+  P_C: {label: "보수적 자동매수 $50k · 위험0.5% · 비중10% · Heat2%", equity: 50000, RISK_PCT: 0.5, MAX_POSITION_PCT: 10.0, MAX_TOTAL_HEAT_PCT: 2.0}
+  common: {MIN_R_PCT: 3.0, MAX_R_PCT: 15.0}
+primary_profile: P_C
+heat_definitions: [current, entry]   # current = 운영 calculate_open_risk (현재가-손절), entry = (매수가-손절)
+primary_heat: current
+
+split:                  # 탐지일 기준 시간순, 같은 날짜는 같은 구간. 구간 끝에서 미청산은 그날 종가로 평가(이후 가격 미참조)
+  train: 0.6
+  validation: 0.2
+  test: 0.2
+walk_forward: {train_months: 24, test_months: 6}
+bootstrap: {block_days: 20, samples: 1000, seed: 11}
+random_baseline: {runs: 1000, seed: 2026}
+
+# ── 필터 정의 (결정 시점 = 탐지일 종가 기준 값만 사용) ─────────────────────
+# F1 = 유형별 매수 적격 조건 (사전 고정, Train 결과로 바꾸지 않음)
+#   BREAKOUT / RE_BREAKOUT : 피벗 대비 확장 0~5%, 손절폭 ≤ 12%, 돌파 실패 확정 아님
+#                            (돌파 실패 판정 보류·주봉 거래량 미달은 제외 사유 아님)
+#   REBOUND                : 손절폭 ≤ 12%, MA150 대비 확장 ≤ 15%
+f1:
+  max_ext_pct: 5.0
+  max_stop_pct: 12.0
+  rebound_max_ma150_ext_pct: 15.0
+
+score:
+  # SC1: Train 기간에서 유형 보정 R 과의 Spearman p<0.05 인 요소만, Train 부호로 동일 가중 순위 점수
+  # SC2: 이론 방향 고정(데이터 미사용) rs_value+, volume_ratio+, ext−, stop_dist−
+  # SC3: Train |rho| 최대 단일 요소
+  candidates: [rs_value, rs_rising, volume_ratio, weekly_volume_ratio, slope150, ext_pct, stop_pct, atr_pct, dist_52w_high, base_strong]
+  p_threshold: 0.05
+
+selection:
+  # 채택 후보군 (이 범위 밖은 진단용, 채택 불가)
+  eligible_pools: [F1, F1_M1, F1_M2, F1_M3]
+  eligible_ranks: [GRADE, SC1, SC2, SC3]
+  eligible_topn: [1, 2, 3]
+  # Validation 목적함수: 구간 수익률 / max(|MDD|, 5%), Validation 거래 15건 미만 제외
+  min_validation_trades: 15
+
+acceptance:             # Test(1회) · walk-forward · 운영형 기준 (사전 고정)
+  test_cagr_ge_baseline: true
+  test_pf_ge_baseline: true
+  test_mdd_tolerance: 0.02
+  random_percentile_min: 75
+  min_trades_per_year: 20
+  min_years_better: 4          # 6개 연도 중
+  wf_min_share_better: 0.5
+  operational_unl: {cagr_gt: 0.0, pf_gt: 1.0, mdd_tolerance_vs_baseline: 0.02}
+
+# ══ P7 Heat·위험 예산 추가 검증 (2026-11-25 사용자 승인, 실행 전 고정) ══════════════
+# 목적: 위험 예산의 구조 문제 확인. 기존 NOT_RECOMMENDED 판정을 사후 최적화로 뒤집지 않는다.
+# 새 점수제·새 사후 전략 탐색 없음. 조건 정의는 P0~P6 그대로 (strategies.pool_masks).
+p7:
+  equity: 50000
+  heat_defs:
+    entry: "Σ(체결가 − 고정 S01 손절가) × 보유수량 + 미체결 매수의 (지정가 상한 − 손절가) × 주문수량, ÷ 순자산"
+    current: "Σ max(종가 − 손절가, 0) × 보유수량 + 미체결 예약, ÷ 순자산 (운영 calculate_open_risk 와 같은 방식)"
+  profiles:                # entry Heat 로 신규 매수 위험 예산 판단
+    CONS:   {label: "보수형",  RISK_PCT: 0.5,  MAX_TOTAL_HEAT_PCT: 2.0, MAX_POSITION_PCT: 10.0, min_cash_pct: 0.20, heat_def: entry}
+    BAL:    {label: "균형형",  RISK_PCT: 0.75, MAX_TOTAL_HEAT_PCT: 4.0, MAX_POSITION_PCT: 15.0, min_cash_pct: 0.20, heat_def: entry}
+    AGG:    {label: "적극형",  RISK_PCT: 1.0,  MAX_TOTAL_HEAT_PCT: 5.0, MAX_POSITION_PCT: 15.0, min_cash_pct: 0.20, heat_def: entry}
+    LEG_CUR: {label: "기존형 (현재가 Heat)", RISK_PCT: 1.0, MAX_TOTAL_HEAT_PCT: 6.0, MAX_POSITION_PCT: 20.0, min_cash_pct: 0.0, heat_def: current}
+    LEG_ENT: {label: "기존형 (Entry Heat)",  RISK_PCT: 1.0, MAX_TOTAL_HEAT_PCT: 6.0, MAX_POSITION_PCT: 20.0, min_cash_pct: 0.0, heat_def: entry}
+  min_cash_check: [CONS, BAL, AGG]       # min_cash 20% vs 0% 비교
+  common: {MIN_R_PCT: 3.0, MAX_R_PCT: 15.0}
+  strategies:
+    B00:   {pool: F0, market: M0, rank: GRADE, topn: 999, label: "Strict 전체 · Grade 정렬"}
+    B00N:  {pool: F0, market: M0, rank: GRADE, topn: 2,   label: "B00 · 하루 최대 2종목"}
+    B01:   {pool: "HARD_EXCL+NO_CHASE", market: M1, rank: GRADE, topn: 2,
+            label: "사후 후보: BULL · 늦은 Strict 제외 · 피벗 하회·추격 제외 · 손절폭≤15% · Grade · Top-2"}
+    B01HX: {pool: HARD_EXCL, market: M1, rank: GRADE, topn: 2, label: "참고: P6 정의 (추격 제외 없음)"}
+    # B02 = B01 후보군 무작위 Top-2 (random_runs 회)
+  # REBOUND 는 피벗이 없어 피벗 하회·추격 조건을 적용하지 않는다 (ext NaN 통과, 추격 경고 0건). 늦은 Strict·손절폭 조건은 적용.
+  horizons: [H60, H120, UNL]
+  segments: [full, test]                 # test 는 P6 에서 이미 본 구간 → 독립 근거 아님 (표시만)
+  oat:                                   # 하나씩 변경 (기준: 균형형, entry Heat, min_cash 20%)
+    base: BAL
+    RISK_PCT: [0.5, 0.75, 1.0]
+    MAX_TOTAL_HEAT_PCT: [2.0, 4.0, 5.0, 6.0, 8.0]
+    MAX_POSITION_PCT: [10.0, 15.0, 20.0]
+    min_cash_pct: [0.0, 0.2, 0.3]
+    strategies: [B00N, B01]
+    horizons: [H60, UNL]
+  current_heat_block: [null, 0.10, 0.15, 0.20]   # entry Heat 예산과 별도로 현재가 Heat 가 이 값 이상이면 신규 매수 차단
+  current_heat_warn: 0.10
+  manual_holdings_stress:                # 손절가 없는 수동 보유 (SPY 로 대리) — 위험을 0 으로 보지 않는 정책 비교
+    exposure_pct: [0.0, 0.30]
+    assumed_risk_pct: [0.0, 15.0, 100.0]   # 0=무시(현행 운영 calculate_open_risk), 15=MAX_R 가정, 100=전액 위험
+  slippage_bp: [10, 25, 50]
+  random_runs: 1000
+  random_seed: 7007
