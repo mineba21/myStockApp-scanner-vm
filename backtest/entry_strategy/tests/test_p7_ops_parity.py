@@ -101,7 +101,8 @@ def _synthetic(seed):
 @pytest.mark.parametrize("seed", [3, 17])
 def test_shadow_engine_matches_ops_policy_with_zero_volume_and_gaps(tmp_path, seed):
     u = _synthetic(seed)
-    sh = OP.run_shadow(u, str(tmp_path / "s.sqlite3"))
+    sh = OP.run_shadow(u, str(tmp_path / "s.sqlite3"), replay=True)
+    assert sh["replay_identical"]                      # 운영 재계산 경로(동결 입력 검증·CURRENT 전환 전 검증) 통과·같은 결과
     accts = OPS.p7c_accounts(S.B02_SEEDS)
     OPS.run(u["cands"], u["book"], u["cal_days"], u["start"], u["end"], accts, _profile(), _costs(),
             u["next_session"])
@@ -153,7 +154,11 @@ def test_real_reconstructed_data_all_23_accounts_match():
     u = OP.build_universe()
     assert u["end"] - u["start"] + 1 == 1480 and u["extra_closed"] == ["2025-01-09"] and not u["extra_open"]
     with tempfile.TemporaryDirectory() as tmp:
-        sh = OP.run_shadow(u, str(Path(tmp) / "s.sqlite3"))
+        sh = OP.run_shadow(u, str(Path(tmp) / "s.sqlite3"), replay=True)     # 동결 경로 + replay 경로 모두 제품 검증 통과
+        assert sh["replay_identical"]
+        integ = OP.journal_integrity(str(Path(tmp) / "s.sqlite3"))
+    assert integ["frozen_days"] == 1480 and integ["issues"] == 0
+    assert integ["valid_row_sha"] == integ["snapshots"] > 0 and integ["count_consistent"] == integ["captures"]
     ops = OP.run_ops(u)
     rep = OP.compare(sh, ops, u["cal_days"])
     assert len(rep["accounts"]) == 23

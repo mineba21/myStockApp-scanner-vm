@@ -304,17 +304,12 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
                      hashlib.sha256(rj.encode()).hexdigest(), rj, source, now))
             db.execute("UPDATE ab_scan_captures SET rows_captured=?, strict_rows=? WHERE scan_log_id=?",
                        (len(rows), strict_rows, scan_log_id))
+            seal_capture(db, scan_log_id, now)       # 같은 트랜잭션 끝에 봉인 → 이후 이 스캔에 스냅샷 추가 불가 (ab0007)
             # 당일 후보 확정: 정규 스캔·DONE·완전 수집·장 마감 후, 아직 확정 전일 때만
             frozen_now = False
             if (frozen is None and status == "DONE" and complete and not intraday and dayk
                     and trig == S.REGULAR_SCAN_TRIGGER and not after_cutoff):
-                sig_hash = hashlib.sha256(json.dumps(sorted(
-                    r_[0] for r_ in db.execute("SELECT row_sha256 FROM ab_signal_snapshots WHERE scan_log_id=?",
-                                                (scan_log_id,)))).encode()).hexdigest()[:16]
-                db.execute("INSERT INTO ab_day_inputs(day, decision_status, decision_scan_log_id, frozen_at, frozen_by, "
-                           "signal_set_hash, strategy_version, config_hash, logic_hash) VALUES (?,?,?,?,?,?,?,?,?)",
-                           (dayk, "FROZEN", scan_log_id, now, source, sig_hash, S.STRATEGY_VERSION,
-                            S.config_hash(settings), lhash))
+                freeze_decision(db, dayk, scan_log_id, source, settings, lhash, now)
                 frozen_now = True
             if late:
                 decided = set()
@@ -342,6 +337,29 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
                 "frozen": frozen_now}
     finally:
         session.close()
+
+
+def seal_capture(db, scan_log_id: int, now: float) -> None:
+    """수집 봉인 (ab0007). 수집 건수 = 실제 스냅샷 수일 때만 DB 가 받아들인다. 트랜잭션은 호출 측 (수집과 같은 트랜잭션)."""
+    from trading.auto_buy.shadow.journal_migrations import ddl_v7
+    n, ns, dg = ddl_v7.member_digest(db, scan_log_id)
+    db.execute(ddl_v7.SEAL_INSERT, {"sid": scan_log_id, "n": n, "ns": ns, "dg": dg, "source": "CAPTURE", "now": now})
+
+
+def freeze_decision(db, day: str, scan_log_id: int, frozen_by: str, settings, lhash: str, now: float) -> str:
+    """결정 입력 동결 (봉인된 결정 스캔 1회). 기존 v1 해시 규칙 그대로. 동결 전 공통 검증으로 수집 기록·봉인·건수·소속·
+    구성원 row_sha256·SSV2 를 확인하고, DB 트리거(ab0007)가 수집·봉인·건수를 다시 확인한다. 트랜잭션은 호출 측."""
+    from trading.auto_buy.shadow import integrity as IG
+    from trading.auto_buy.shadow.journal_migrations import ddl_v7
+    issues = IG.scan_set_issues(db, scan_log_id, day)
+    if issues:
+        raise IG.SignalSetIntegrityError(day, scan_log_id, issues, "freeze")
+    sig_hash = ddl_v7.signal_set_hash_v1(db, scan_log_id)
+    db.execute("INSERT INTO ab_day_inputs(day, decision_status, decision_scan_log_id, frozen_at, frozen_by, "
+               "signal_set_hash, strategy_version, config_hash, logic_hash) VALUES (?,?,?,?,?,?,?,?,?)",
+               (day, "FROZEN", scan_log_id, now, frozen_by, sig_hash, S.STRATEGY_VERSION,
+                S.config_hash(settings), lhash))
+    return sig_hash
 
 
 def started_after_cutoff(started_at, day, settings) -> bool:

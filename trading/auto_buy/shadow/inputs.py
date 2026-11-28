@@ -61,6 +61,7 @@ from typing import Callable, Optional
 from trading.auto_buy import settings as S
 from trading.auto_buy.shadow import calendar as CAL
 from trading.auto_buy.shadow import engine as EN
+from trading.auto_buy.shadow import integrity as IG
 from trading.auto_buy.shadow.store import event, get_runtime, set_runtime, tx
 from trading.auto_buy.shadow.vfills import (CONFIRMED_ZERO_SOURCES, VOLUME_POSITIVE, VOLUME_UNKNOWN, VOLUME_ZERO, Bar,
                                             BarUnavailable, volume_state, zero_confirmable)
@@ -298,13 +299,29 @@ def required_tickers(db, run_id: int, day: str) -> list:
         (run_id, day, run_id, day, day, day))})
 
 
-def build_inputs(db, run_id: int, day: str, bars: dict, settings=None) -> EN.DayInputs:
+def _read_inputs(db, day: str):
     row = day_input(db, day)
+    IG.verify_decision_set(db, day, "build_inputs")      # 공통 동결 입력 무결성 검증
+    fp = IG.fingerprint(db, day)
     scan_id = row["decision_scan_log_id"] if row else None
     pending = EN.eligibility_pending(db, scan_id)
     if pending:          # 적격 기록 전 후보를 읽으면 후보 0건으로 그날이 확정된다 — 처리하지 않는다
         raise RuntimeError(f"{day} 결정 스캔 #{scan_id} 적격 판정 미기록 {pending}건")
-    cands = EN.candidates(db, scan_id)
+    return row, fp, EN.candidates(db, scan_id)
+
+
+def build_inputs(db, run_id: int, day: str, bars: dict, settings=None) -> EN.DayInputs:
+    """검증과 후보 조회를 한 쓰기 트랜잭션(BEGIN IMMEDIATE)에서 한다 — 사이에 다른 연결이 쓸 수 없다. 이후 계좌별 처리
+    트랜잭션이 같은 지문인지 다시 확인한다 (``integrity.check_inputs_current``)."""
+    try:
+        if db.in_transaction:
+            row, fp, cands = _read_inputs(db, day)
+        else:
+            with tx(db):
+                row, fp, cands = _read_inputs(db, day)
+    except IG.SignalSetIntegrityError as exc:
+        IG.record_failure(db, exc, run_id)
+        raise
     nxt = CAL.next_trading_day(date.fromisoformat(day), settings)
     notes = []
     if row is None or row["decision_status"] != "FROZEN":
@@ -318,7 +335,7 @@ def build_inputs(db, run_id: int, day: str, bars: dict, settings=None) -> EN.Day
                         decision_scan_log_id=row["decision_scan_log_id"] if row else None,
                         required=sorted(bars), bars=bars, cands=cands, acct=account_from_input(row),
                         account_status=row["account_status"] if row else None,
-                        next_day=nxt.isoformat() if nxt else None, notes=notes)
+                        next_day=nxt.isoformat() if nxt else None, notes=notes, set_fingerprint=fp)
 
 
 def day_completeness(db, run_id: int, inp: EN.DayInputs) -> dict:
@@ -349,6 +366,14 @@ def day_completeness(db, run_id: int, inp: EN.DayInputs) -> dict:
 
 def process_day(db, run_id: int, inp: EN.DayInputs, settings=None, on_account: Optional[Callable] = None) -> dict:
     """46 계좌 처리 → 일 요약. ``on_account``: 계좌마다 처리 전에 부른다 (재계산 실행권 heartbeat·소유 확인)."""
+    try:
+        return _process_day(db, run_id, inp, settings, on_account)
+    except IG.SignalSetIntegrityError as exc:      # 해당 트랜잭션은 롤백됨 (주문·일 기록 없음)
+        IG.record_failure(db, exc, run_id)
+        raise
+
+
+def _process_day(db, run_id: int, inp: EN.DayInputs, settings, on_account) -> dict:
     for acc_id, *_ in S.account_ids():
         if on_account is not None:
             on_account()
@@ -357,6 +382,8 @@ def process_day(db, run_id: int, inp: EN.DayInputs, settings=None, on_account: O
         row = db.execute("SELECT status, notes FROM ab_days WHERE run_id=? AND day=?", (run_id, inp.day)).fetchone()
         if row is not None:                     # 이미 기록된 날은 그대로 (재실행 불변)
             return {"day": inp.day, "status": row[0], "missing": inp.missing, "already": True}
+        IG.check_inputs_current(db, inp, "process_day")
+        IG.verify_decision_set(db, inp.day, "process_day")     # 일 기록 직전 최종 검증 (같은 트랜잭션)
         c = day_completeness(db, run_id, inp)
         status = "COMPLETE" if c["complete"] else "DATA_INCOMPLETE"
         notes = list(inp.notes)
@@ -835,6 +862,8 @@ def replay(db, provider: Callable, reason: str, settings=None, *, expected_paren
         with tx(db):
             if not _owns(db, run):               # 교체 직전 실행권 재확인 (같은 트랜잭션에서 원자적 전환)
                 raise ReplayLeaseLost(f"재계산 run #{run} 실행권을 잃어 CURRENT 로 바꾸지 않습니다")
+            for d in days:                       # CURRENT 전환 전 최종 검증: 처리한 모든 거래일의 동결 입력
+                IG.verify_decision_set(db, d, "replay_current_switch")
             db.execute("UPDATE ab_runs SET status='SUPERSEDED' WHERE run_id=?", (parent,))
             db.execute("UPDATE ab_runs SET status='CURRENT', completed_at=?, through_day=?, summary=? WHERE run_id=?",
                        (_now(), days[-1] if days else None, EN._j(diff), run))
@@ -864,6 +893,8 @@ def replay(db, provider: Callable, reason: str, settings=None, *, expected_paren
                            (time.time(), run))
                 set_runtime(db, "replay_in_progress", None)
             event(db, "ERROR", "replay_failed", f"재계산 run #{run} 실패: {type(exc).__name__}", run=run)
+        if isinstance(exc, IG.SignalSetIntegrityError):       # 기존 CURRENT 유지, 실패 이력 + 무결성 감사 기록
+            IG.record_failure(db, exc, run)
         raise
 
 

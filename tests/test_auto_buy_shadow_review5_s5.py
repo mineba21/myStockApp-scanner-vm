@@ -210,10 +210,10 @@ def menv(tmp_path, monkeypatch):
 
 
 def test_head_is_ab0004_and_new_create_has_immutability_triggers(menv):
-    assert EXPECTED_SCHEMA_VERSION == "ab0006"
+    assert EXPECTED_SCHEMA_VERSION == "ab0007"
     j = str(menv / "new.sqlite3")
     rep = M.run(j, str(menv / "bk"), allow_create=True)
-    assert rep["result"] == "OK" and rep["schema_version"] == "ab0006" and _mode(j) == 0o600
+    assert rep["result"] == "OK" and rep["schema_version"] == "ab0007" and _mode(j) == 0o600
     assert {"ab_orders_no_delete", "ab_fill_ledger_no_delete", "ab_runs_terminal_immutable",
             "ab_events_no_update", "ab_days_fence_update_old"} <= _triggers(j)
 
@@ -231,7 +231,7 @@ def test_upgrade_to_ab0004_preserves_data_and_audit(menv, start):
     os.chmod(j, 0o600)
     before = {t: sqlite3.connect(j).execute(f"SELECT * FROM {t} ORDER BY 1").fetchall() for t in ("ab_runs", "ab_events")}
     rep = M.run(j, str(menv / "bk"))
-    assert rep["result"] == "OK" and rep["schema_version"] == "ab0006" and _mode(rep["backup"]) == 0o600
+    assert rep["result"] == "OK" and rep["schema_version"] == "ab0007" and _mode(rep["backup"]) == 0o600
     after = {t: sqlite3.connect(j).execute(f"SELECT * FROM {t} ORDER BY 1").fetchall() for t in ("ab_runs", "ab_events")}
     assert after == before                                               # 데이터·감사 이력 보존
     c = sqlite3.connect(j)
@@ -267,7 +267,7 @@ def test_check_mode_is_read_only_for_ab0003(menv):
     os.chmod(j, 0o600)
     before = _sha(j)
     rep = M.run(j, str(menv / "bk"), check=True)
-    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0006"}
+    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0007"}
     assert _sha(j) == before and not (menv / "bk").exists()
 
 

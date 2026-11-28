@@ -38,7 +38,7 @@ def latest_0644(path):
 
 def test_check_fails_for_restored_latest_journal_with_0644_and_changes_nothing(env):
     j = latest_0644(env / "j.sqlite3")
-    assert schema_status(j)["schema_version"] == "ab0006"
+    assert schema_status(j)["schema_version"] == "ab0007"
     before = sha(j)
     with pytest.raises(M.Abort) as e:
         M.run(j, str(env / "bk"), check=True)
@@ -84,7 +84,7 @@ def test_upgrade_and_create_paths_end_0600_even_with_permissive_umask(env):
         command.upgrade(cfg, "ab0001")
         os.chmod(v1, 0o644)
         rep = M.run(v1, str(env / "bk"))
-        assert rep["result"] == "OK" and rep["schema_version"] == "ab0006"
+        assert rep["result"] == "OK" and rep["schema_version"] == "ab0007"
         assert mode(v1) == 0o600 and mode(rep["backup"]) == 0o600 and mode(rep["report_file"]) == 0o600
         new = str(env / "new.sqlite3")
         rep = M.run(new, str(env / "bk"), allow_create=True)

@@ -114,17 +114,83 @@ def _provider(u):
     return f
 
 
-def run_shadow(u: dict, journal: str, progress: bool = False) -> dict:
-    """캐시 거래량 0 을 확정 0 으로 가정한 상태에서 SHADOW 엔진 경로를 실행한다 (``CACHE_ZERO_ASSUMPTION``)."""
+def run_shadow(u: dict, journal: str, progress: bool = False, replay: bool = False) -> dict:
+    """캐시 거래량 0 을 확정 0 으로 가정한 상태에서 SHADOW 엔진 경로를 실행한다 (``CACHE_ZERO_ASSUMPTION``).
+    ``replay=True``: 처리 후 운영 재계산 경로(``inputs.replay``)로 전체를 다시 계산해 동결 입력 검증·CURRENT 전환 전 최종
+    검증을 거치게 하고, 결과가 처음 계산과 같은지(``replay_identical``) 함께 돌려준다."""
     from trading.auto_buy.shadow.vfills import assume_confirmed_zero
     with assume_confirmed_zero(CACHE_SOURCE):
-        return _run_shadow(u, journal, progress)
+        return _run_shadow(u, journal, progress, replay)
 
 
-def _run_shadow(u: dict, journal: str, progress: bool = False) -> dict:
+def journal_integrity(journal: str) -> dict:
+    """검증 저널을 제품 공통 무결성 검증(``integrity.decision_set_issues``)으로 다시 점검한 집계 (우회 옵션 없음)."""
+    from trading.auto_buy.shadow import integrity as IG
+    from trading.auto_buy.shadow.journal_migrations import ddl_v7
+    from trading.auto_buy.shadow.store import connect_rw
+    db = connect_rw(journal)
+    try:
+        snaps = db.execute("SELECT row_json, row_sha256 FROM ab_signal_snapshots").fetchall()
+        caps = db.execute("SELECT c.scan_log_id, c.rows_captured, c.strict_rows, "
+                          "(SELECT COUNT(*) FROM ab_signal_snapshots s WHERE s.scan_log_id=c.scan_log_id) n, "
+                          "(SELECT COUNT(*) FROM ab_signal_snapshots s WHERE s.scan_log_id=c.scan_log_id "
+                          " AND s.strict_passed=1) ns FROM ab_scan_captures c").fetchall()
+        days = [r[0] for r in db.execute("SELECT day FROM ab_day_inputs WHERE decision_status='FROZEN'")]
+        issues = sum(1 for d in days if IG.decision_set_issues(db, d))
+        return {"snapshots": len(snaps), "valid_row_sha": sum(ddl_v7.row_sha_ok(j, h) for j, h in snaps),
+                "captures": len(caps), "count_consistent": sum((r[1], r[2]) == (r[3], r[4]) for r in caps),
+                "nonempty_captures": sum(r[3] > 0 for r in caps), "frozen_days": len(days), "issues": issues}
+    finally:
+        db.close()
+
+
+def snapshot_row_json(c: dict) -> str:
+    """재구성 후보 1건의 정규화 JSON (키 정렬·NaN 불허). 이 SHA-256 은 **재구성 후보 내용의 무결성 근거**일 뿐,
+    실제 과거 Scanner 원본 행을 입증하지 않는다 (원본 미보존, OHLCV 캐시도 재구성 데이터)."""
+    return json.dumps({"source": "P7_RECONSTRUCTED_CANDIDATE", "cid": int(c["cid"]), "signal_key": c["signal_key"],
+                       "ticker": c["ticker"], "signal_type": c["signal_type"], "signal_date": c["day"],
+                       "close": c["close"], "stop": c["stop"], "grade": c.get("grade"),
+                       "signal_quality": c.get("quality"), "market_condition": c.get("market_condition"),
+                       "first_seen": bool(c.get("first_seen")), "ext_pct": c.get("ext_pct"),
+                       "stop_pct": c.get("stop_pct"), "warnings": list(c.get("warnings") or []),
+                       "sector": c.get("sector"), "strict_filter_passed": True},
+                      ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+
+def write_scan_capture(db, scan_log_id: int, day: str, rows: list, now: float, settings, lh: str,
+                       freeze: bool = True) -> None:
+    """검증용 저널에 정규 결정 스캔 1회를 운영과 같은 규칙으로 기록한다 (트랜잭션은 호출 측).
+    수집 기록 → 스냅샷(정규화 JSON·SHA-256) → 실제 건수 기록 → 봉인(``snapshot.seal_capture``) → 동결
+    (``snapshot.freeze_decision``: 공통 무결성 검증·기존 v1 해시 규칙·DB 트리거 통과 필수). 우회 옵션 없음."""
+    from trading.auto_buy.shadow.snapshot import freeze_decision, seal_capture
+    db.execute("INSERT INTO ab_scan_captures(scan_log_id, scan_market, scan_status, triggered_by, scan_started_at, "
+               "scan_finished_at, trading_day, intraday, source, complete, recoverability, late_after_decision, "
+               "captured_at) VALUES (?,?,?,?,?,?,?,0,?,?,?,0,?)",
+               (scan_log_id, "US", "DONE", "scheduler", day + "T21:30:00", day + "T21:40:00", day, "HOOK", 1, "FULL",
+                now))
+    for c in rows:
+        rj = snapshot_row_json(c)
+        db.execute(
+            "INSERT INTO ab_signal_snapshots(scan_log_id, scan_result_id, signal_key, market, ticker, signal_type, "
+            "signal_date, trading_day, scan_status, is_first_detection, strict_passed, first_strict_pass, "
+            "first_pass_basis, grade, signal_quality, market_condition, decision_price, stop_loss, ext_pct, "
+            "stop_pct, entry_warnings, sector_name, row_sha256, row_json, capture_source, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,1,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (scan_log_id, int(c["cid"]), c["signal_key"], "US", c["ticker"], c["signal_type"], day, day, "DONE",
+             int(bool(c.get("first_seen"))), "FIRST_DETECTION", c.get("grade"), c.get("quality"),
+             c.get("market_condition"), c["close"], c["stop"], c.get("ext_pct"), c.get("stop_pct"),
+             json.dumps(list(c.get("warnings") or []), ensure_ascii=False), c.get("sector"),
+             hashlib.sha256(rj.encode()).hexdigest(), rj, "BACKTEST_REPLAY", now))
+    db.execute("UPDATE ab_scan_captures SET rows_captured=?, strict_rows=? WHERE scan_log_id=?",
+               (len(rows), len(rows), scan_log_id))
+    seal_capture(db, scan_log_id, now)
+    if freeze:
+        freeze_decision(db, day, scan_log_id, "BACKTEST_REPLAY", settings, lh, now)
+
+
+def _run_shadow(u: dict, journal: str, progress: bool = False, replay: bool = False) -> dict:
     from dataclasses import replace
 
-    from trading.auto_buy import settings as S
     from trading.auto_buy.shadow import engine as EN
     from trading.auto_buy.shadow import inputs as IN
     from trading.auto_buy.shadow.schema import upgrade_journal
@@ -140,32 +206,13 @@ def _run_shadow(u: dict, journal: str, progress: bool = False) -> dict:
     try:
         EN.ensure_accounts(db, days[start], settings)
         run = EN.ensure_run(db, settings)
-        now, lh, ch = time.time(), logic_hash(), S.config_hash(settings)
-        with tx(db):
+        now, lh = time.time(), logic_hash()
+        by_day = {}
+        for c in u["cands"]:
+            by_day.setdefault(c["day_i"], []).append(c)
+        with tx(db):          # 거래일마다 운영과 같은 순서: 수집 → 수집 건수 → 봉인 → 결정 입력 동결 (공통 검증 통과 필수)
             for i in range(start, end + 1):
-                db.execute("INSERT INTO ab_scan_captures(scan_log_id, scan_market, scan_status, triggered_by, "
-                           "scan_started_at, trading_day, source, complete, recoverability, captured_at) "
-                           "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                           (i + 1, "US", "DONE", "scheduler", days[i] + "T21:30:00", days[i], "HOOK", 1, "FULL", now))
-            for c in u["cands"]:
-                db.execute(
-                    "INSERT INTO ab_signal_snapshots(scan_log_id, scan_result_id, signal_key, market, ticker, signal_type, "
-                    "signal_date, trading_day, scan_status, is_first_detection, strict_passed, first_strict_pass, "
-                    "first_pass_basis, grade, signal_quality, market_condition, decision_price, stop_loss, ext_pct, "
-                    "stop_pct, entry_warnings, sector_name, row_sha256, row_json, capture_source, created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,1,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (c["day_i"] + 1, c["cid"], c["signal_key"], "US", c["ticker"], c["signal_type"], c["day"],
-                     c["day"], "DONE", int(c["first_seen"]), "FIRST_DETECTION", c["grade"], c["quality"],
-                     c["market_condition"], c["close"], c["stop"], c["ext_pct"], c["stop_pct"],
-                     json.dumps(c["warnings"], ensure_ascii=False), c["sector"], "backtest", "{}",
-                     "BACKTEST_REPLAY", now))
-            for i in range(start, end + 1):
-                # 운영 확정(snapshot.capture_scan_log)과 같은 신호 집합 해시 — 저널 계약(ab0006): FROZEN 은 해시 필수
-                sig_hash = hashlib.sha256(json.dumps(sorted(r[0] for r in db.execute(
-                    "SELECT row_sha256 FROM ab_signal_snapshots WHERE scan_log_id=?", (i + 1,)))).encode()).hexdigest()[:16]
-                db.execute("INSERT INTO ab_day_inputs(day, decision_status, decision_scan_log_id, frozen_at, frozen_by, "
-                           "signal_set_hash, strategy_version, config_hash, logic_hash) VALUES (?,?,?,?,?,?,?,?,?)",
-                           (days[i], "FROZEN", i + 1, now, "BACKTEST_REPLAY", sig_hash, S.STRATEGY_VERSION, ch, lh))
+                write_scan_capture(db, i + 1, days[i], by_day.get(i, []), now, settings, lh)
         EN.record_eligibility(db)
         prov = _provider(u)
         for i in range(start, end + 1):
@@ -175,7 +222,16 @@ def _run_shadow(u: dict, journal: str, progress: bool = False) -> dict:
             IN.process_day(db, run, IN.build_inputs(db, run, d, got["bars"], settings), settings)
             if progress and (i - start) % 100 == 0:
                 print(f"  shadow {d} ({i - start + 1}/{end - start + 1}) {time.time() - t0:.0f}s", flush=True)
-        return {"run": run, "elapsed_sec": time.time() - t0, **extract(db, run)}
+        out = {"run": run, "elapsed_sec": time.time() - t0, **extract(db, run)}
+        if replay:
+            with tx(db):
+                IN._mark_replay_needed(db, [(days[end], "__P7OPS_REPLAY_CHECK__")])
+            res = IN.replay(db, prov, "BARS_RECOVERED", settings)
+            again = extract(db, res["run"])
+            out["replay_run"] = res["run"]
+            keys = [k for k in again if k != "_events"]       # 이벤트 목록은 재계산 기록이 더해지므로 제외
+            out["replay_identical"] = all(again[k] == out.get(k) for k in keys)
+        return out
     finally:
         db.close()
 

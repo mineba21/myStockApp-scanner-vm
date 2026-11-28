@@ -20,15 +20,18 @@ import pandas as pd
 import pytest
 
 from backtest.entry_strategy.src import fills as F
+from backtest.entry_strategy.src.ops_parity import write_scan_capture
 from backtest.entry_strategy.src import portfolio as PF
 from backtest.entry_strategy.src import risk_portfolio as RP
 from trading.auto_buy import settings as S
 from trading.auto_buy.shadow import calendar as CAL
 from trading.auto_buy.shadow import eligibility as EL
 from trading.auto_buy.shadow import engine as EN
+from trading.auto_buy.shadow import integrity as IG
 from trading.auto_buy.shadow.schema import upgrade_journal
 from trading.auto_buy.shadow.store import connect_rw, tx
 from trading.auto_buy.shadow.vfills import Bar
+from trading.auto_buy.version import logic_hash
 
 ACC = "SV1:P7C:B01"
 GRADES = [("S", "STRONG"), ("A", "STRONG"), ("A", "MODERATE"), ("B", "WEAK")]
@@ -103,21 +106,20 @@ def _shadow(tmp_path, days, tickers, ohlc, cand):
     run = EN.ensure_run(db)
     by_day = {}
     now = time.time()
-    with tx(db):
+    rows = {}
+    for r in cand.itertuples():
+        d = days[r.ticker_pos]
+        rows.setdefault(r.ticker_pos, []).append(
+            {"cid": int(r.cid), "signal_key": f"US:{r.ticker}:BREAKOUT:{d}", "ticker": r.ticker, "signal_type": "BREAKOUT",
+             "day": d, "close": float(r.close), "stop": float(r.stop), "grade": r.grade, "quality": r.quality,
+             "market_condition": "BULL", "first_seen": True, "ext_pct": None, "stop_pct": None, "warnings": [],
+             "sector": "Tech"})
+    with tx(db):            # 운영과 같은 수집·봉인·동결 규칙 (공통 무결성 검증 통과 필수)
         for i, d in enumerate(days):
-            db.execute("INSERT INTO ab_scan_captures(scan_log_id, scan_market, scan_status, scan_started_at, "
-                       "trading_day, source, complete, recoverability, captured_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                       (i + 1, "US", "DONE", d, d, "HOOK", 1, "FULL", now))
-        for r in cand.itertuples():
-            key = f"US:{r.ticker}:BREAKOUT:{days[r.ticker_pos]}"
-            cur = db.execute(
-                "INSERT INTO ab_signal_snapshots(scan_log_id, scan_result_id, signal_key, market, ticker, signal_type, "
-                "signal_date, trading_day, scan_status, is_first_detection, strict_passed, first_strict_pass, "
-                "first_pass_basis, grade, signal_quality, market_condition, decision_price, stop_loss, sector_name, "
-                "row_sha256, row_json, capture_source, created_at) VALUES (?,?,?,?,?,?,?,?,?,1,1,1,?,?,?,?,?,?,?,?,?,?,?)",
-                (r.ticker_pos + 1, int(r.cid), key, "US", r.ticker, "BREAKOUT", days[r.ticker_pos], days[r.ticker_pos],
-                 "DONE", "FIRST_DETECTION", r.grade, r.quality, "BULL", r.close, r.stop, "Tech", "x", "{}", "TEST", now))
-            by_day.setdefault(days[r.ticker_pos], []).append(cur.lastrowid)
+            write_scan_capture(db, i + 1, d, rows.get(i, []), now, None, logic_hash())
+    for i, d in enumerate(days):
+        by_day[d] = [x[0] for x in db.execute("SELECT id FROM ab_signal_snapshots WHERE scan_log_id=? ORDER BY id",
+                                               (i + 1,))]
     for i, d in enumerate(days):
         ids = by_day.get(d, [])
         cands = {"B01": [dict(x) for x in db.execute(
@@ -125,7 +127,7 @@ def _shadow(tmp_path, days, tickers, ohlc, cand):
         bars = {t: EN.BarRec(Bar(*(float(a[i]) for a in ohlc[t])), "synthetic", 0.0, 1) for t in tickers}
         inp = EN.DayInputs(day=d, decision_status="FROZEN", decision_scan_log_id=i + 1, required=tickers, bars=bars,
                            cands=cands, acct=None, account_status=None, next_day=days[i + 1] if i + 1 < len(days)
-                           else None)
+                           else None, set_fingerprint=IG.fingerprint(db, d))
         EN.process_account_day(db, run, ACC, inp)
     return db, run
 

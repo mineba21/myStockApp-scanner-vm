@@ -41,10 +41,10 @@ def _rows(j):
 
 
 def test_head_is_ab0006_and_new_journal_has_contract_triggers(menv):
-    assert EXPECTED_SCHEMA_VERSION == "ab0006"
+    assert EXPECTED_SCHEMA_VERSION == "ab0007"
     j = str(menv / "new.sqlite3")
     rep = M.run(j, str(menv / "bk"), allow_create=True)
-    assert rep["result"] == "OK" and rep["schema_version"] == "ab0006" and _mode(j) == 0o600
+    assert rep["result"] == "OK" and rep["schema_version"] == "ab0007" and _mode(j) == 0o600
     trig = _triggers(j)
     assert V6_TRIGGERS <= trig and "ab_eligibility_no_replace_insert" not in trig
 
@@ -59,7 +59,7 @@ def test_upgrade_to_ab0006_preserves_data_and_protects_both_connections(menv, st
         os.chmod(j, 0o600)
     before = _rows(j)
     rep = M.run(j, str(menv / "bk"))
-    assert rep["result"] == "OK" and rep["schema_version"] == "ab0006" and _mode(rep["backup"]) == 0o600
+    assert rep["result"] == "OK" and rep["schema_version"] == "ab0007" and _mode(rep["backup"]) == 0o600
     assert _rows(j) == before and V6_TRIGGERS <= _triggers(j)
     if start == "ab0005":
         from trading.auto_buy.shadow.store import connect_rw
@@ -86,6 +86,7 @@ def test_ab0006_failure_rolls_back_to_ab0005(menv, monkeypatch):
     trig, sha = _triggers(j), _sha(j)
     from trading.auto_buy.shadow.schema import expected_objects
     expected_objects("ab0006")                       # 기대 구조는 정상 DDL 로 (캐시), Migration 실행만 중간에 실패시킨다
+    expected_objects("ab0007")
     monkeypatch.setattr(ddl_v6, "DDL_V6", DDL_V6[:10] + ("CREATE TRIGGER broken BEFORE nonsense",))
     with pytest.raises(M.Abort):
         M.run(j, str(menv / "bk"))
@@ -124,7 +125,7 @@ def test_check_mode_is_read_only_for_ab0005(menv):
     os.chmod(j, 0o600)
     sha = _sha(j)
     rep = M.run(j, str(menv / "bk"), check=True)
-    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0006"}
+    assert rep["result"] == "CHECK_ONLY" and rep["dry_run"] == {"ok": True, "schema_version": "ab0007"}
     assert _sha(j) == sha and not (menv / "bk").exists()
 
 

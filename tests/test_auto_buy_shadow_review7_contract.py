@@ -26,9 +26,14 @@ from tests.test_auto_buy_shadow_review3 import _replay_ready, request_replay
 from trading.auto_buy import settings as S
 from trading.auto_buy.shadow import engine as EN
 from trading.auto_buy.shadow import inputs as IN
-from trading.auto_buy.shadow.journal_migrations.ddl_v6 import (CATEGORIES, CONTRACT, COVERED_ELSEWHERE,
-                                                               ELIGIBILITY_JUDGEMENT, PROTECTED, RUNTIME,
-                                                               _immutable_columns)
+from trading.auto_buy.shadow.journal_migrations.ddl_v6 import CATEGORIES, ELIGIBILITY_JUDGEMENT, RUNTIME
+from trading.auto_buy.shadow.journal_migrations.ddl_v7 import CONTRACT, COVERED_ELSEWHERE, PROTECTED   # 최신 계약 (ab0007)
+
+
+def _immutable_columns(t):
+    c = CONTRACT[t]
+    keys = {k for cols, _ in c["keys"] for k in cols}
+    return [x for x in c["columns"] if x not in c["mutable"] or x in keys]
 from trading.auto_buy.shadow.schema import upgrade_journal
 from trading.auto_buy.shadow.store import connect_rw, event, get_runtime, set_runtime, tx
 
@@ -217,8 +222,8 @@ def test_every_protected_table_has_contract_triggers(template):
     try:
         trig = {r[0]: r[1] for r in db.execute("SELECT name, tbl_name FROM sqlite_master WHERE type='trigger'")}
         for t in PROTECTED:
-            for suffix in ("v6_rowid_insert", "v6_rowid_positive", "v6_allowlist"):
-                assert trig.get(f"{t}_{suffix}") == t, (t, suffix)
+            for suffix in ("rowid_insert", "rowid_positive", "allowlist"):      # ab0006 (기존 표) 또는 ab0007 (봉인 표)
+                assert t in (trig.get(f"{t}_v6_{suffix}"), trig.get(f"{t}_v7_{suffix}")), (t, suffix)
             assert any(tb == t and ("no_delete" in n) for n, tb in trig.items()), (t, "삭제 거부")
         assert "ab_eligibility_no_replace_insert" not in trig          # ab0006 이 판정 충돌 정책으로 교체
         assert {"ab_eligibility_v6_conflict", "ab_eligibility_v6_same"} <= set(trig)
@@ -348,7 +353,10 @@ def test_sql_operation_cannot_change_protected_rows(template, kind, table, op):
     if op == "INSERT OR REPLACE hidden rowid" and not alias:
         assert "row identity" in err, (table, err)                  # 숨은 rowid 교체는 ab0006 rowid 보호가 막음
     if op == "INSERT negative rowid" and table not in ("ab_runs",):     # ab_runs 복사본은 단일 CURRENT 가 먼저 막음
-        assert "row identity" in err, (table, err)
+        if table in ("ab_signal_snapshots", "ab_capture_seals"):       # 봉인된 집합·봉인 건수 검사(ab0007)가 먼저 막음
+            assert "row identity" in err or "contract set" in err, (table, err)
+        else:
+            assert "row identity" in err, (table, err)
 
 
 def test_auto_generated_ids_still_work_and_new_rows_get_positive_rowids(template, tmp_path):
@@ -632,8 +640,9 @@ def test_eligibility_different_judgement_is_rejected(template, kind, verb, field
 
 
 def test_record_eligibility_conflict_rolls_back_and_records_safety_event(template, tmp_path):
-    """판정 대상을 고른 뒤 트랜잭션 시작 전에 다른 작업자가 같은 키에 **다른 판단**을 먼저 기록한 경우 (경합).
-    INSERT OR IGNORE 여도 조용히 숨기지 않고 거부 → 이번 기록 전체 롤백, 안전 위반 이벤트, ``EligibilityConflict``."""
+    """같은 키에 **다른 판단**이 이미 있는 상태에서 판정을 기록하면 INSERT OR IGNORE 여도 조용히 숨기지 않고 거부한다 →
+    이번 기록 전체 롤백, 안전 위반 이벤트, ``EligibilityConflict``. (ab0007 부터 대상 조회도 기록과 같은 쓰기 트랜잭션 안에서
+    하므로 조회와 기록 사이에 다른 연결이 끼어들 수 없다 — 충돌 상태는 같은 트랜잭션 안에서 주입한다.)"""
     path = str(tmp_path / "j.sqlite3")
     src, dst = sqlite3.connect(template["path"]), sqlite3.connect(path)
     src.backup(dst)
@@ -641,7 +650,7 @@ def test_record_eligibility_conflict_rolls_back_and_records_safety_event(templat
     dst.close()
     os.chmod(path, 0o600)
     raw = sqlite3.connect(path, isolation_level=None)
-    try:                                         # 판정 기록이 아직 없는 새 스냅샷 (기존 수집·스냅샷 행 복사)
+    try:                                         # 판정 기록이 아직 없는 새 스냅샷 (기존 수집·스냅샷 행 복사, 봉인 전)
         first = raw.execute("SELECT scan_log_id FROM ab_signal_snapshots ORDER BY id LIMIT 1").fetchone()[0]
         cc = [r[1] for r in raw.execute("PRAGMA table_info(ab_scan_captures)")]
         raw.execute(f"INSERT INTO ab_scan_captures({', '.join(cc)}) SELECT " + ", ".join(
@@ -653,35 +662,30 @@ def test_record_eligibility_conflict_rolls_back_and_records_safety_event(templat
             + f" FROM ab_signal_snapshots WHERE scan_log_id={first}")
         new = [r[0] for r in raw.execute("SELECT id FROM ab_signal_snapshots s WHERE NOT EXISTS (SELECT 1 FROM "
                                          "ab_eligibility e WHERE e.snapshot_id=s.id) ORDER BY id")]
-        pool = raw.execute("SELECT pool FROM ab_eligibility ORDER BY pool DESC LIMIT 1").fetchone()[0]
     finally:
         raw.close()
     assert new
     real = connect_rw(path)
 
-    class Racing:                                # 대상 조회 후 BEGIN 직전에 다른 작업자가 다른 판단을 기록
-        raced = False
+    class Forging:                               # 마지막 새 스냅샷의 판정 INSERT 직전에 같은 키·다른 판단을 넣는다
+        forged = False
 
         def __getattr__(self, name):
             return getattr(real, name)
 
         def execute(self, sql, *a):
-            if sql == "BEGIN IMMEDIATE" and not Racing.raced:
-                Racing.raced = True
-                other = sqlite3.connect(path, isolation_level=None)
-                other.execute("INSERT INTO ab_eligibility(snapshot_id, pool, strategy_version, eligible, reasons, "
-                              "decision_role, logic_hash, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                              (new[-1], pool, S.STRATEGY_VERSION, 1, '["forged"]', "FORGED", "forged", 0))
-                other.close()
+            if sql.startswith("INSERT OR IGNORE INTO ab_eligibility") and a and a[0][0] == new[-1] and not Forging.forged:
+                Forging.forged = True
+                real.execute("INSERT INTO ab_eligibility(snapshot_id, pool, strategy_version, eligible, reasons, "
+                             "decision_role, logic_hash, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                             (new[-1], a[0][1], S.STRATEGY_VERSION, 1, '["forged"]', "FORGED", "forged", 0))
             return real.execute(sql, *a)
     try:
         before = real.execute("SELECT COUNT(*) FROM ab_eligibility").fetchone()[0]
         with pytest.raises(EN.EligibilityConflict):
-            EN.record_eligibility(Racing())
-        assert Racing.raced
-        assert real.execute("SELECT COUNT(*) FROM ab_eligibility").fetchone()[0] == before + 1   # 경합 행만 (전체 롤백)
-        forged = real.execute("SELECT * FROM ab_eligibility WHERE decision_role='FORGED'").fetchone()
-        assert forged["reasons"] == '["forged"]' and forged["snapshot_id"] == new[-1]           # 기존 행 유지
+            EN.record_eligibility(Forging())
+        assert Forging.forged
+        assert real.execute("SELECT COUNT(*) FROM ab_eligibility").fetchone()[0] == before    # 전체 롤백
         ev = real.execute("SELECT * FROM ab_events WHERE kind='eligibility_conflict'").fetchone()
         assert ev["severity"] == "ERROR" and json.loads(ev["details"])["snapshot_id"] == new[-1]
         assert not real.in_transaction

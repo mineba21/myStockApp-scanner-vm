@@ -34,6 +34,7 @@ from typing import Optional
 from trading.auto_buy import settings as S
 from trading.auto_buy.shadow import eligibility as EL
 from trading.auto_buy.shadow import risk as RK
+from trading.auto_buy.shadow import integrity as IG
 from trading.auto_buy.shadow.store import event, get_runtime, set_runtime, tx
 from trading.auto_buy.shadow.vfills import Bar, check_stop, try_buy, unit_cost, unit_proceeds
 
@@ -74,6 +75,7 @@ class DayInputs:
     account_status: Optional[str]
     next_day: Optional[str]
     notes: list = field(default_factory=list)
+    set_fingerprint: Optional[tuple] = None   # 공통 무결성 검증 시점의 결정 신호 집합 지문 (integrity.fingerprint)
 
     @property
     def missing(self) -> list:
@@ -166,15 +168,18 @@ def record_eligibility(db) -> int:
     늦게 수집된 스냅샷도 여기서 제외 사유(LATE_SCAN_AFTER_DECISION)와 함께 남는다."""
     from trading.auto_buy.version import logic_hash
     lh = logic_hash()
-    rows = db.execute(
-        "SELECT s.*, d.decision_scan_log_id AS d_scan, d.day AS d_day FROM ab_signal_snapshots s "
-        "LEFT JOIN ab_day_inputs d ON d.day = s.trading_day "
-        "WHERE NOT EXISTS (SELECT 1 FROM ab_eligibility e WHERE e.snapshot_id=s.id AND e.strategy_version=?) "
-        "AND (d.day IS NOT NULL OR s.intraday=1 OR s.scan_status!='DONE')", (S.STRATEGY_VERSION,)).fetchall()
     n, now = 0, time.time()
     current = None
     try:
         with tx(db):
+            rows = db.execute(
+                "SELECT s.*, d.decision_scan_log_id AS d_scan, d.day AS d_day FROM ab_signal_snapshots s "
+                "LEFT JOIN ab_day_inputs d ON d.day = s.trading_day "
+                "WHERE NOT EXISTS (SELECT 1 FROM ab_eligibility e WHERE e.snapshot_id=s.id AND e.strategy_version=?) "
+                "AND (d.day IS NOT NULL OR s.intraday=1 OR s.scan_status!='DONE')", (S.STRATEGY_VERSION,)).fetchall()
+            # 결정 스캔 구성원의 판정은 동결 집합 검증을 통과한 뒤에만 기록한다 (같은 트랜잭션)
+            for day in sorted({r["d_day"] for r in rows if r["d_scan"] is not None and r["d_scan"] == r["scan_log_id"]}):
+                IG.verify_decision_set(db, day, "record_eligibility")
             for r in rows:
                 snap = dict(r)
                 snap["decision_role"] = decision_role(r, {"decision_scan_log_id": r["d_scan"]} if r["d_day"] else None)
@@ -186,6 +191,9 @@ def record_eligibility(db) -> int:
                                      (r["id"], pool, S.STRATEGY_VERSION, int(ok), _j(reasons), snap["decision_role"],
                                       lh, now))
                     n += cur.rowcount
+    except IG.SignalSetIntegrityError as exc:
+        IG.record_failure(db, exc)
+        raise
     except sqlite3.IntegrityError as exc:
         if "eligibility conflict" not in str(exc):
             raise
@@ -317,6 +325,7 @@ def process_account_day(db, run_id: int, acc_id: str, inp: DayInputs, settings=N
         if db.execute("SELECT 1 FROM ab_daily WHERE run_id=? AND account_id=? AND day=?",
                       (run_id, acc_id, day)).fetchone():
             return {"skipped": "already_processed"}
+        IG.check_inputs_current(db, inp, "process_account_day")   # 후보 사용 트랜잭션 안에서 검증 시점과 같은지 확인
         a = db.execute("SELECT * FROM ab_accounts WHERE id=?", (acc_id,)).fetchone()
         prof, strat = S.PROFILES[a["profile"]], S.STRATEGIES[a["strategy"]]
         counts = {"filled": 0, "unfilled": 0, "skip_open_stop": 0, "fill_unknown": 0, "stops": 0, "orders": 0,

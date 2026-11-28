@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional
 
@@ -64,6 +65,7 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
         logger.warning("자동매수 SHADOW 저널 Migration 필요: %s", st["schema_error"])
         return {"skipped": f"schema_not_ready: {st['schema_error']}"}
     now = CAL._utc(now or datetime.now(timezone.utc))
+    job_id = uuid.uuid4().hex                       # job 식별자 (호출 제한 집계: 같은 job 재기록 1회만)
     running = scan_running or _scan_running
     fetcher = None
     if bars_provider is None:          # job 단위 공급자: 중복 제거·요청 예산·제한 재시도·연속 장애 중단 (market_data.ChartFetcher)
@@ -196,7 +198,7 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
             out["days"].append(day)
         if fetcher is not None:
             out["fetch"] = fetcher.stats()
-            _record_rate_limit(db, out["fetch"])
+            _record_rate_limit(db, out["fetch"], job_id)
         _rt(db, "last_job", {"at": time.time(), "logical_at": now.timestamp(), "days": out["days"], "waiting": out["waiting"],
                              "captures": len(out["captures"]), "run": run, "fetch": out.get("fetch")})
         return out
@@ -218,7 +220,7 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
 RATE_LIMIT_REPEAT_WARN = 3            # 연속 몇 job 이 호출 제한으로 멈추면 경고 이벤트를 한 번 남기나
 
 
-def _record_rate_limit(db, fetch: dict) -> None:
+def _record_rate_limit(db, fetch: dict, job_id: Optional[str] = None) -> None:
     """후속 job 보류 정책: 호출 제한(RATE_LIMITED)으로 멈춘 job 은 다음 job 에서 다시 시도하되, 첫 제한 응답에서 바로
     멈추므로 제한이 계속되는 동안 job 당 Yahoo 시도는 1회 남짓이다. 연속 횟수를 runtime ``yahoo_rate_limit`` 에 남기고,
     ``RATE_LIMIT_REPEAT_WARN`` 회 연속이면 WARN ``yahoo_rate_limited_repeated`` 를 한 번 남긴다 (미수집 일봉은 결측·복구 대상).
@@ -230,15 +232,21 @@ def _record_rate_limit(db, fetch: dict) -> None:
       응답은 계약(주기·종목·시간대·세션·OHLC)을 통과했으므로 정상 수집으로 인정한다 (거래량은 기존 미확인 정책).
     - 그 밖(요청 0건, Scanner 실행으로 보류, 캐시만 사용, 요청했지만 정상 응답 없이 실패, 판단 불가)은 기존 연속 횟수와
       warned 를 그대로 둔다."""
-    st = get_runtime(db, "yahoo_rate_limit") or {}
     limited = fetch.get("halted") == "RATE_LIMITED"
     confirmed = not limited and int(fetch.get("contract_ok") or 0) > 0
     if not limited and not confirmed:
         return
-    n = int(st.get("consecutive_jobs") or 0) + 1 if limited else 0
-    new = {"consecutive_jobs": n, "last_limited_at": time.time() if limited else st.get("last_limited_at"),
-           "warned": bool(st.get("warned")) and n > 0}
+    # 이전 상태 조회 → 증가/초기화 → 경고 임계값 판단 → 이벤트 → 갱신을 한 쓰기 트랜잭션(BEGIN IMMEDIATE)에서 한다.
+    # 두 연결이 동시에 기록해도 두 번째는 첫 번째 커밋 뒤의 값을 읽는다 (증가분 유실·경고 중복 없음).
     with tx(db):
+        st = get_runtime(db, "yahoo_rate_limit") or {}
+        if job_id is not None and job_id in (st.get("recent_jobs") or []):
+            return                                  # 같은 job 의 재기록은 한 번만 센다 (서로 다른 job 은 각각 센다)
+        n = int(st.get("consecutive_jobs") or 0) + 1 if limited else 0
+        new = {"consecutive_jobs": n, "last_limited_at": time.time() if limited else st.get("last_limited_at"),
+               "warned": bool(st.get("warned")) and n > 0,
+               "recent_jobs": ([*(st.get("recent_jobs") or []), job_id] if job_id is not None
+                               else list(st.get("recent_jobs") or []))[-20:]}
         if n >= RATE_LIMIT_REPEAT_WARN and not new["warned"]:
             event(db, "WARN", "yahoo_rate_limited_repeated", f"Yahoo 호출 제한이 연속 {n}개 job 에서 반복 — 다음 job 도 "
                   f"첫 제한 응답에서 멈춘다. 미수집 일봉은 결측·복구 대상", consecutive_jobs=n)

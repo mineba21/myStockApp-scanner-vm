@@ -1518,6 +1518,7 @@
         <div class="text-xs" x-text="'현재 run #' + (h.current_run ?? '-') + (h.replay_state && h.replay_state.status === 'RUNNING' ? ' · 재계산 진행 중 (결과 미완료)' : (h.replay_state && h.replay_state.status === 'STALLED' ? ' · 재계산 작업자 응답 없음 (자동 탈취 안 함, 수동 확인 필요)' : (h.replay_state ? ' · 재계산 비정상 종료 확인 (다음 job 이 정리)' : '')))"
           :class="h.replay_state ? (h.replay_state.status === 'RUNNING' ? 'text-amber-700 font-semibold' : 'text-red-700 font-semibold') : 'text-slate-600'"></div>
         <div class="text-xs text-red-700 font-semibold" x-show="h.version_block" x-text="'처리 중단: ' + (h.version_block?.message||'')"></div>
+        <div class="text-xs text-red-700 font-semibold" x-show="h.signal_set_integrity" x-text="'동결 신호 집합 무결성 오류 — 신규 처리 중단: ' + (h.signal_set_integrity?.message||'')"></div>
         <div class="text-xs text-slate-600" x-show="h.costs" data-testid="auto-buy-costs"
           x-text="'비용 기준 ' + (h.costs?.basis||'-') + ' (P7 과 동일: 수수료 ' + pct(h.costs?.simulation?.buy_commission, 2) + '/' + pct(h.costs?.simulation?.sell_commission, 2) + ', 슬리피지 ' + (h.costs?.simulation?.slippage_bp ?? '-') + 'bp, 매도세 ' + (h.costs?.simulation?.sell_tax ?? '-') + ') · 운영 추정 비용 ' + (h.costs?.ops_estimate?.status||'-') + ' — 별도 기록, 손익 미사용'"></div>
       </div>

@@ -6,16 +6,158 @@
 같은 날 Codex 최종 재리뷰(신규 P1 1건·P2 2건·S5 이력)를 반영했다 (아래 'Codex 최종 재리뷰 반영').
 2026-11-27 Codex 재리뷰(head 9a315db, FAIL: P1 1건·P2 4건·운영 안전성)를 공통 안전 원칙과 장애 주입 테스트로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27)').
 같은 날 Codex 재리뷰(head c27d9d0, 신규 P1 2건·P2 1건)를 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)').
-같은 날 Codex 독립 재리뷰(head 36e5d2f, P1 3건·P2 2건)를 테이블별 데이터 불변성 계약으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)'). SHADOW 활성화는 계속 보류다.
+같은 날 Codex 독립 재리뷰(head 36e5d2f, P1 3건·P2 2건)를 테이블별 데이터 불변성 계약으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)').
+2026-11-28 Codex 재리뷰(head a183b99, FAIL: P1 1건·P2 2건·검증 데이터)를 신호 집합·관계 단위 계약(`ab0007`)과 엔진 공통 무결성 검증으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-28, head a183b99)'). SHADOW 활성화는 계속 보류다.
 - **승인 범위:** 로컬 구현·테스트 (사용자 승인: P7/P8 검토 후 I1~I7 SHADOW 구현, 이후 P1·P2 정합성 보완), feature branch `feature/auto-buy-shadow` 커밋·Push·Draft PR.
 - **아직 하지 않은 것:** main 병합, VM 배포, 저널 Migration 실행. Codex 재리뷰를 통과하기 전에는 기본 OFF 배포도, SHADOW 활성화도 하지 않는다.
 - **판정은 그대로 유지한다.**
   - 기존 NOT_RECOMMENDED
   - B01 = NEED_MORE_DATA (전향적 SHADOW 검증 대상만)
 - **근거:** `backtest/entry_strategy` P0~P7 보고서, `backtest/entry_strategy/docs/AUTO_BUY_SHADOW_PLAN.md`, `AUTO_BUY_S01_LINK_DESIGN.md` v2
-- **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26, 동결) + `ab0004`(종료 run 원장·감사 이력 불변성, 2026-11-27, 동결) + `ab0005`(충돌 교체 차단·남은 감사 자료 불변, 2026-11-27, 동결) + `ab0006`(테이블별 데이터 불변성 계약, 2026-11-27). 최종 목표 리비전은 `ab0006`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
+- **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26, 동결) + `ab0004`(종료 run 원장·감사 이력 불변성, 2026-11-27, 동결) + `ab0005`(충돌 교체 차단·남은 감사 자료 불변, 2026-11-27, 동결) + `ab0006`(테이블별 데이터 불변성 계약, 2026-11-27, 동결) + `ab0007`(신호 집합·관계 단위 계약과 수집 봉인, 2026-11-28). 최종 목표 리비전은 `ab0007`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
   - 확인(2026-11-25): Git 이력에 `trading/auto_buy` 커밋 없음(원격도 main 뿐), 로컬 `.env` 저널 경로 미설정, 프로젝트 내 SQLite 에 `ab_alembic_version` 없음. 이전 `ab0001` 이 적용된 파일은 개발 세션 임시 폴더의 데모·벤치 파일뿐이다. 운영 VM 은 Git 으로만 배포되고 이 코드가 Push 된 적이 없어 적용 이력이 없다 (VM 에 접속해 확인하지는 않았다).
   - 이 브랜치가 커밋·Push 된 이후에는 `ab0001` 을 바꾸지 않고 새 리비전으로만 바꾼다.
+
+## Codex 재리뷰 반영 (PR #14, 2026-11-28, head a183b99)
+
+판정: FAIL (P1 1건·P2 2건·검증 데이터 1건). 범위는 동결 신호 집합 무결성, Migration 사전 검증, 429 집계 원자성, P7-OPS 검증 데이터로 한정했다. 투자 전략, 엔진 계산 방식, 리스크 정책, UI 기능은 바꾸지 않았다. 화면에는 무결성 오류 표시 한 줄만 추가했다.
+
+### a183b99 에서 막히지 않던 변경 (조사 결과)
+
+- 행 단위 계약(ab0006)이 막는 것은 이미 있는 행의 UPDATE·DELETE·rowid 변경뿐이었다. FROZEN 결정 스캔(`ab_day_inputs.decision_scan_log_id`)에 **새 스냅샷 행을 INSERT** 하는 경로는 막지 않았다 (INSERT·OR IGNORE·REPLACE·UPSERT 모두, 기본 연결 포함). 빈 결정 스캔에도 사후 신호를 넣을 수 있었다.
+- 엔진도 동결 해시를 다시 계산하지 않았다. 후보 조회는 `scan_log_id` 로 그날 행을 모두 읽었으므로 사후 추가 신호가 그대로 가상 주문이 됐다. replay 는 오염된 집합으로 새 CURRENT 를 만들었다.
+- 기존 동결 해시 v1 = `sha256(json.dumps(sorted(row_sha256)))[:16]` 은 각 행의 `row_sha256`(원본 JSON 의 해시)만 덮는다. 저장된 값이 정말 `sha256(row_json)` 인지는 확인하지 않았다. 스냅샷 id·scan_log_id·거래일과, 엔진이 실제로 읽는 정규화 필드(`stop_loss`·`pivot_price`·`strict_passed`·`decision_price` 등)도 해시 밖에 있었다.
+- 수집 건수 `(rows_captured, strict_rows)` 는 동결 시점의 실제 집합과 묶이지 않았다. ab0006 사전 검사는 (0, 0) 이면 실제 행 수 대조를 건너뛰었다.
+- `_record_rate_limit` 은 읽기와 쓰기 사이에 잠금이 없었다. 두 연결이 동시에 기록하면 증가분이 사라졌다 (1 → 2, 기대값 3).
+
+### 집합·관계 단위 계약 (`ab0007`, `journal_migrations/ddl_v7.py`)
+
+새 표 `ab_capture_seals` 는 수집 1회당 1행이다. 수집 트랜잭션 안에서 건수 기록 직후에 쓴다. 담는 값은 구성원 수, Strict 수, SSV2 다이제스트, source(`CAPTURE`·`AB0007_BACKFILL`), 봉인 시각이다. 봉인 행은 이후 변경·삭제·교체할 수 없다 (`_v7_` rowid·허용 목록·삭제 거부 트리거).
+
+| 보호 | 트리거 | 내용 |
+|---|---|---|
+| 구성원 추가 (봉인 후) | `ab_signal_snapshots_v7_sealed` | 봉인된 수집에 스냅샷 INSERT 거부 |
+| 구성원 추가 (동결 후) | `ab_signal_snapshots_v7_frozen` | FROZEN 결정 스캔으로 참조된 scan_log_id 에 INSERT 거부 (빈 스캔 포함) |
+| 소속 | `ab_signal_snapshots_v7_relation` | 수집 기록이 있어야 하고, 거래일·장중 여부·스캔 상태가 같아야 함 |
+| 건수·봉인 | `ab_capture_seals_v7_insert` | 봉인 INSERT 시 봉인 건수 = 수집 건수 = 실제 구성원 수 (전체·Strict) |
+| 건수 고정 | `ab_scan_captures_v7_counts_sealed` | 봉인 후 수집 건수 변경 거부 |
+| 참조 | `ab_eligibility_v7_relation` | 존재하는 스냅샷에만 적격 판정 기록 |
+| 동결 범위 | `ab_day_inputs_v7_frozen_set` | FROZEN INSERT 는 봉인된 같은 거래일의 정규(`scheduler`)·DONE·complete·FULL·장 마감 후·확정 전 수집만 참조할 수 있음. 건수 일치, 구성원이 모두 그 거래일 소속, 해시 길이 16 |
+
+- RAISE(ABORT) 이므로 OR IGNORE·OR REPLACE·UPSERT 충돌 해소 방식과 상관없이 문장 전체가 거부된다. 제품 연결과 기본 sqlite3 연결(외래키·recursive_triggers 꺼짐) 모두에서 같다.
+- 기존 UPDATE·DELETE·rowid 보호(ab0004~ab0006)는 그대로 둔다.
+- 허용하는 것: 정상 수집, 최초 동결, 정규 결정 이후 **다른 scan_log_id** 로 들어온 재스캔의 정상 수집 (`LATE_SCAN_AFTER_DECISION`·`LATE_AFTER_DECISION` 정책 유지).
+- 계약 문서화: `ddl_v7.SET_CONTRACT` 에 표별 집합·관계·동결 조건을 적었다. 기존 테이블 전수 계약 테스트(`review7_contract`)가 v7 표까지 분류·검사한다. 새 프레임워크는 만들지 않았다.
+
+### 동결 시점 검증과 경쟁
+
+- 수집 → 건수 기록 → 봉인 → 동결은 한 BEGIN IMMEDIATE 트랜잭션이다 (`snapshot._capture`).
+- `freeze_decision` 은 동결 직전에 공통 검증(`integrity.scan_set_issues`)을 한다. 항목은 수집 조건, 봉인, 건수, 소속, 구성원별 `sha256(row_json) = row_sha256`, SSV2 다이제스트다. 하나라도 다르면 동결하지 않는다.
+- 빈 스캔(0건)도 정상 동결 집합이다 (봉인 0/0).
+- 다른 연결이 수집 트랜잭션 도중 INSERT 하면 잠금을 기다린다. 커밋 뒤에는 봉인·동결된 집합이므로 거부된다. 불완전하거나 바뀐 집합은 동결되지 않는다 (`review8_signal_set` 경쟁 테스트).
+
+### SSV2 기준 (기존 v1 해시는 덮어쓰지 않음)
+
+- 저장된 `signal_set_hash`(v1)는 바꾸지 않는다. 다시 계산해서 비교만 한다.
+- 별도 버전 기준 `SSV2` 다이제스트는 구성원 40개 열(id·scan_log_id·거래일·정규화 필드·파생 필드·`row_sha256` 등, `row_json` 은 `row_sha256` 을 통해 포함)을 id 순서로 직렬화한 SHA-256 이다. 봉인 표에 저장한다.
+- v1 은 원본 JSON 집합을, SSV2 는 엔진이 읽는 필드와 식별자를 덮는다. 둘 다 맞아야 한다.
+
+### 엔진 공통 검증 (`trading/auto_buy/shadow/integrity.py`)
+
+- `decision_set_issues(db, day)` 검사 항목:
+  - `scan_set_issues`
+  - v1 해시 재계산
+  - 저장된 적격 판정 = 같은 스냅샷으로 다시 계산한 판정 (현재 전략 버전)
+  - NO_DECISION_SCAN 인데 스캔·해시가 있는 경우
+- 사용 지점:
+  - 적격 판정 기록 (`record_eligibility`, 트랜잭션 안)
+  - 후보 조회 (`build_inputs`): 검증과 후보 읽기를 같은 BEGIN IMMEDIATE 안에서 하고 지문을 남긴다
+  - 신규 거래일·중단 후 재실행·결측 복구 (`process_day`·`process_account_day`): 계좌별 처리 트랜잭션이 지문과 후보 소속을 다시 확인한다 (검증 → 사용 경쟁 차단)
+  - replay: 재계산 run 의 매 거래일이 같은 경로를 거친다
+  - CURRENT 전환 직전: 전환 트랜잭션 안에서 대상 거래일 전체를 다시 검증한다
+- 불일치 시:
+  - 신규 가상 주문 없이 처리를 멈춘다 (트랜잭션 롤백)
+  - 기존 CURRENT·원장은 그대로 두고, 새 CURRENT 로 바꾸지 않는다. BUILDING run 은 FAILED 로 남기고 실패를 기록한다
+  - ERROR 이벤트 `signal_set_integrity` 를 남긴다 (같은 오류 반복은 이벤트 1회 + runtime 반복 횟수)
+  - runtime `signal_set_integrity` 를 기록한다. AUTO BUY MONITOR 에 빨간 줄로 표시하고, S5 안전 위반(`signal_set_integrity`)으로 센다
+  - 자동 정상화는 하지 않는다: 해시 재계산 덮어쓰기·자동 삭제·재동결·신호 제외 없음. runtime 표시는 운영자 확인 후 수동으로만 지운다
+- 관리자 DDL(트리거 삭제 후 수정)은 DB 계약 밖이다. 엔진 검증이 그 결과를 잡는다. 테스트는 이 방식으로 "이미 오염된 기존 저널"을 만든다.
+
+### Migration `ab0007` 사전 검증
+
+- ab0001~ab0006 은 바꾸지 않았다. 시작 조건은 구조가 정확히 ab0006 이고 `ddl_v7.precheck` 를 통과하는 것이다.
+- 검사 항목:
+  - **모든** 수집 기록의 건수 = 실제 구성원 수 (전체·Strict). (0, 0) 도 건너뛰지 않는다.
+  - 스냅샷의 수집 기록 존재, 거래일·장중 여부·상태 일치
+  - 구성원별 `row_sha256`
+  - FROZEN 거래일: 결정 스캔이 정상 완료 정규 수집이고, 기존 v1 해시가 실제 집합과 같음
+- 불완전 수집(RUNNING·ABANDONED·UNRECOVERABLE·PARTIAL)은 불완전으로 표시해 보고한다. 완료로 바꾸거나 이력을 지우지 않는다. 건수가 맞으면 통과하고, 맞지 않으면 거부한다.
+- 통과하면 기존 수집 기록마다 봉인 1행(`AB0007_BACKFILL`)을 기록한다. 기존 행·해시는 바꾸지 않는다.
+- 실패하면 전체 롤백한다 (원본 sha256·리비전 그대로). 자동 수정은 없다. ab0005→ab0007 같은 다단계 upgrade 도 한 트랜잭션이다.
+
+| 경우 | 결과 |
+|---|---|
+| 정상 빈 스캔 (0/0, 실제 0) | 통과 |
+| 정상 스캔 | 통과 |
+| 기록 0건 / 실제 1건 | 거부 |
+| 기록 1건 / 실제 0건 | 거부 |
+| Strict 건수만 다름 | 거부 |
+| 동결 해시 불일치 | 거부 |
+| row_sha256 불일치 | 거부 |
+| 결정 스캔이 불완전 수집 | 거부 |
+| 불완전 수집 + 건수 불일치 | 거부 (불완전 표시) |
+
+### 429 집계 원자성
+
+- `_record_rate_limit` 은 한 쓰기 트랜잭션(BEGIN IMMEDIATE)에서 다음을 한다: 이전 상태 조회 → 증가/초기화 → 경고 임계값 판단 → 이벤트 → runtime 갱신.
+- 결과:
+  - 초기 1에서 두 연결이 동시에 RATE_LIMITED 를 기록하면 3이 되고, 경고는 1건이다.
+  - 정상과 제한이 경쟁하면 두 직렬 순서 중 하나의 결과만 나온다.
+  - 트랜잭션 도중 실패하면 증가·경고 모두 롤백한다.
+- 같은 job 재기록 구분: job 마다 `job_id`(uuid)를 붙인다. 최근 20개(`recent_jobs`)에 있으면 다시 세지 않는다. 다른 job 은 각각 센다. 기존 정책(정상 수집 확인 시에만 초기화, 그 밖은 유지)은 그대로다.
+
+### P7-OPS 검증 데이터
+
+- 이전 상태:
+  - `row_sha256` 전부 `"backtest"`, `row_json` = `{}`
+  - 912개 스캔이 스냅샷이 있는데도 건수 0
+- 바꾼 것 (`ops_parity.write_scan_capture`):
+  - 재구성 후보마다 정규화 JSON(`snapshot_row_json`, 키 정렬·NaN 불허)과 그 SHA-256 을 만든다
+  - 제품과 같은 수집 → 건수 → 봉인(`seal_capture`) → 동결(`freeze_decision`) 경로를 쓴다 (검증 우회 옵션 없음)
+  - `run_shadow(replay=True)` 는 처리 후 운영 재계산 경로(`inputs.replay`)로 전체를 다시 계산한다. 동결 입력 검증과 CURRENT 전환 전 최종 검증을 거치고, 결과가 같은지 확인한다
+- 한계: 이 해시는 **재구성 후보 내용의 무결성 근거**일 뿐이다. 실제 과거 Scanner 원본 행을 입증하지 않는다 (원본 미보존).
+- 대조 결과 (로컬 재구성 캐시, 기존과 같은 비교):
+  - 23개 계좌 전부 일치, 1,480 거래일, 진입 3,545건 (SHADOW·P7-OPS 동일)
+  - 최대 상대 차이: 평가금액 3.1e-16, 현금 6.0e-16. 최대 절대 차이: 진입 Heat 4.2e-17, 현재 Heat 6.7e-16
+  - 판정은 NOT_RECOMMENDED 유지, B01 은 NEED_MORE_DATA
+  - 검증 저널 (동결 경로·replay 후 모두 같음):
+    - 스냅샷 2,805건 전부 `sha256(row_json) = row_sha256`
+    - 수집 1,480건 전부 건수 일치. 신호가 있는 912건 포함, 나머지 568건은 정상 빈 스캔
+    - FROZEN 1,480일 모두 공통 검증 문제 0
+  - `replay_identical` = true (처음 계산과 replay 결과의 원장·주문·일별 기록이 같음. 실행 이벤트 목록만 비교 제외)
+  - 소요 시간 (로컬 macOS): SHADOW 재생 138.2초 (a183b99 기준 141.8초). replay 포함 296.0초 (재계산 약 158초 추가)
+
+### 남은 위험·한계
+
+- 관리자 DDL(트리거 삭제)·파일 직접 편집은 DB 계약으로 막을 수 없다. 엔진 공통 검증이 처리 전에 잡지만, 오염 자체를 되돌리지는 않는다 (운영자 검토 필요).
+- 공통 검증은 FROZEN 거래일마다 적격 판정을 다시 계산한다. 거래일 수가 늘면 job 시간이 늘 수 있다. 실제 VM 에서 관측한다 (운영 검증 체크리스트).
+- 기존 운영 저널(있다면)은 ab0007 사전 검사가 불완전 수집을 표시한다. 거부되면 원본 그대로 멈춘다. 자동 복구 경로는 없다.
+- P7-OPS 해시는 재구성 후보의 무결성 근거일 뿐, 과거 Scanner 원본을 입증하지 않는다.
+
+### 수정 전 실패·수정 후 통과 (`tests/test_auto_buy_shadow_review8_repro.py`)
+
+a183b99 와 현재 코드에 모두 있는 API 만 쓴다. a183b99 worktree 에서 실행하면 11 실패 / 1 통과다. 실패는 모두 동작 단언 실패이며, 모듈·API 부재는 없다. 현재 코드에서는 12 통과다.
+
+| 재현 | a183b99 | 현재 |
+|---|---|---|
+| FROZEN 결정 스캔 사후 INSERT (INSERT·OR IGNORE × 제품·기본 연결) | 4 실패 (DID NOT RAISE) | 통과 |
+| 빈 결정 스캔 사후 INSERT (제품·기본) | 2 실패 | 통과 |
+| 오염 저널의 신규 거래일 처리 | 실패 (오염 신호로 가상 주문) | 통과 (주문 없음·중단·ERROR) |
+| 오염 저널 replay | 실패 (CURRENT 교체) | 통과 (CURRENT 유지) |
+| 동결 직전·직후 동시 INSERT | 실패 (삽입됨) | 통과 (대기 후 거부) |
+| 별도 ID 재스캔 보존 (기존 정책) | 통과 | 통과 |
+| Migration 기록 0 / 실제 1 | 실패 (적용됨) | 통과 (거부·원본 유지) |
+| 두 연결 동시 429 | 실패 (2) | 통과 (3, 경고 1) |
 
 ## Codex 재리뷰 반영 (PR #14, 2026-11-27, head 36e5d2f)
 
@@ -252,6 +394,8 @@
 - [ ] Scanner 실행과 429 경합 (Scanner 실행 중 보류 동작, `yahoo_rate_limit` 연속 횟수)
 - [ ] 과거 결측 복구로 당일 요청 예산이 부족해지는지 (`BUDGET_EXHAUSTED` 빈도)
 - [ ] 첫 주 CPU·메모리·디스크 사용량, SQLite 잠금 대기 시간 (트리거 추가에 따른 쓰기 시간 포함)
+- [ ] 운영 저널 ab0007 사전 검사 결과 (`--check`, 불완전 수집 표시 건수), `signal_set_integrity` 발생 0
+- [ ] 공통 무결성 검증(적격 판정 재계산 포함)의 job 당 소요 시간 — 동결 거래일 수에 비례해 늘어나는지
 
 성능 최적화는 실제 VM 관측 뒤 별도로 판단한다 (이번 범위 밖).
 
@@ -942,8 +1086,9 @@ Current Heat 는 여기에 들어가지 않는다.
 - **`ab0003`**: `ab_bars.volume_source`·`source_evidence` 열 추가(`ALTER TABLE … ADD COLUMN`)와 run fencing 트리거(위 '재계산 실행권 v2'). 시작 전에 대상이 정확히 `ab0002` 구조인지 확인한다. downgrade 는 지원하지 않는다. 기존 행의 출처는 NULL 이며, 그 행의 거래량 0 은 미확인으로 보고 원본 경로로 다시 확인한다.
 - **`ab0004`**: 종료 run 원장·감사 이력 불변성 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27)'). 시작 전에 대상이 정확히 `ab0003` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
 - **`ab0005`**: 충돌 교체(REPLACE·UPSERT) 차단과 남은 감사 자료 불변 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)'). 시작 전에 대상이 정확히 `ab0004` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
-- **`ab0006`** (최종 목표 리비전): 테이블별 데이터 불변성 계약 트리거를 추가하고, 정책이 바뀐 ab0005 트리거 1개(`ab_eligibility_no_replace_insert`)만 교체한다 (위 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)'). 시작 전에 대상이 정확히 `ab0005` 구조이고 기존 데이터가 계약과 맞는지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
-- 런타임은 `ab0006` 만 받아들인다. `ab0001`~`ab0005` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
+- **`ab0006`**: 테이블별 데이터 불변성 계약 트리거를 추가하고, 정책이 바뀐 ab0005 트리거 1개(`ab_eligibility_no_replace_insert`)만 교체한다 (위 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)'). 시작 전에 대상이 정확히 `ab0005` 구조이고 기존 데이터가 계약과 맞는지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
+- **`ab0007`** (최종 목표 리비전): 봉인 표 `ab_capture_seals` 와 신호 집합·관계 단위 트리거를 추가하고, 기존 수집 기록마다 봉인 1행(`AB0007_BACKFILL`)을 기록한다 (위 'Codex 재리뷰 반영 (2026-11-28, head a183b99)'). 시작 전에 대상이 정확히 `ab0006` 구조이고 사전 검사(`ddl_v7.precheck`: 모든 수집 건수·소속·row_sha256·동결 해시)를 통과하는지 확인한다. 기존 행·동결 해시는 바꾸지 않는다. downgrade 는 지원하지 않는다.
+- 런타임은 `ab0007` 만 받아들인다. `ab0001`~`ab0006` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
 - 기존 파일이면 백업한다. 실패해도 자동 복원하지 않는다. 새로 만든 뒤 upgrade 가 실패하면 빈 0600 파일이 남는다 (다음 실행에서 이어서 upgrade).
 
 ## AUTO BUY MONITOR (화면)
@@ -1014,7 +1159,8 @@ Current Heat 는 여기에 들어가지 않는다.
    # 결과 CHECK_ONLY_WOULD_CREATE · exit=0 확인 후 별도 승인
    .venv/bin/python -m scripts.auto_buy_shadow_journal_migrate --env-file .env --backup-dir /var/backups/mystockapp --allow-create; echo "exit=$?"
    ```
-   - 결과의 `schema_version` 이 **`ab0006`**(최종 목표 리비전)인지 확인한다.
+   - 결과의 `schema_version` 이 **`ab0007`**(최종 목표 리비전)인지 확인한다.
+   - 기존 저널을 올리는 경우 `--check` 가 ab0007 사전 검사까지 통과하는지 먼저 본다. 거부되면 원본은 그대로이며, 자동 수정 없이 보고된 수집·거래일을 검토한다.
    - 생성 후 권한 확인: `stat -c '%a %U' <저널 경로>` → `600 <서비스 사용자>` (경로는 운영자가 직접 입력, 출력은 권한만).
    - 백업에서 복원한 저널이면 먼저 `--check` 로 권한을 확인한다. 0600 이 아니면 `CHECK_FAILED_PERMISSIONS`(exit=2)이다. 승인 후 적용 모드를 다시 실행하면 `ALREADY_CURRENT` 와 함께 0600 으로 맞춰진다.
 2-1. **⛔ 활성화 전 조건 (모두 확인 후 별도 승인):**
@@ -1028,6 +1174,8 @@ Current Heat 는 여기에 들어가지 않는다.
    - 일봉 응답 계약·호출 제한(`review6_contract`), 원장 충돌 교체 차단(`review6_ledger`), ab0005(`review6_migration`), 결함 재현(`review6_repro`)이 배포 커밋에서 통과
    - 위 '운영 검증 체크리스트'를 첫 주 관측 항목으로 등록
    - 테이블별 불변성 계약(`review7_contract`), 세션·호출 제한 카운터(`review7_session`), ab0006(`review7_migration`), 결함 재현(`review7_repro`)이 배포 커밋에서 통과
+   - 동결 신호 집합(`review8_signal_set`), ab0007 사전 검증(`review8_migration`), 429 원자성(`review8_rate_limit`), 결함 재현(`review8_repro`)이 배포 커밋에서 통과
+   - AUTO BUY MONITOR 에 '동결 신호 집합 무결성 오류' 표시가 없고 S5 `signal_set_integrity` = 0
 3. **⛔ SHADOW 활성화 (승인 후):** `AUTO_BUY_US_MODE=SHADOW` 로 재시작한다. 확인:
    - 스케줄러 job `auto_buy_us_shadow` 등록, S01 job 일정 변화 없음
    - 다음 정규 미국 스캔 후 수집 이력·후보 확정(`day_inputs`) 표시, 스캔 대조 미수집 0
@@ -1041,7 +1189,7 @@ Current Heat 는 여기에 들어가지 않는다.
 | ID | 항목 | 상태 |
 |---|---|---|
 | S1 | 운영 DB 스냅샷 표(outbox) | **미승인 유지.** 별도 SHADOW DB 방식. 완전 보장이 필요하면 outbox Migration Plan 을 따로 승인 요청 |
-| S2 | SHADOW 전용 SQLite·Migration | 구현 완료 (`ab0001`~`ab0005` 동결 + `ab0006` 테이블별 불변성 계약, 최종 목표 `ab0006`), **Migration 실행 미승인** |
+| S2 | SHADOW 전용 SQLite·Migration | 구현 완료 (`ab0001`~`ab0006` 동결 + `ab0007` 신호 집합·관계 계약, 최종 목표 `ab0007`), **Migration 실행 미승인** |
 | S3 | 스위치·SHADOW job 배포 (기본 OFF) | 구현 완료, Codex 재리뷰 대기 (2026-11-27 재리뷰 반영분) |
 | S4 | 가상 계좌 구성 | P7 비교형 + 운영 검증형, B02 seed 20개 (총 46 계좌) |
 | S5 | 채택 검토 기준 | **확정** (위 기준 유지) |
