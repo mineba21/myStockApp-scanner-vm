@@ -401,15 +401,30 @@ class Engine:
         from trading.auto_stop.service import record_watch_end
         record_watch_end(self.store, pos["mode"], pos, self.now(), rec)
 
+    @staticmethod
+    def _review_alert(ev, pos, reason):
+        return (f"event:{ev['id']}:review", "URGENT",
+                f"[자동손절 확인 필요] {pos['ticker']} ({ev['mode']}) — {reason}. 신규 매도를 멈췄습니다. "
+                "기존 주문 체결 추적은 계속합니다.")
+
     def _review_event(self, ev, reason, *, position=True):
         if position:
             self._watch_end(self.store.position(ev["position_id"]))
         self.store.review(self.now(), event_id=ev["id"], position_id=ev["position_id"] if position else None,
                           reason=reason)
         pos = self.store.position(ev["position_id"])
-        self._alert(f"event:{ev['id']}:review", "URGENT",
-                    f"[자동손절 확인 필요] {pos['ticker']} ({ev['mode']}) — {reason}. 신규 매도를 멈췄습니다. "
-                    "기존 주문 체결 추적은 계속합니다.")
+        self._alert(*self._review_alert(ev, pos, reason))
+
+    def _final_review(self, o, ev, *, frm, to, reason, evidence, position=True, **fields) -> bool:
+        """사람 확인이 필요한 최종 상태(외부 취소·증권사 거부·전송 거부·확정 미전송): 주문 상태(+종료 증거)·이벤트
+        (·포지션) NEEDS_REVIEW·긴급 알림을 한 트랜잭션으로 저장한다. 중단돼도 '최종 상태 + 신규 주문 허용' 부분 저장이
+        생기지 않는다 (전부 롤백되면 다음 대조·재시작 복구가 같은 판정을 다시 한다). 사유·알림 문구는 기존과 같다."""
+        pos = self.store.position(ev["position_id"])
+        if position:
+            self._watch_end(pos)
+        return self.store.transition_review(
+            o["id"], self.now(), frm=frm, to=to, evidence=evidence, reason=reason, event_id=ev["id"],
+            position_id=ev["position_id"] if position else None, alert=self._review_alert(ev, pos, reason), **fields)
 
     def _review_position(self, pos, reason):
         self._watch_end(self.store.position(pos["id"]))
@@ -440,6 +455,7 @@ class Engine:
             self._recover_stale()
             self._migrate_quote_health()
             self._reconcile_all()
+            self._guard_manual_resolved()
             self._reconcile_wait_records()
             self._rollover(mc)
             if mc.is_open:
@@ -691,8 +707,13 @@ class Engine:
                 return row
             was_ours = o["state"] in ("CANCEL_PENDING", "CANCEL_UNKNOWN")
             expired = self._after_order_session(o)
-            self.store.transition(o["id"], now, frm=UNRESOLVED, to="CANCELLED", broker_state=state,
-                                  evidence=[final_evidence(state, now, "status", row.get("filled_quantity"))])
+            fin = [final_evidence(state, now, "status", row.get("filled_quantity"))]
+            if not was_ours and not expired:
+                # 사람 확인이 필요한 외부 취소: 취소 확정과 NEEDS_REVIEW 를 함께 저장한다.
+                self._final_review(o, ev, frm=UNRESOLVED, to="CANCELLED", reason="자동 손절 주문이 외부에서 취소되었습니다",
+                                   evidence=fin, broker_state=state)
+                return row
+            self.store.transition(o["id"], now, frm=UNRESOLVED, to="CANCELLED", broker_state=state, evidence=fin)
             if was_ours:
                 self._alert(f"order:{o['id']}:cancelled", "INFO",
                             f"[자동손절] {o['ticker']} 취소 확정 (최종 체결 {row['filled_quantity']}주)")
@@ -701,12 +722,10 @@ class Engine:
                 self._alert(f"order:{o['id']}:expired", "WARN",
                             f"[자동손절] {o['ticker']} 주문 {o['order_number']}이 장 마감 후 취소 상태로 확인됨 "
                             f"(최종 체결 {row['filled_quantity']}주). 잔여는 이월 규칙을 따릅니다.")
-            else:
-                self._review_event(ev, "자동 손절 주문이 외부에서 취소되었습니다")
         elif state == "REJECTED":
-            self.store.transition(o["id"], now, frm=UNRESOLVED, to="REJECTED", broker_state=state,
-                                  evidence=[final_evidence(state, now, "status", row.get("filled_quantity"))])
-            self._review_event(ev, "증권사가 주문을 무효/거부 처리했습니다")
+            self._final_review(o, ev, frm=UNRESOLVED, to="REJECTED", reason="증권사가 주문을 무효/거부 처리했습니다",
+                               evidence=[final_evidence(state, now, "status", row.get("filled_quantity"))],
+                               broker_state=state)
         elif state in ("OPEN", "PARTIAL"):
             if o["state"] in ("SUBMITTED", "PARTIAL_FILLED", "UNKNOWN"):
                 to = "PARTIAL_FILLED" if int(row["filled_quantity"]) > 0 else "SUBMITTED"
@@ -720,6 +739,39 @@ class Engine:
             self.store.set_order_fields(o["id"], now, broker_state=state)
             self._review_event(ev, f"증권사 주문 상태 해석 불가({state})")
         return row
+
+    def _guard_manual_resolved(self) -> int:
+        """이전 버전 부분 저장 차단: 수동 UNKNOWN 해제가 주문 최종 상태만 커밋하고 NEEDS_REVIEW 저장 전에 중단된 경우,
+        자동 이월·재주문(_rollover·_advance)보다 먼저 사람 확인 상태로 되돌린다.
+
+        증거는 그 주문 자체의 수동 해제 기록만 쓴다: details.final 의 source=manual_resolve(현재 상태와 같은 상태) 또는
+        target 이 그 주문인 resolve_unknown 감사 기록(증권사 상태가 현재 상태와 같음). 주문의 모드·티커·계좌가 이벤트·
+        포지션과 맞아야 한다. 기존 정책상 사람 확인 완료의 명시 증거는 관리 해제(이벤트 DONE)뿐이므로, OPEN·CARRY_OVER
+        이벤트에 이런 증거가 있으면 확인 기록이 누락된 것이다. 증거 없는 일반 취소·소멸은 대상이 아니다. 잔여 0 은 기존
+        종료(SOLD/DONE) 판정에 맡긴다. 주문 상태는 바꾸지 않는다 (읽기 + 기존 review 경로만)."""
+        events = self.store.events(states=("OPEN", "CARRY_OVER"))
+        if not events:
+            return 0
+        resolved = {}
+        for a in self.store.audits("resolve_unknown", 0, self.now() + 1):
+            resolved.setdefault(str(a["target"]), set()).add((a["details"] or {}).get("broker_state"))
+        blocked = 0
+        for ev in events:
+            pos = self.store.position(ev["position_id"])
+            if not pos or pos["remaining_managed_qty"] <= 0:
+                continue
+            for o in self.store.orders(event_id=ev["id"], states=("FILLED", "CANCELLED", "REJECTED")):
+                if o["mode"] != ev["mode"] or o["ticker"] != pos["ticker"] or o["account_profile"] != pos["account_profile"]:
+                    continue
+                finals = json.loads(o["details"] or "{}").get("final") or []
+                manual = any(f.get("source") == "manual_resolve" and f.get("state") == o["state"] for f in finals) \
+                    or o["state"] in resolved.get(str(o["id"]), ())
+                if manual:
+                    self._review_event(ev, f"이전 버전 수동 UNKNOWN 해제({o['state']}) 후 사람 확인 기록 누락 — "
+                                           "사람 확인 후 해제/재등록", position=False)
+                    blocked += 1
+                    break
+        return blocked
 
     def _after_order_session(self, o) -> bool:
         day = date.fromisoformat(o["order_date"]) if o["order_date"] else (
@@ -1587,18 +1639,18 @@ class Engine:
             res = self._broker(mode).sell(pos["ticker"], pos["exchange"], qty, price)
         except OrderRejected as exc:
             now = self.now()
-            self.store.transition(order["id"], now, frm="SENDING", to="REJECTED", broker_state="REJECTED",
-                                  evidence=[("reject", str(exc)[:200]), final_evidence("REJECTED", now, "send_reject")])
-            self._review_event(ev, "매도 주문이 명시적으로 거부되었습니다")
+            self._final_review(order, ev, frm="SENDING", to="REJECTED", reason="매도 주문이 명시적으로 거부되었습니다",
+                               evidence=[("reject", str(exc)[:200]), final_evidence("REJECTED", now, "send_reject")],
+                               broker_state="REJECTED")
             return "order", order["id"]
         except OrderUnknown:
             self._mark_unknown(order, "매도 응답 불명")
             return "order", order["id"]
         except KiwoomError as exc:          # 전송 전 입력 검증 실패: 증권사로 나가지 않음
             now = self.now()
-            self.store.transition(order["id"], now, frm="SENDING", to="NOT_SENT",
-                                  evidence=[("not_sent", str(exc)[:200]), final_evidence("NOT_SENT", now, "send_not_sent")])
-            self._review_event(ev, "주문 입력 검증 실패로 전송하지 않았습니다")
+            self._final_review(order, ev, frm="SENDING", to="NOT_SENT", reason="주문 입력 검증 실패로 전송하지 않았습니다",
+                               evidence=[("not_sent", str(exc)[:200]),
+                                         final_evidence("NOT_SENT", now, "send_not_sent")])
             return "order", order["id"]
         except Exception:
             self._mark_unknown(order, "매도 중 예외")

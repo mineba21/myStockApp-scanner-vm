@@ -534,6 +534,49 @@ RECOVERING ──(오류)──> FAULT          RECOVERING ──(같은·더 �
 - 기존 손절 이벤트(OPEN/CARRY_OVER)는 장애·복구 과정에서 삭제하거나 초기화하지 않는다. EXITING 종목이 장애면 회복 조회만 하고, 회복 후 `_send` 가 최신 시세로 진행한다.
 - 레코드는 프로세스 재시작 후에도 유지된다 (저널 SQLite).
 
+### 사람 확인 상태 전이의 원자 처리 (2026-11-28 Codex 10차 리뷰 P1 반영)
+
+사람 확인이 필요한 주문 결과는 주문 최종 상태와 NEEDS_REVIEW(신규 주문 차단)를 한 `BEGIN IMMEDIATE` 트랜잭션에 저장한다. 중간에 중단되면 전부 롤백되고, 커밋되면 둘이 함께 남는다. "주문은 최종 상태인데 이벤트는 OPEN·CARRY_OVER"인 부분 저장이 생기지 않는다. 이 부분 저장이 남으면 직전 주문이 CANCELLED이므로 같은 날 REPLACE, 다음 날 CARRY_OVER 매도가 나갈 수 있었다. 중첩 트랜잭션은 쓰지 않으며, 트랜잭션 안에서 증권사 API를 호출하지 않는다.
+
+- **수동 UNKNOWN/CANCEL_UNKNOWN 해제** (`service.resolve_unknown` → `store.resolve_unknown_txn`)
+  - 트랜잭션 밖: 사전 조회 스냅샷(`store.resolve_snapshot`), 확인 티커·주문번호 검증, 증권사 주문내역 조회와 상태 해석.
+  - 쓰기 잠금 뒤 재검증: 스냅샷과 최신 기록을 같은 투영(`RESOLVE_VIEW`)으로 비교한다.
+    - 비교 항목: 주문 ID·상태·주문번호·모드·계좌·티커·청산 이벤트·요청·누적 체결·잔량, 이벤트 상태, 포지션 상태·관리 잔여·누적 체결.
+    - 하나라도 다르면 "다시 대조하세요"로 거부하고 아무것도 쓰지 않는다. 대조 시각(`last_checked_at`)처럼 대조만으로 바뀌는 값은 비교하지 않는다.
+    - 연결 검사: 주문·이벤트·포지션의 모드, 주문·포지션의 티커·계좌가 맞아야 한다.
+  - 한 트랜잭션: 체결 원장 증분과 관리 잔여 갱신(기존 중복 방지 그대로) → 주문번호·증권사 상태·조건부 상태 전이(최종이면 `details.final`, 출처 `manual_resolve`) → 이벤트 NEEDS_REVIEW와 사유 → `resolve_unknown` 감사 기록.
+  - 다음 경우에는 전부 롤백되고 UNKNOWN/CANCEL_UNKNOWN이 유지된다: 체결 수량 이상, 주문번호 중복, 조건부 전이 실패, 저장 중 예외.
+  - 포지션 상태는 바꾸지 않는다 (기존 정책: 이벤트만 사람 확인). 전량 체결로 잔여가 0이면 기존 `_finalize`가 SOLD/DONE으로 확정한다.
+  - 대기 기록 정리는 커밋 뒤에 한다. 실패해도 경고만 남기고 다음 tick에서 다시 정리하며, 신규 주문은 이미 커밋된 NEEDS_REVIEW가 막는다.
+  - 결과별 정책은 기존과 같다.
+    - OPEN → SUBMITTED, PARTIAL → PARTIAL_FILLED: 최종 종료가 아니므로 `details.final`을 쓰지 않는다. 그 주문의 체결 대조는 계속된다.
+    - FILLED·CANCELLED·REJECTED: 같은 이름의 최종 상태로 저장한다.
+  - 사람 확인 중에는 신규·재·이월 매도와 재주문 목적 취소를 하지 않는다. NEEDS_REVIEW를 자동으로 OPEN·CARRY_OVER로 되돌리지 않는다. 해제와 재등록은 사람이 한다.
+- **엔진의 사람 확인 경로** (`Engine._final_review` → `store.transition_review`): 주문 상태(+종료 증거), 이벤트·포지션 NEEDS_REVIEW, URGENT 알림 적재(기존 영속 알림 저널과 중복 방지 키)를 한 트랜잭션에 저장한다. 사유와 알림 문구는 기존과 같다.
+  - 장중 외부 취소, 증권사 무효·거부, 전송 시점 명시적 거부, 입력 검증 실패 미전송.
+  - 롤백되면 대조 경로는 다음 대조가 같은 판정을 다시 하고, 전송 경로는 SENDING이 재시작 복구로 UNKNOWN이 된다 (재전송 없음).
+- **상황 구분** (기존 정책 그대로)
+
+  | 상황 | 처리 |
+  |---|---|
+  | 우리 취소 요청의 확정 (재주문용) | 자동 재주문 정책 |
+  | 주문 세션 마감 후 소멸 | 이월 규칙 (WARN 알림) |
+  | 장중 외부 취소 | NEEDS_REVIEW |
+  | 수동 UNKNOWN 해제 | NEEDS_REVIEW |
+  | 증권사 거부 | NEEDS_REVIEW |
+  | 확정 미전송 | NEEDS_REVIEW |
+
+- **이전 버전 부분 저장 차단** (`Engine._guard_manual_resolved`, tick에서 주문 대조 직후·이월(`_rollover`) 전)
+  - 대상: OPEN·CARRY_OVER 이벤트(잔여 > 0)의 FILLED·CANCELLED·REJECTED 주문 중, 그 주문 자체에 수동 해제 증거가 있는 것.
+    - `details.final`의 `source=manual_resolve`(현재 상태와 같은 상태), 또는 target이 그 주문인 `resolve_unknown` 감사(증권사 상태가 현재 상태와 같음).
+    - 모드·티커·계좌가 이벤트·포지션과 맞아야 한다.
+  - 기존 정책상 사람 확인 완료의 명시 증거는 관리 해제(이벤트 DONE)뿐이므로, 위 대상은 확인 기록 누락으로 보고 기존 review 경로로 NEEDS_REVIEW로 바꾼다. 주문 상태는 바꾸지 않는다.
+  - 증거 없는 일반 취소·소멸은 대상이 아니다. 잔여 0은 기존 종료 판정에 맡긴다.
+  - 한계
+    - 9차 이전 버전에서 해제 중 중단된 주문은 `details.final`과 감사 기록이 없어 일반 취소와 구분할 수 없다.
+    - 9차 버전의 외부 취소 부분 저장은 `details.final` 출처가 `status`라 우리 취소 확정이나 마감 소멸과 구분할 수 없다.
+    - 이 경우들은 자동 판정하지 않는다. 운영 저널을 직접 조회·변경하지 않았다.
+
 ### 감시 슬롯 (P2)
 
 - 종목마다 `next_due_at` 을 둔다. 다음 예정 시각 = 현재 슬롯 시작 + 60초로, 조회 시작·완료 시각(응답 지연)과 분리한다. 30초 tick 에서 응답이 2~12초 걸려도 간격은 60초 근처로 유지된다.
@@ -748,7 +791,7 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
   - **최종 상태와 종료 증거의 원자 저장 (2026-11-28 Codex 9차 리뷰 P2 반영)** — `store.transition(..., evidence=[(key, value)])` 가 같은 `BEGIN IMMEDIATE` 쓰기 트랜잭션에서 현재 행의 `details` 를 읽어 기존 내용을 보존한 채 증거를 덧붙이고(같은 값은 다시 넣지 않음) 상태와 함께 한 UPDATE 로 쓴다. 조건부 전이가 실패하면 아무것도 쓰지 않고, 상태와 증거는 함께 커밋·롤백된다. 트랜잭션 안에서 외부 API 를 호출하지 않는다.
     - 증권사 대조 FILLED·CANCELLED·REJECTED: `details.final`(출처 `status`, 확인 체결 수량)
     - 전송 시점 거부: `details.reject` + `details.final`(출처 `send_reject`), 입력 검증 실패 미전송: `details.not_sent` + `details.final`(출처 `send_not_sent`)
-    - `resolve_unknown()` 이 FILLED·CANCELLED·REJECTED 로 확정할 때: `details.final`(출처 `manual_resolve`). SUBMITTED·PARTIAL_FILLED 해제는 최종 종료가 아니므로 쓰지 않는다. 감사 기록·주문번호·체결 원장·알림·NEEDS_REVIEW 정책은 그대로다.
+    - `resolve_unknown()` 이 FILLED·CANCELLED·REJECTED 로 확정할 때: `details.final`(출처 `manual_resolve`). SUBMITTED·PARTIAL_FILLED 해제는 최종 종료가 아니므로 쓰지 않는다. 감사 기록·주문번호·체결 원장·NEEDS_REVIEW 는 10차부터 같은 트랜잭션에 함께 저장한다 (위 '사람 확인 상태 전이의 원자 처리').
     - 롤백되면 기존 미확정 상태가 유지되어 재시작 후 읽기 전용 대조로 다시 확정한다 (자동 재전송 없음, 전송 경로의 SENDING 은 기존 정책대로 UNKNOWN). 체결 원장이 먼저 커밋되고 상태 전이 전에 중단돼도 재대조에서 같은 누적 수량은 NOOP 이라 이중 차감이 없다.
     - 이벤트: 지금도 열림(`event_open`), 보고일 이벤트 알림(`event_alerts_on_day`)
   - 당일 활동이 없는 오래된 종료 이벤트는 제외한다. 최종 상태가 DONE·NEEDS_REVIEW 라는 이유로 보고일 이력을 빼지 않는다.

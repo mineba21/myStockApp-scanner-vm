@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 from datetime import date, datetime, timedelta
@@ -16,6 +17,8 @@ from trading.auto_stop.quotes import MIN_AUTO_PRICE, QuoteUnavailable, validate
 from trading.auto_stop.store import UNRESOLVED, ClaimRefused, watch_end_of, watch_ended_by_of
 from trading.auto_stop.store import final_evidence as _store_final_evidence
 from trading.auto_stop.us_calendar import NEW_YORK, market_clock, ny_date, session_for
+
+log = logging.getLogger(__name__)
 
 
 class Refused(Exception):
@@ -239,9 +242,15 @@ def promote(store, reader, pid, *, confirmation_ticker, now=None, settings=None,
 
 def resolve_unknown(store, broker, order_id, *, order_number: str | None, confirmation_ticker: str,
                     now=None, actor="web") -> dict:
-    """UNKNOWN/CANCEL_UNKNOWN 을 증권사 주문내역 증거로만 해제한다. 해제 후 이벤트는 NEEDS_REVIEW."""
+    """UNKNOWN/CANCEL_UNKNOWN 을 증권사 주문내역 증거로만 해제한다. 해제 후 이벤트는 NEEDS_REVIEW.
+
+    증권사 조회·응답 검증은 트랜잭션 밖에서 하고, 체결 반영·상태 전이·종료 증거·NEEDS_REVIEW·감사 기록은
+    store.resolve_unknown_txn 한 트랜잭션으로 저장한다 (쓰기 잠금 후 사전 조회 기록과 최신 기록을 다시 비교).
+    중간에 중단되면 전부 롤백되어 UNKNOWN/CANCEL_UNKNOWN 이 유지되고, 커밋되면 주문 상태와 사람 확인 상태가 함께 남는다.
+    수동 해제는 주문 결과 확인일 뿐 자동 청산 재개 승인이 아니다 (NEEDS_REVIEW 는 사람이 해제/재등록)."""
     now = time.time() if now is None else now
-    o = store.order(order_id)
+    snap = store.resolve_snapshot(order_id)
+    o = snap["order"] if snap else None
     if not o or o["state"] not in ("UNKNOWN", "CANCEL_UNKNOWN"):
         raise Refused("UNKNOWN 상태 주문만 해제할 수 있습니다.")
     if str(confirmation_ticker or "").strip().upper() != o["ticker"]:
@@ -251,43 +260,46 @@ def resolve_unknown(store, broker, order_id, *, order_number: str | None, confir
         raise Refused("증권사 주문번호가 필요합니다.")
     if o["order_number"] and number != o["order_number"]:
         raise Refused("기록된 주문번호와 다릅니다.")
+    full = store.order(order_id)
     try:
-        row = broker.status({**o, "order_number": number})
+        row = broker.status({**full, "order_number": number})
     except Exception as exc:
         raise Refused("증권사 주문내역을 조회하지 못했습니다. 상태는 바뀌지 않았습니다.") from exc
     if row is None:
         raise Refused("증권사 주문내역에서 종목·방향·수량·가격·시각이 모두 일치하는 주문을 찾지 못했습니다.")
-    if store.apply_fill(order_id, now, int(row["filled_quantity"]), {"source": "manual_resolve", "row": row}) \
-            == "ANOMALY":
-        raise Refused("체결 수량이 기록과 맞지 않습니다. 해제하지 않습니다.")
     target = {"FILLED": "FILLED", "CANCELLED": "CANCELLED", "REJECTED": "REJECTED",
               "OPEN": "SUBMITTED", "PARTIAL": "PARTIAL_FILLED"}.get(row["state"])
     if target is None:
         raise Refused(f"증권사 주문 상태({row['state']})를 해석할 수 없어 해제하지 않습니다.")
     fields = {"broker_state": row["state"]}
     if not o["order_number"]:
-        fields.update(order_number=number,
-                      order_date=datetime.fromtimestamp(o["sent_at"] or o["created_at"], NEW_YORK).date().isoformat())
-    if target in FINAL_BROKER_STATES:
-        # 최종 종료(FILLED·CANCELLED·REJECTED)면 종료 증거를 상태와 같은 트랜잭션에 쓴다. 접수 확인(SUBMITTED)·부분체결
-        # (PARTIAL_FILLED)은 최종 종료가 아니므로 쓰지 않는다.
-        fields["evidence"] = [_store_final_evidence(target, now, "manual_resolve", int(row["filled_quantity"]))]
+        fields.update(order_number=number, order_date=datetime.fromtimestamp(
+            full["sent_at"] or full["created_at"], NEW_YORK).date().isoformat())
+    # 최종 종료(FILLED·CANCELLED·REJECTED)면 종료 증거를 상태와 같은 트랜잭션에 쓴다. 접수 확인(SUBMITTED)·부분체결
+    # (PARTIAL_FILLED)은 최종 종료가 아니므로 쓰지 않는다.
+    evidence = ([_store_final_evidence(target, now, "manual_resolve", int(row["filled_quantity"]))]
+                if target in FINAL_BROKER_STATES else None)
+
+    def audit_details(ev, pos):
+        return {"order_number": number, "broker_state": row["state"], "event_state": ev["state"],
+                "remaining": pos["remaining_managed_qty"],
+                # 취소 확정은 매도 완료가 아니다: 잔여가 남으면 대체 주문이 필요한 상태임을 기록한다 (자동 재주문은 하지 않음).
+                "replacement_needed": bool(row["state"] == "CANCELLED" and pos["remaining_managed_qty"] > 0)}
     try:
-        ok = store.transition(order_id, now, frm=("UNKNOWN", "CANCEL_UNKNOWN"), to=target, **fields)
-    except Exception as exc:
-        raise Refused("주문번호가 다른 주문 기록과 겹칩니다.") from exc
-    if not ok:
-        raise Refused("상태가 바뀌어 해제하지 못했습니다.")
-    store.review(now, event_id=o["exit_event_id"], reason=f"UNKNOWN 수동 해제 ({row['state']}) — 사람 확인 후 해제/재등록")
-    ev = store.event(o["exit_event_id"])
-    pos = store.position(ev["position_id"]) if ev else None
-    store.audit(now, actor, "resolve_unknown", order_id, {
-        "order_number": number, "broker_state": row["state"], "event_state": ev["state"] if ev else None,
-        "remaining": pos["remaining_managed_qty"] if pos else None,
-        # 취소 확정은 매도 완료가 아니다: 잔여가 남으면 대체 주문이 필요한 상태임을 기록한다 (자동 재주문은 하지 않음).
-        "replacement_needed": bool(pos and row["state"] == "CANCELLED" and pos["remaining_managed_qty"] > 0)})
-    reconcile_wait_records(store, now, actor=actor)     # 대기 기록을 확정된 실제 상태와 맞춘다
-    return store.order(order_id)
+        out = store.resolve_unknown_txn(
+            order_id, now, expect=snap, cum_filled=int(row["filled_quantity"]),
+            fill_evidence={"source": "manual_resolve", "row": row}, to=target, fields=fields, evidence=evidence,
+            review_reason=f"UNKNOWN 수동 해제 ({row['state']}) — 사람 확인 후 해제/재등록", actor=actor,
+            audit_details=audit_details)
+    except ClaimRefused as exc:
+        raise Refused(str(exc)) from exc
+    try:
+        reconcile_wait_records(store, now, actor=actor)     # 대기 기록을 확정된 실제 상태와 맞춘다 (커밋 후)
+    except Exception:
+        # 해제·사람 확인 상태는 이미 함께 커밋됐다 (신규 주문 차단 유지). 대기 기록은 다음 tick 정리에서 맞춘다.
+        log.warning("[자동손절] 수동 해제 후 대기 기록 정리 실패 (주문 %s) — 다음 tick 에서 다시 정리", order_id,
+                    exc_info=True)
+    return out
 
 
 def health(store, settings=None, now=None) -> dict:
