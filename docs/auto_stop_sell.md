@@ -472,6 +472,11 @@ RECOVERING ──(오류)──> FAULT          RECOVERING ──(같은·더 �
 - **대기 기록 정합성 (2026-11-28 Codex 6차 리뷰 P2 반영)** — `service.reconcile_wait_records`
   - 청산 이벤트가 OPEN 인지와 무관하게 모든 `replace_waiting:*`·`order_block:*` 기록을 실제 주문·이벤트·포지션 상태와 맞춘다. 실행 지점: 매 tick 의 주문 대조 직후(긴급 중지·보류 여부와 무관), `_send` 직후, `resolve_unknown()` 직후.
   - 판정 대상 주문 = 같은 청산 이벤트에서 대기 시작(`since`) 이후 생긴 가장 최근 주문. 기록에 남은 `order_id` 가 다른 이벤트의 주문이거나 더 새 주문으로 대체됐으면 쓰지 않는다 (과거 주문 때문에 현재 대기 기록을 지우지 않는다).
+  - **이전 형식 호환 (2026-11-28 Codex 7차 리뷰 P2 반영)**: 이전 버전은 첫 재주문 대기 기록의 `since` 를 주문 생성 뒤 시각으로 저장했다. 기록의 `order_id` 가 아래를 모두 만족하면 `created_at < since` 여도 그 대기 구간의 주문으로 판정 대상에 넣는다 (`_linked_order`). 시간 조건을 모든 주문에서 없애거나 가장 최근 주문을 무조건 고르지 않는다.
+    - 주문이 있고, 같은 청산 이벤트·모드·계좌·티커다.
+    - 기록 종류와 주문 종류가 맞다: `replace_waiting` → REPLACE, `order_block` → ORIGINAL·CARRY_OVER (기록의 `kind` 와 같음).
+    - 그 주문 이후 대기 시작 전까지 같은 이벤트의 다른 주문이 없다. 그 뒤 생긴 주문은 `created_at >= since` 로 따로 조회되므로 더 새 주문이 있으면 그 주문이 판정 대상이다.
+    - 하나라도 어긋나면 그 `order_id` 를 쓰지 않고 `link_issue`(order_missing / order_other_event / order_mismatch / order_kind_mismatch / order_superseded)만 기록한다. 확정 결과(rejected·filled 등)를 만들지 않는다.
   - 키마다 한 쓰기 트랜잭션에서 읽고 판정하고, 바뀐 것이 있을 때만 쓴다. 기록을 닫을 때는 같은 트랜잭션에서 `wait_record_closed` 감사 기록을 남긴다 → 반복 실행·중간 재시작에도 결과가 같다.
   - 읽기·정합성 처리일 뿐이다. 주문을 만들거나 주문·이벤트 상태를 바꾸지 않는다 (NEEDS_REVIEW → OPEN 자동 전환 없음, 수동 해제 정책 유지).
 
@@ -707,11 +712,27 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
   - `ok_coverage` 의미(값이 있는 범위)는 그대로다. "값이 있음"과 "값이 유효함"은 `ok_integrity` 로 구분한다.
   - SLOT_V2 의 정상은 기대 슬롯 중 ok 로 기록된 슬롯이므로 구조적으로 기대를 넘지 않는다 (구간 밖 기록은 `slot_out_of_window`).
   - 예: CINF 391/390 + EVRG 20/344 → 기대 734, 원시 기록 411, 전체 누락·정상률 `null`, 유효 소계 EVRG 20/344(누락 324), CINF `aggregate_exceeds_expected`.
+- **최초 영구 감시 종료 시각 (2026-11-28 Codex 7차 리뷰 P2 반영)**
+  - 일반 감시(ACTIVE)가 끝나는 상태 전이와 **같은 UPDATE 문**에서 포지션 `details.watch_ended_at`(+`watch_end_reason`)을 한 번만 기록한다 (기존 `details` 열, DDL 없음). SET 식의 `state` 는 갱신 전 값이라 ACTIVE 에서 벗어날 때만 남는다. 전이가 실패하면(행 0) 함께 남지 않는다.
+    - ACTIVE → EXITING (최초 손절 트리거, `create_event`), ACTIVE → NEEDS_REVIEW (`store.review`), ACTIVE → DISABLED·EXTERNAL_CLOSED (`update_position`: 관리 종료, SHADOW→LIVE 전환, 외부 전량 매도), NEEDS_REVIEW 로 등록(`insert_position`, 감시를 시작하지 않음).
+  - 이후 NEEDS_REVIEW → DISABLED, 체결 반영, 사용자 해제·일시중지, 주문 대조, 알림·감사, 재시작은 이 값을 바꾸지 않는다. `updated_at`(마지막 수정 시각)은 종료 시각으로 쓰지 않는다.
+  - 일일 마감·일시중지는 영구 종료가 아니다. `record_watch_end`(그날 상태 근거, `state_audit`)와 별개이며, ACTIVE 포지션은 다음 거래일에도 그대로 감시한다.
+  - 이전 버전 포지션(기록 없음): 실제 이력 중 가장 이른 것으로 복원한다 — 첫 손절 트리거, `disable`·`promote` 감사, `position:{id}:review*`·`position:{id}:external_closed` 알림 (`watch_end_from_history`). 이력도 없으면 `updated_at` 으로 확정하지 않는다: `updated_at` 이 보고일 감시 시작 전이면 그 전에 끝났음이 확실하므로 제외, 아니면 감시 대상에 넣되 기대·정상·공백을 `null`(`watch_end_unverified`)로 둔다. 과거 기록은 고치지 않는다.
 - **보고일 감시 대상 선정 (2026-11-28 Codex 6차 리뷰 P2 반영)** — 그날 정규장 [개장, 마감·현재] 과 포지션의 실제 일반 감시 구간이 겹치는 포지션만 감시 대상이다.
-  - 감시 시작 = max(개장, 등록). 감시 끝 = 첫 손절 트리거 / ACTIVE·EXITING 이 아닌 포지션은 전환 시각 / 마감.
+  - 감시 시작 = max(개장, 등록). 감시 끝 = 첫 손절 트리거 / ACTIVE·EXITING 이 아닌 포지션은 최초 영구 감시 종료 시각 / 마감.
   - 일반 감시는 ACTIVE 만 하고 트리거 이후 ACTIVE 로 돌아가는 경로가 없으므로, 그날 감시 시작 전에 트리거된 포지션(전날 SOLD·DONE, 전날 이월 등)은 감시 대상이 아니다. 과거 청산 이벤트가 있다는 이유만으로 포함하지 않는다.
   - 구간 길이 0 은 그날 개장 시각 트리거처럼 당일 이벤트 근거가 있을 때만 포함한다 (기대 0).
   - 전 거래일 청산 이벤트의 당일 주문 대조·이월은 `exit_followups` 로 따로 보이며 감시 통계에 넣지 않는다. 주문 통계(`orders`)·청산 이벤트 이력은 그대로다.
+  - **`exit_followups` 선정 근거 (2026-11-28 Codex 7차 리뷰 P2 반영)** — 현재 상태가 아니라 보고일(뉴욕 달력일)에 실제로 있었던 이력으로 고른다 (`_followup`). 주문별 `reasons`:
+    - `created_on_day`: 보고일 생성 주문(이월·재주문)
+    - `fill_applied_on_day`: 체결 원장 `auto_stop_fill_ledger.applied_at` 이 보고일인 증분 체결
+    - `order_events_on_day:*`: 보고일 주문 알림(취소 확정·소멸·체결·미체결 경과·UNKNOWN 해제 등)
+    - `unknown_resolved_on_day`: 보고일 `resolve_unknown` 감사
+    - `unresolved_at_day_start`: 보고일 전 생성 + 지금도 미해결이거나 확정 근거 시각(전량 체결 원장·취소 확정 알림·증거 해제·거부의 확인 필요 알림)이 보고일 이후
+    - `resolution_time_unverified`: 확정 근거 시각을 찾지 못했는데 `updated_at` 이 보고일 이후 (근거 부족 표시)
+    - 이벤트: 지금도 열림(`event_open`), 보고일 이벤트 알림(`event_alerts_on_day`)
+  - 당일 활동이 없는 오래된 종료 이벤트는 제외한다. 최종 상태가 DONE·NEEDS_REVIEW 라는 이유로 보고일 이력을 빼지 않는다.
+  - 시각·수량 구분: `fills_on_day[].applied_at` = 시스템이 체결을 확인·반영한 시각, `broker_fill_time` = 원장 증거에 증권사 체결 시각이 있을 때만 (없으면 `null`, 추정 없음). `cum_filled_now` = 현재 누적 체결, `fills_applied_qty_on_day` = 보고일 신규 반영 수량 (원장 PK 로 같은 체결은 한 번만). 합계 `exit_followup_fills_applied_qty` 는 일반 감시 횟수·당일 신규 주문 수와 별개다.
   - 감시 대상이 없는 날: `watched_positions=0`, 기대 0, `ok_status=no_targets`, `ok_coverage=none`, 정상률 `null`.
 - 장 마감 요약 알림은 감시 대상이 있는데 정상 횟수 커버리지 또는 정상 상태 공백 커버리지가 `full` 이 아니거나, 집계 무결성 오류가 있거나, 누락이 `null` 이면 INFO 가 아니라 WARN 이다 (측정 품질이 불완전한 날을 정상으로 표시하지 않는다).
 - 보고서 생성은 읽기 전용이다. 기존 저널·저장된 보고서를 바꾸지 않는다.

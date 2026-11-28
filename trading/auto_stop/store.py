@@ -27,6 +27,14 @@ def _in(values) -> str:
     return "(" + ",".join(f"'{v}'" for v in values) + ")"
 
 
+# 최초 영구 감시 종료 시각: 일반 감시(ACTIVE)가 끝나는 상태 전이와 같은 UPDATE 문에서 한 번만 기록한다.
+# SET 식의 state 는 갱신 전 값이므로 ACTIVE 에서 벗어날 때만 남고, 이후 전이(NEEDS_REVIEW → DISABLED 등)·체결·
+# 사용자 조작·재시작으로 바뀌지 않는다. 전이가 실패하면(행 0) 함께 남지 않는다. 기존 details 열 사용 (DDL 없음).
+WATCH_END_SET = ("details=CASE WHEN state='ACTIVE' AND json_extract(details,'$.watch_ended_at') IS NULL "
+                 "THEN json_set(COALESCE(NULLIF(details,''),'{}'),'$.watch_ended_at',?,'$.watch_end_reason',?) "
+                 "ELSE details END")
+
+
 class ClaimRefused(Exception):
     """선점 트랜잭션이 조건 불충족으로 거부됨 (아무것도 전송하지 않음)."""
 
@@ -232,7 +240,7 @@ class AutoStopStore:
                      f["scan_result_id"], json.dumps(f["signal_snapshot"], default=str), str(f["stop_price"]),
                      f["qty"], f["qty"], f["broker_qty"], f.get("avg_cost"), f.get("state", "ACTIVE"),
                      f.get("review_reason"), f.get("quote_price"), f.get("quote_at"), now, now,
-                     json.dumps(f.get("details", {}), default=str)))
+                     json.dumps(_initial_details(f, now), default=str)))
             except sqlite3.IntegrityError as exc:
                 raise ClaimRefused("이미 자동 손절이 등록된 종목입니다.") from exc
             return cur.lastrowid
@@ -254,8 +262,12 @@ class AutoStopStore:
         if not fields:
             return False
         sets = ", ".join(f"{k}=?" for k in fields) + ", updated_at=?"
+        args = list(fields.values()) + [now]
+        if "state" in fields and fields["state"] != "ACTIVE":
+            sets += ", " + WATCH_END_SET
+            args += [now, f"state:{fields['state']}"]
         sql = f"UPDATE auto_stop_positions SET {sets} WHERE id=?"
-        args = list(fields.values()) + [now, pid]
+        args.append(pid)
         if expect_states:
             sql += f" AND state IN {_in(expect_states)}"
         with self.tx() as db:
@@ -264,8 +276,9 @@ class AutoStopStore:
     # ── events ──────────────────────────────────────────────────
     def create_event(self, now, position, *, state, trigger_price, trigger_as_of, session_date) -> int | None:
         with self.tx() as db:
-            ok = db.execute("UPDATE auto_stop_positions SET state='EXITING', updated_at=? "
-                            "WHERE id=? AND state='ACTIVE' AND auto_paused=0", (now, position["id"])).rowcount
+            ok = db.execute(f"UPDATE auto_stop_positions SET state='EXITING', updated_at=?, {WATCH_END_SET} "
+                            "WHERE id=? AND state='ACTIVE' AND auto_paused=0",
+                            (now, now, "trigger", position["id"])).rowcount
             if ok != 1:
                 return None
             cur = db.execute(
@@ -310,8 +323,9 @@ class AutoStopStore:
                 db.execute(f"UPDATE auto_stop_exit_events SET state='NEEDS_REVIEW', review_reason=?, updated_at=? "
                            f"WHERE id=? AND state IN {_in(EVENT_OPEN_STATES)}", (reason, now, event_id))
             if position_id:
-                db.execute("UPDATE auto_stop_positions SET state='NEEDS_REVIEW', review_reason=?, updated_at=? "
-                           "WHERE id=? AND state IN ('ACTIVE','EXITING')", (reason, now, position_id))
+                db.execute(f"UPDATE auto_stop_positions SET state='NEEDS_REVIEW', review_reason=?, updated_at=?, "
+                           f"{WATCH_END_SET} WHERE id=? AND state IN ('ACTIVE','EXITING')",
+                           (reason, now, now, "state:NEEDS_REVIEW", position_id))
 
     # ── orders ──────────────────────────────────────────────────
     def orders(self, *, event_id=None, states=None, mode=None):
@@ -525,6 +539,23 @@ class AutoStopStore:
             db.execute("UPDATE auto_stop_alerts SET state=?, attempts=attempts+1, sent_at=? WHERE id=?",
                        ("SENT" if ok else "FAILED", now if ok else None, aid))
 
+    def fill_ledger(self, order_ids):
+        """체결 원장 (증분 반영 이력, 읽기 전용). applied_at = 시스템이 체결을 확인·반영한 시각."""
+        ids = list(order_ids)
+        if not ids:
+            return []
+        with self.tx() as db:
+            return [dict(r) for r in db.execute(
+                f"SELECT order_id, cum_filled_qty, applied_delta, applied_at, evidence FROM auto_stop_fill_ledger "
+                f"WHERE order_id IN ({','.join('?' * len(ids))}) ORDER BY applied_at, cum_filled_qty", ids)]
+
+    def alerts_with_prefix(self, prefix):
+        """dedup_key 접두어가 같은 알림 (읽기 전용, 생성 시각 순)."""
+        with self.tx() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT dedup_key, severity, created_at FROM auto_stop_alerts WHERE substr(dedup_key, 1, ?)=? "
+                "ORDER BY created_at, id", (len(prefix), prefix))]
+
     def recent_alerts(self, limit=50):
         with self.tx() as db:
             return [dict(r) for r in db.execute("SELECT * FROM auto_stop_alerts ORDER BY id DESC LIMIT ?", (limit,))]
@@ -565,6 +596,23 @@ class AutoStopStore:
         """같은 SQLite 의 스캐너 매수 저널에 account1 같은 종목의 미확정·미체결 매수가 있는지."""
         with self.tx() as db:
             return self.scanner_buy_in_flight_db(db, ticker)
+
+
+def _initial_details(f, now) -> dict:
+    """ACTIVE 가 아닌 상태로 등록(예: LIVE 전환 시점에 이미 손절가 이하 → NEEDS_REVIEW)하면 일반 감시를 시작하지 않는다."""
+    details = dict(f.get("details") or {})
+    if f.get("state", "ACTIVE") != "ACTIVE":
+        details.setdefault("watch_ended_at", now)
+        details.setdefault("watch_end_reason", f"registered:{f['state']}")
+    return details
+
+
+def watch_end_of(position) -> float | None:
+    """기록된 최초 영구 감시 종료 시각 (없으면 None)."""
+    try:
+        return json.loads(position["details"] or "{}").get("watch_ended_at")
+    except (TypeError, ValueError):
+        return None
 
 
 def dec(value) -> Decimal:

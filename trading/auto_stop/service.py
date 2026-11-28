@@ -7,13 +7,13 @@ from __future__ import annotations
 import json
 import math
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from trading.auto_stop import quote_health as QH
 from trading.auto_stop import settings as S
 from trading.auto_stop.quotes import MIN_AUTO_PRICE, QuoteUnavailable, validate
-from trading.auto_stop.store import UNRESOLVED, ClaimRefused
+from trading.auto_stop.store import UNRESOLVED, watch_end_of, ClaimRefused
 from trading.auto_stop.us_calendar import NEW_YORK, market_clock, ny_date, session_for
 
 
@@ -393,6 +393,7 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     positions = []
     health = store.runtime_get(f"quote_health:{mode}", {}) or {}
     day_start = datetime.combine(d, datetime.min.time(), tzinfo=NEW_YORK).timestamp()
+    day_end = datetime.combine(d + timedelta(days=1), datetime.min.time(), tzinfo=NEW_YORK).timestamp()   # 뉴욕 달력일
     fault_audits = store.audits("quote_fault", day_start, day_start + 86400) + \
         store.audits("quote_recovered", day_start, day_start + 86400)
     pause_audits = store.audits("pause", day_start, day_start + 86400) + \
@@ -421,6 +422,10 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
             slot_ok_rows.setdefault(r["key"].split(":", 1)[0], set()).add(round(float(r["key"].split(":", 1)[1]), 3))
     cands, followups = [], []
     all_events = store.events(mode=mode)
+    hist = {"audits": store.audits("disable", 0, 1e18) + store.audits("promote", 0, 1e18),
+            "alerts": store.alerts_with_prefix("position:")}
+    fu_ctx = {"order_alerts": store.alerts_with_prefix("order:"), "event_alerts": store.alerts_with_prefix("event:"),
+              "resolves": store.audits("resolve_unknown", 0, 1e18)}
     for p in store.positions(mode=mode):
         if p["created_at"] >= end:
             continue
@@ -432,21 +437,26 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         triggers = sorted(e["triggered_at"] for e in p_events)
         ws = max(start, p["created_at"])
         if triggers and triggers[0] < ws:
-            if any(ny_date(e["triggered_at"]) != d and (e["state"] in ("OPEN", "CARRY_OVER")
-                   or any(ny_date(o["created_at"]) == d for o in store.orders(event_id=e["id"]))) for e in p_events):
-                followups.append({"position_id": p["id"], "ticker": p["ticker"],
-                                  "events": [e["id"] for e in p_events if ny_date(e["triggered_at"]) != d]})
+            fu = _followup(store, p, p_events, day_start, day_end, fu_ctx)
+            if fu:
+                followups.append(fu)
             continue
         in_window = [t for t in triggers if t <= end]
         stop_at = min(in_window + [end])
-        # 감시(engine._watch)는 ACTIVE 만 한다. 확인 필요(NEEDS_REVIEW)·종료 상태는 전환 시각에 감시가 끝났다.
-        if p["state"] not in ("ACTIVE", "EXITING") and not in_window:
-            stop_at = min(stop_at, p["updated_at"])
+        # 감시(engine._watch)는 ACTIVE 만 한다. 확인 필요(NEEDS_REVIEW)·종료 상태는 최초 영구 감시 종료 시각에 끝났다.
+        # updated_at(마지막 수정 시각)을 종료 시각으로 쓰지 않는다: 후속 조작(NEEDS_REVIEW → 관리 종료 등)이 바꾼다.
+        end_src = None
+        if p["state"] not in ("ACTIVE", "EXITING"):
+            wend, end_src = _watch_end(p, triggers, hist)
+            if wend is not None:
+                stop_at = min(stop_at, wend)
+            elif p["updated_at"] < ws:
+                continue      # 종료 시각을 모르더라도 마지막 수정이 보고일 감시 시작 전이면 그 전에 끝났음이 확실
         if stop_at - ws <= 0 and not (in_window and ny_date(in_window[0]) == d):
             continue          # 구간 길이 0 은 그날 개장 시각 트리거처럼 당일 이벤트 근거가 있을 때만 포함
         # 표식이 감시 시작 이전이면 그 감시 구간 전체를 신버전이 기록했다. 감시 중에 바뀌었으면 전환 후보다.
         fmt = ("LEGACY" if v2_since is None or v2_since > stop_at else "SLOT_V2" if v2_since <= ws else "SWITCH")
-        cands.append({"p": p, "ws": ws, "stop": stop_at, "fmt": fmt})
+        cands.append({"p": p, "ws": ws, "stop": stop_at, "fmt": fmt, "end_src": end_src})
 
     def v2_ok_all(pid):
         """신버전이 그 포지션에서 quote_ok 를 올린 횟수 = 성공 슬롯 수 (기록된 슬롯 + 확정 전 진행 중 슬롯)."""
@@ -471,7 +481,7 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
             if c["fmt"] == "SWITCH":
                 # 허용 오차만으로 SLOT_V2 를 주지 않는다: 오차 이내이고 그 티커에 구버전 기록이 없을 때만.
                 c["fmt"] = "SLOT_V2" if (c["ws"] + tol >= v2_since and remainder == 0) else "MIXED"
-        claimants = [c for c in group if c["fmt"] in ("LEGACY", "MIXED")]
+        claimants = [c for c in group if c["fmt"] in ("LEGACY", "MIXED") and c["end_src"] != "unverified"]
         # 일반 감시 실패·무효: 티커 일계(quote_fail/quote_invalid)와 신버전 포지션 상세(pos_watch_fail/invalid)는 신버전에서
         # 같은 호출(_record_quote_error, purpose=watch)이 함께 올린다 → 같은 범위·같은 의미. 차이 = 구버전 몫.
         v2_fail = sum(int(stat("pos_watch_fail", str(c["p"]["id"]))) for c in group if c["fmt"] != "LEGACY")
@@ -542,7 +552,9 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
                 expected = math.ceil(max(0.0, v2_since - ws) / max(1, interval)) + slots["expected"]
                 own_v2_ok = slots["ok"]
                 quality.append(f"mixed_format: 슬롯·공백은 {measured_from:.0f} 이후만 측정 (구버전 구간은 일계 기준)")
-            if info["remainder"] < 0:
+            if c["end_src"] == "unverified":
+                ok = None                    # 감시 구간 끝을 입증할 수 없음: 구버전 몫을 귀속하지 않는다
+            elif info["remainder"] < 0:
                 ok = None
                 ok_unmeasured += 1
                 quality.append(f"aggregate_mismatch: 티커 일계 {info['quote_ok']} < 신버전 성공 {info['v2_ok']}")
@@ -562,6 +574,16 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
                             agg[k] += pstat(m, pid)
                 agg["positions"].append(pid)
                 quality.append("legacy_ticker_shared: 같은 티커 구버전 기간 포지션이 여럿이라 포지션별로 나누지 않음")
+        if c["end_src"] == "unverified":
+            # 이전 버전 포지션: 최초 감시 종료 시각 기록도, 이를 입증할 이력(트리거·관리 종료·확인 필요 알림)도 없다.
+            # 마지막 수정 시각을 종료 시각으로 확정하지 않고 기대·정상·공백을 측정 불가로 둔다.
+            ok = expected = None
+            breakdown = {k: None for k in breakdown}
+            gaps = {**gaps, "measurable": False, "max_sec": None, "max_normal_sec": None, "over_120": None,
+                    "normal_over_120": None, "reason": "watch_end_unverified"}
+            quality.append("watch_end_unverified: 최초 감시 종료 시각을 기록·이력으로 확인할 수 없음 (측정 불가)")
+        elif c["end_src"] == "history":
+            quality.append("watch_end_from_history: 최초 감시 종료 시각을 기존 이력(트리거·감사·알림)으로 복원")
         missed = None if ok is None or ok > expected else expected - ok
         if ok is not None and ok > expected:
             quality.append(f"aggregate_exceeds_expected: 정상 {ok} > 기대 {expected} (전환 구간 겹침 등)")
@@ -631,7 +653,8 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     for t, agg in legacy_ticker_totals.items():
         agg["integrity"] = "valid" if agg["ok"] <= agg["expected"] else "exceeds_expected"
         agg["missed"] = agg["expected"] - agg["ok"] if agg["integrity"] == "valid" else None
-    total_expected = sum(p["expected_checks"] for p in solo) + sum(a["expected"] for a in legacy_ticker_totals.values())
+    total_expected = (None if any(p["expected_checks"] is None for p in solo) else
+                      sum(p["expected_checks"] for p in solo) + sum(a["expected"] for a in legacy_ticker_totals.values()))
     measured_solo = [p for p in solo if p["ok_checks"] is not None]
     valid_solo = [p for p in measured_solo if p["ok_integrity"] == "valid"]
     valid_groups = [a for a in legacy_ticker_totals.values() if a["integrity"] == "valid"]
@@ -730,6 +753,9 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         "watched_positions": len(positions),
         # 일반 감시 대상이 아닌, 전 거래일 청산 이벤트의 당일 주문 대조·이월 (감시 통계에 넣지 않는다)
         "exit_followups": followups,
+        # 전 거래일 주문의 당일 신규 반영 체결 수량 (일반 감시·당일 신규 주문 수와 별개, 원장 증분이라 중복 없음)
+        "exit_followup_fills_applied_qty": sum(o["fills_applied_qty_on_day"] for f in followups
+                                               for e in f["events"] for o in e["orders"]),
         "data_quality": quality,
         "format": report_format, "slot_v2_since": v2_since,
         "watch": {"expected": total_expected, "ok": total_ok, "missed": total_missed,
@@ -957,8 +983,12 @@ def reconcile_wait_records(store, now, *, keys=None, actor="engine") -> dict:
             since = float(w.get("since") or 0)
             later = db.execute("SELECT * FROM auto_stop_orders WHERE exit_event_id=? AND created_at>=? "
                                "ORDER BY created_at, id", (eid, since)).fetchall()
-            subject = later[-1] if later else None
+            linked, link_issue = _linked_order(db, key, w, eid, ev, pos, since)
+            cands = list(later) + ([linked] if linked is not None and linked["created_at"] < since else [])
+            subject = max(cands, key=lambda o: (o["created_at"], o["id"])) if cands else None
             action, detail = _wait_decision(w, ev, pos, subject)
+            if action == "keep" and link_issue and detail.get("link_issue") != link_issue:
+                detail = {**detail, "link_issue": link_issue}      # 연결 근거 부족: 확정 결과를 만들지 않고 표시만
             if action == "keep":
                 if detail == w:
                     results[key] = ("keep", None)
@@ -969,10 +999,142 @@ def reconcile_wait_records(store, now, *, keys=None, actor="engine") -> dict:
             return {key: None}, [(actor, "wait_record_closed", key, {
                 "reason": detail, "record": w, "order_id": subject["id"] if subject is not None else None,
                 "order_state": subject["state"] if subject is not None else None,
-                "event_state": ev["state"] if ev is not None else None,
+                "event_state": ev["state"] if ev is not None else None, "link_issue": link_issue,
                 "remaining": pos["remaining_managed_qty"] if pos is not None else None})]
         store.runtime_txn(now, [key], fn)
     return results
+
+
+_BROKER_TIME_KEYS = ("fill_time", "executed_at", "last_fill_at", "cntr_tm")
+
+
+def _followup(store, p, p_events, d0, d1, ctx):
+    """보고일 [d0, d1) 에 실제로 있었던 전 거래일 청산 이벤트의 후속 이력 (현재 상태만으로 판단하지 않는다).
+
+    근거: 보고일 생성 주문(이월·재주문) / 체결 원장 applied_at 이 보고일인 증분 체결 / 보고일 주문 알림(취소 확정·
+    소멸·체결·UNKNOWN 해제 등) / 보고일 resolve_unknown 감사 / 보고일 시작 시점에 미해결이던 주문(보고일 전 생성 +
+    지금도 미해결이거나 확정 근거 시각이 보고일 이후) / 보고일의 이벤트 확인 필요 알림 / 지금도 열린 이벤트.
+    당일 활동이 없는 오래된 종료 이벤트는 제외한다. 증권사 실제 체결 시각은 원장 증거에 있을 때만 보이고 추정하지 않는다."""
+    events_out = []
+    for e in p_events:
+        if e["triggered_at"] >= d0:
+            continue
+        orders = store.orders(event_id=e["id"])
+        ledger = {}
+        for row in store.fill_ledger(o["id"] for o in orders):
+            ledger.setdefault(row["order_id"], []).append(row)
+        orders_out = []
+        for o in orders:
+            oid, reasons = o["id"], []
+            pre = f"order:{oid}:"
+            day_alerts = [a for a in ctx["order_alerts"] if a["dedup_key"].startswith(pre) and d0 <= a["created_at"] < d1]
+            resolves = [a for a in ctx["resolves"] if str(a["target"]) == str(oid)]
+            fills = [r for r in ledger.get(oid, []) if d0 <= r["applied_at"] < d1]
+            if d0 <= o["created_at"] < d1:
+                reasons.append("created_on_day")
+            if fills:
+                reasons.append("fill_applied_on_day")
+            if day_alerts:
+                reasons.append("order_events_on_day:" + ",".join(sorted({a["dedup_key"][len(pre):].split(":")[0]
+                                                                        for a in day_alerts})))
+            if any(d0 <= a["at"] < d1 for a in resolves):
+                reasons.append("unknown_resolved_on_day")
+            if o["created_at"] < d0:
+                if o["state"] in UNRESOLVED:
+                    reasons.append("unresolved_at_day_start")
+                else:
+                    fin = _final_evidence_at(o, ledger.get(oid, []), ctx, e["id"], resolves)
+                    if fin is not None and fin >= d0:
+                        reasons.append("unresolved_at_day_start")
+                    elif fin is None and o["updated_at"] >= d0:
+                        reasons.append("resolution_time_unverified")
+            if not reasons:
+                continue
+
+            def broker_time(r):
+                row = (json.loads(r["evidence"] or "{}") or {}).get("row") or {}
+                return next((row[k] for k in _BROKER_TIME_KEYS if row.get(k)), None)
+            orders_out.append({
+                "order_id": oid, "kind": o["kind"], "state_now": o["state"], "created_at": o["created_at"],
+                "cum_filled_now": o["filled_qty"], "requested_qty": o["requested_qty"], "reasons": reasons,
+                "fills_applied_qty_on_day": sum(r["applied_delta"] for r in fills),
+                "fills_on_day": [{"applied_at": r["applied_at"], "delta": r["applied_delta"], "cum": r["cum_filled_qty"],
+                                  "broker_fill_time": broker_time(r)} for r in fills]})
+        ev_reasons = []
+        if e["state"] in ("OPEN", "CARRY_OVER"):
+            ev_reasons.append("event_open")
+        if any(a["dedup_key"].startswith(f"event:{e['id']}:") and d0 <= a["created_at"] < d1 for a in ctx["event_alerts"]):
+            ev_reasons.append("event_alerts_on_day")
+        if orders_out or ev_reasons:
+            events_out.append({"event_id": e["id"], "state_now": e["state"], "triggered_at": e["triggered_at"],
+                               "reasons": ev_reasons, "orders": orders_out})
+    if not events_out:
+        return None
+    return {"position_id": p["id"], "ticker": p["ticker"], "events": events_out}
+
+
+def _final_evidence_at(o, ledger_rows, ctx, eid, resolves):
+    """확정 상태 주문의 확정 근거 시각 (가장 이른 것): 전량 체결 원장, 취소 확정·소멸 알림, 증거 해제 감사, 거부·미전송의
+    이벤트 확인 필요 알림. 근거가 없으면 None (updated_at 으로 확정하지 않는다)."""
+    st, times = o["state"], []
+    if st == "FILLED":
+        times += [r["applied_at"] for r in ledger_rows if r["cum_filled_qty"] >= o["requested_qty"]]
+    if st == "CANCELLED":
+        times += [a["created_at"] for a in ctx["order_alerts"]
+                  if a["dedup_key"] in (f"order:{o['id']}:cancelled", f"order:{o['id']}:expired")]
+    if st in ("REJECTED", "NOT_SENT"):
+        times += [a["created_at"] for a in ctx["event_alerts"]
+                  if a["dedup_key"] == f"event:{eid}:review" and a["created_at"] >= o["created_at"]]
+    times += [a["at"] for a in resolves]
+    return min(times) if times else None
+
+
+def _watch_end(p, triggers, hist):
+    """최초 영구 감시 종료 시각 → (시각, 근거). 근거: recorded(상태 전이와 함께 기록) / history(이전 버전 포지션의 실제
+    이력: 첫 손절 트리거, 관리 종료·LIVE 전환 감사, 확인 필요·외부 매도 알림 중 가장 이른 것) / unverified(입증 불가)."""
+    rec = watch_end_of(p)
+    if rec is not None:
+        return float(rec), "recorded"
+    pid = str(p["id"])
+    times = list(triggers[:1])
+    times += [a["at"] for a in hist["audits"] if str(a["target"]) == pid]
+    times += [a["created_at"] for a in hist["alerts"]
+              if a["dedup_key"].startswith(f"position:{pid}:review") or a["dedup_key"] == f"position:{pid}:external_closed"]
+    times = [t for t in times if t >= p["created_at"]]
+    if times:
+        return min(times), "history"
+    return None, "unverified"
+
+
+def _linked_order(db, key, w, eid, ev, pos, since):
+    """기록에 남은 order_id 의 호환 판정 → (주문 | None, 문제 | None).
+
+    이전 버전은 첫 재주문 대기 기록의 since 를 주문 생성 뒤 시각으로 저장했다. 그래서 created_at < since 인 주문도
+    아래가 모두 맞으면 그 대기 구간의 주문으로 인정한다 (시간 조건을 모든 주문에서 없애지 않는다).
+      - 주문이 있고, 같은 청산 이벤트·모드·계좌·티커이며, 기록 종류와 맞는 주문 종류다
+        (replace_waiting → REPLACE, order_block → ORIGINAL·CARRY_OVER 이며 기록의 kind 와 같음).
+      - 그 주문 이후 대기 시작 전까지 같은 이벤트의 다른 주문이 없다 (과거 주문을 잘못 고르지 않는다).
+    그 뒤에 생긴 주문은 created_at >= since 로 따로 조회되므로, 더 새 주문이 있으면 그 주문이 판정 대상이 된다."""
+    oid = w.get("order_id")
+    if oid is None:
+        return None, None
+    o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (oid,)).fetchone()
+    if o is None:
+        return None, f"order_missing: order_id {oid} 주문 없음"
+    if ev is None or o["exit_event_id"] != eid:
+        return None, f"order_other_event: order_id {oid} 는 다른 청산 이벤트의 주문"
+    if pos is None or o["mode"] != ev["mode"] or o["account_profile"] != pos["account_profile"] \
+            or o["ticker"] != pos["ticker"]:
+        return None, f"order_mismatch: order_id {oid} 모드·계좌·티커 불일치"
+    kinds = ("REPLACE",) if key.startswith("replace_waiting:") else ("ORIGINAL", "CARRY_OVER")
+    if o["kind"] not in kinds or (w.get("kind") and o["kind"] != w["kind"]):
+        return None, f"order_kind_mismatch: order_id {oid} 종류 {o['kind']}"
+    between = db.execute("SELECT COUNT(*) FROM auto_stop_orders WHERE exit_event_id=? AND id<>? AND created_at<? "
+                         "AND (created_at>? OR (created_at=? AND id>?))",
+                         (eid, oid, since, o["created_at"], o["created_at"], oid)).fetchone()[0]
+    if between:
+        return None, f"order_superseded: order_id {oid} 이후 대기 시작 전에 다른 주문 {between}건"
+    return o, None
 
 
 def record_watch_end(store, mode, p, at, rec=None):
@@ -1121,7 +1283,7 @@ def report_text(rep: dict) -> str:
     w, o = rep["watch"], rep["orders"]
     r, hd = rep.get("recovery") or {}, rep.get("holds") or {}
     per = " · ".join(f"{p['ticker']}#{p['id']} {'측정 불가' if p['ok_checks'] is None else p['ok_checks']}/"
-                     f"{p['expected_checks']}"
+                     f"{_fmt(p['expected_checks'])}"
                      + (f" 최대공백 {p['gaps']['max_sec']}초" if p.get("gaps", {}).get("max_sec") is not None else "")
                      + (f" 장애 {p['health_state']}" if p.get("health_state") not in (None, "OK") else "")
                      for p in w.get("positions", []))
@@ -1150,7 +1312,7 @@ def report_text(rep: dict) -> str:
                      + (f" + 원인 측정 불가 {unmeasured}" if unmeasured else ""))
     dq = rep.get("data_quality") or []
     return (f"[자동손절 일일 보고 {rep['day']} {rep['mode']}] 형식 {rep.get('format', '-')} · 감시 "
-            f"{rep['watched_positions']}종목 · 정상 감시 {_fmt(w['ok'])}/{w['expected']}"
+            f"{rep['watched_positions']}종목 · 정상 감시 {_fmt(w['ok'])}/{_fmt(w['expected'])}"
             + (" (일부 종목 측정 불가)" if w.get("ok_coverage") == "partial" else "")
             + (f" (데이터 무결성 오류 {len(w['integrity_errors'])}건, 원시 성공 기록 {_fmt(w.get('ok_recorded'))})"
                if w.get("ok_integrity") == "invalid" else "")
