@@ -194,3 +194,18 @@ def test_operational_db_read_only(env):
     before = snap()
     env.capture(D2)
     assert snap() == before
+
+
+def test_duplicate_ticker_keeps_strict_row_and_warns(env):
+    log = env.scan(D1, [{"ticker": "DUP", "strict_filter_passed": False, "signal_type": "BREAKOUT"},
+                        {"ticker": "DUP", "strict_filter_passed": True, "signal_type": "REBOUND"},
+                        {"ticker": "OK"}])
+    assert env.capture(D1) == "CAPTURED"
+    rows = env.q("SELECT scan_result_id, strict, signal_type FROM abu_signals WHERE ticker='DUP'")
+    assert len(rows) == 1 and rows[0]["strict"] == 1 and rows[0]["signal_type"] == "REBOUND"
+    ev = env.q("SELECT level, kind, details_json FROM abu_system_events")
+    assert len(ev) == 1 and ev[0]["level"] == "WARN" and ev[0]["kind"] == "DUPLICATE_TICKER_ROWS"
+    d = json.loads(ev[0]["details_json"])
+    assert d["scan_log_id"] == log.id and d["ticker"] == "DUP"
+    assert d["kept_id"] == rows[0]["scan_result_id"] and len(d["dropped_ids"]) == 1
+    assert d["dropped_ids"][0] < d["kept_id"]

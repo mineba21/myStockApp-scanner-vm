@@ -128,6 +128,7 @@ def _first_pass(db, row, key, day, is_first, collection_start, settings):
 
 
 def capture_day(store: Store, session_factory, day: date, now: float, settings) -> str:
+    """collection_start 는 now 가 아니라 첫 결정 스캔 시작 시각으로 둔다 (첫날 스캔의 최초 탐지를 수집 이전으로 오판하지 않기 위해)."""
     with store.read() as db:
         st = _existing(db, day)
     if st:
@@ -148,11 +149,19 @@ def capture_day(store: Store, session_factory, day: date, now: float, settings) 
             # 수집 시작 = 첫 결정 스캔 시작 시각 (now 를 쓰면 첫날 스캔의 최초 탐지가 수집 이전으로 오판된다)
             start = min(now, started_ts)
             Store.set_runtime(db, COLLECTION_START, start)
-        seen = set()
+        by_ticker = {}
         for r in rows:
-            if r["ticker"] in seen:  # UNIQUE(scan_log_id, ticker): 같은 종목의 첫 행만
-                continue
-            seen.add(r["ticker"])
+            by_ticker.setdefault(r["ticker"], []).append(r)
+        kept = []
+        for ticker, group in by_ticker.items():
+            # UNIQUE(scan_log_id, ticker): strict 통과 행 우선, 그다음 가장 낮은 id. 나머지는 이벤트로 남긴다.
+            best = min(group, key=lambda x: (x["strict"] != 1, x["id"]))
+            kept.append(best)
+            if len(group) > 1:
+                Store.event(db, "WARN", "DUPLICATE_TICKER_ROWS", now, scan_log_id=log_id, ticker=ticker,
+                            kept_id=best["id"], dropped_ids=sorted(x["id"] for x in group if x is not best))
+        kept.sort(key=lambda x: x["id"])
+        for r in kept:
             key = signal_key(r["ticker"], r["signal_type"], r["signal_date"])
             fd = r["first_detected_at"]
             is_first = 1 if fd is not None and _ny_date(fd) == day else 0
