@@ -230,6 +230,7 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
         scan_bucket = CAL.bucket_day(log.started_at, settings)
         trig = getattr(log, "triggered_by", None)
         commit, thash, lhash, now = scanner_commit(), threshold_hash(), _logic_hash(), time.time()
+        refreeze_blocked = None
         with tx(db):
             if abandoned:
                 # 중단 후보 선정 뒤 기록 직전에 원본이 끝났으면 ABANDONED 로 저장하지 않는다 (다음 보충 수집이 정상 처리)
@@ -309,8 +310,13 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
             frozen_now = False
             if (frozen is None and status == "DONE" and complete and not intraday and dayk
                     and trig == S.REGULAR_SCAN_TRIGGER and not after_cutoff):
-                freeze_decision(db, dayk, scan_log_id, source, settings, lhash, now)
-                frozen_now = True
+                from trading.auto_buy.shadow import integrity as IG
+                missing = IG.day_record_issues(db, dayk)
+                if missing:      # 이미 처리된 거래일의 결정 입력 소실 — 다시 동결하지 않는다 (수집 기록만 남김)
+                    refreeze_blocked = IG.SignalSetIntegrityError(dayk, scan_log_id, missing, "freeze")
+                else:
+                    freeze_decision(db, dayk, scan_log_id, source, settings, lhash, now)
+                    frozen_now = True
             if late:
                 decided = set()
                 if frozen["decision_scan_log_id"] is not None:
@@ -332,9 +338,12 @@ def _capture(db, scan_log_id, source, settings, session_factory, later_scan_exis
             if not complete:
                 event(db, "WARN", "capture_incomplete", f"scan_log_id={scan_log_id} 스냅샷 불완전 ({status}, {recover})",
                       source=source, status=status, recoverability=recover, affected_rows=len(rows))
+        if refreeze_blocked is not None:
+            from trading.auto_buy.shadow import integrity as IG
+            IG.record_failure(db, refreeze_blocked)
         return {"scan_log_id": scan_log_id, "rows": len(rows), "strict_rows": strict_rows, "complete": complete,
                 "status": status, "trading_day": dayk, "intraday": intraday, "late": bool(late),
-                "frozen": frozen_now}
+                "frozen": frozen_now, "refreeze_blocked": refreeze_blocked is not None}
     finally:
         session.close()
 

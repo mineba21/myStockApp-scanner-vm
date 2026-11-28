@@ -22,7 +22,7 @@ from trading.auto_buy.shadow import integrity as IG
 from trading.auto_buy.shadow import report as RP
 from trading.auto_buy.shadow import snapshot as SN
 from trading.auto_buy.shadow.journal_migrations import ddl_v7
-from trading.auto_buy.shadow.store import connect_rw, tx
+from trading.auto_buy.shadow.store import connect_rw, set_runtime, tx
 
 PROTECT = ("contract set", "contract relation", "contract insert")
 
@@ -420,12 +420,12 @@ def test_contaminated_journal_replay_fails_and_current_is_preserved(shadow, prod
     where = json.loads(one(shadow, "SELECT details FROM ab_events WHERE kind='signal_set_integrity'")["details"])["where"]
     if how == "extra_member":       # 판정 미기록 구성원 → 적격 판정 기록 전 검증이 먼저 막는다 (재계산 run 을 만들기 전)
         assert where == "record_eligibility" and "FAILED" not in runs.values()
-    else:                           # 재계산 run 의 동결 입력 검증에서 막힘 → 실패 이력
-        assert where == "build_inputs" and "FAILED" in runs.values()
+    else:                           # replay 시작 검증(head 1906a3f P1: parent 거래일 전체)이 run 을 만들기 전에 막는다
+        assert where == "replay_start" and "FAILED" not in runs.values()
     after = {t: [r for r in v if r.get("run_id", cur) == cur] for t, v in ledger(shadow).items() if t != "ab_runs"}
     assert after["ab_orders"] == before["ab_orders"] and after["ab_daily"] == before["ab_daily"]
     kinds = [r["kind"] for r in q(shadow, "SELECT kind FROM ab_events WHERE severity='ERROR'")]
-    assert "signal_set_integrity" in kinds and ("replay_failed" in kinds) == (how != "extra_member")
+    assert "signal_set_integrity" in kinds and "replay_failed" not in kinds
 
 
 def test_contamination_between_build_and_current_switch_is_caught_by_final_check(shadow, prod, monkeypatch):
@@ -470,6 +470,10 @@ def test_candidates_changed_after_verification_are_rejected_in_account_transacti
         assert db.execute("SELECT COUNT(*) FROM ab_orders").fetchone()[0] == orders
         assert db.execute("SELECT COUNT(*) FROM ab_daily WHERE day=?", (D1,)).fetchone()[0] == 0
         forged = EN.DayInputs(**{**inp.__dict__, "cands": {"B00": [{"scan_log_id": sid + 1, "id": 1}], "B01": []}})
+        with pytest.raises(IG.IntegrityDayBlocked):          # CURRENT 거래일 격리 이후에는 계좌 트랜잭션이 먼저 막는다
+            EN.process_account_day(db, run, S.account_ids()[0][0], forged, shadow)
+        with tx(db):                                         # (운영자 해제를 가정) 격리와 별개로 위조 후보 검사도 확인
+            set_runtime(db, IG.DAY_BLOCK_KEY, None)
         with pytest.raises(IG.SignalSetIntegrityError):
             EN.process_account_day(db, run, S.account_ids()[0][0], forged, shadow)
     finally:

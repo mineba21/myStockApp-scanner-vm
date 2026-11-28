@@ -224,7 +224,9 @@ def test_quarantined_day_blocks_new_days_and_is_excluded_from_performance(shadow
     finally:
         db.close()
     assert sv["integrity_day_block"] == 1 and sv["current_unresolved"]["integrity_day_block"] == 1 and not sv["pass"]
-    assert m["days"] == 0 and m["equity"] is None                             # 격리된 날은 정상 성과에서 제외
+    # 격리 중 성과 보류 (head 1906a3f P2-3): 성과 값은 NULL, 원본 수는 진단용으로만
+    assert m["performance_status"] == "UNAVAILABLE" and m["days"] is None and m["equity"] is None
+    assert m["diagnostic_raw"]["daily_rows"] == 1
 
 
 # ── Migration 경로 ───────────────────────────────────────────────────────────

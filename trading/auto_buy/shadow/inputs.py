@@ -117,6 +117,17 @@ def freeze_no_decision(db, day: str, reason: str, settings=None) -> None:
     with tx(db):
         if day_input(db, day):
             return
+        missing = IG.day_record_issues(db, day)
+        if missing:      # 이미 처리된 거래일의 입력 소실: NO_DECISION_SCAN 으로 새로 만들지 않는다 (트랜잭션 밖에서 감사·격리)
+            err = IG.SignalSetIntegrityError(day, None, missing, "freeze_no_decision")
+        else:
+            err = None
+    if err is not None:
+        IG.record_failure(db, err)
+        raise err
+    with tx(db):
+        if day_input(db, day) or IG.day_record_issues(db, day):
+            return
         db.execute("INSERT INTO ab_day_inputs(day, decision_status, decision_scan_log_id, frozen_at, frozen_by, "
                    "signal_set_hash, strategy_version, config_hash, logic_hash) VALUES (?,?,NULL,?,?,NULL,?,?,?)",
                    (day, "NO_DECISION_SCAN", time.time(), "JOB_CUTOFF", S.STRATEGY_VERSION, S.config_hash(settings),
@@ -301,7 +312,9 @@ def required_tickers(db, run_id: int, day: str) -> list:
 
 def _read_inputs(db, day: str):
     row = day_input(db, day)
-    IG.verify_decision_set(db, day, "build_inputs")      # 공통 동결 입력 무결성 검증
+    IG.verify_decision_set(db, day, "build_inputs")      # 공통 동결 입력 무결성 검증 (기존 거래일 입력 소실·불일치 포함)
+    if row is None:      # 신규 거래일·결정 입력 미확정: NO_DECISION_SCAN 으로 보지 않고 처리하지 않는다
+        raise RuntimeError(f"{day} 결정 입력 미확정 (신규 거래일) — 결정 스캔 확정 또는 NO_DECISION_SCAN 기록 전에는 처리하지 않음")
     fp = IG.fingerprint(db, day)
     scan_id = row["decision_scan_log_id"] if row else None
     pending = EN.eligibility_pending(db, scan_id)
@@ -815,8 +828,15 @@ def replay(db, provider: Callable, reason: str, settings=None, *, expected_paren
     - ``expected_generation`` 이 이미 처리된 세대 이하면 만들지 않는다 (``ALREADY_APPLIED``).
     - ``expected_parent`` 가 현재 CURRENT 와 다르면 만들지 않는다 (``PARENT_CHANGED``, 요청은 남김).
     - 완료 시 시작할 때 본 세대까지만 처리로 기록한다. 도중에 들어온 새 요청(더 높은 세대)은 남겨 다음 job 이 다시 계산한다.
-    - 실패·중단이면 요청을 지우지 않으므로 다음 시도가 다시 계산한다 (기존 CURRENT 유지)."""
+    - 실패·중단이면 요청을 지우지 않으므로 다음 시도가 다시 계산한다 (기존 CURRENT 유지).
+
+    무결성 (head 1906a3f): 거래일 격리 표시가 있으면 실행권 획득 전·획득 트랜잭션에서 멈춘다 (run 생성 없음). 실행권 트랜잭션
+    안에서 parent 의 모든 거래일·결정 상태를 실제 결정 입력과 대조한 뒤에만 run 을 만든다 (``replay_start``). CURRENT 전환
+    트랜잭션은 격리 표시, parent·신규 run 의 거래일 기록 = 시작 때 본 parent 기대값, 거래일별 결정 입력을 다시 확인한다."""
+    IG.check_day_block(db, "replay_before_lease")
+    start_err = None
     with tx(db):
+        IG.check_day_block(db, "replay_lease")       # 실행권 획득과 같은 트랜잭션 (격리 기록과 직렬화)
         lease = get_runtime(db, "replay_in_progress")
         c = classify_lease(lease)
         if c["state"] in LEASE_BLOCKING and db.execute("SELECT 1 FROM ab_runs WHERE run_id=? AND status='BUILDING'",
@@ -836,11 +856,24 @@ def replay(db, provider: Callable, reason: str, settings=None, *, expected_paren
         if skip:
             return {"run": None, "parent": parent, "skipped": skip, "done_generation": done}
         gen = int(need.get("generation") or 0)
-        days = [r[0] for r in db.execute("SELECT day FROM ab_days WHERE run_id=? ORDER BY day", (parent,))]
-        run = EN.create_run(db, reason, parent, "BUILDING", settings)
-        now = _now()
-        set_runtime(db, "replay_in_progress", {"run_id": run, "reason": reason, "at": now, "heartbeat_at": now,
-                                               "generation": gen, "parent": parent, **_owner()})
+        parent_days = {r[0]: r[1] for r in db.execute("SELECT day, decision_status FROM ab_days WHERE run_id=? "
+                                                      "ORDER BY day", (parent,))}
+        days = sorted(parent_days)
+        for d in days:           # replay 시작: parent 의 기대 거래일·결정 상태 = 실제 결정 입력 (run 을 만들기 전)
+            issues = IG.decision_set_issues(db, d)
+            if issues:
+                row = day_input(db, d)
+                start_err = IG.SignalSetIntegrityError(d, row["decision_scan_log_id"] if row else None, issues,
+                                                       "replay_start")
+                break
+        if start_err is None:
+            run = EN.create_run(db, reason, parent, "BUILDING", settings)
+            now = _now()
+            set_runtime(db, "replay_in_progress", {"run_id": run, "reason": reason, "at": now, "heartbeat_at": now,
+                                                   "generation": gen, "parent": parent, **_owner()})
+    if start_err is not None:            # run·실행권 없음, 재계산 요청 보존, 감사 기록·격리
+        IG.record_failure(db, start_err, parent)
+        raise start_err
     beat = lambda: _heartbeat(db, run)  # noqa: E731
     try:
         for d in days:
@@ -863,7 +896,17 @@ def replay(db, provider: Callable, reason: str, settings=None, *, expected_paren
         with tx(db):
             if not _owns(db, run):               # 교체 직전 실행권 재확인 (같은 트랜잭션에서 원자적 전환)
                 raise ReplayLeaseLost(f"재계산 run #{run} 실행권을 잃어 CURRENT 로 바꾸지 않습니다")
-            for d in days:                       # CURRENT 전환 전 최종 검증: 처리한 모든 거래일의 동결 입력
+            IG.check_day_block(db, "replay_current_switch")      # 다른 연결의 격리와 같은 쓰기 트랜잭션으로 직렬화
+            # parent·신규 run 의 거래일 기록 = 시작 때 본 parent 기대 거래일·결정 상태
+            now_parent = {r[0]: r[1] for r in db.execute("SELECT day, decision_status FROM ab_days WHERE run_id=?",
+                                                         (parent,))}
+            built = {r[0]: r[1] for r in db.execute("SELECT day, decision_status FROM ab_days WHERE run_id=?", (run,))}
+            if now_parent != parent_days or built != parent_days:
+                diff_days = sorted(set(parent_days) ^ set(built) | {d for d in parent_days if built.get(d) !=
+                                                                    parent_days[d] or now_parent.get(d) != parent_days[d]})
+                raise IG.SignalSetIntegrityError(diff_days[0] if diff_days else None, None,
+                                                 [f"DAY_SET_MISMATCH:{diff_days[:10]}"], "replay_current_switch")
+            for d in days:                       # CURRENT 전환 전 최종 검증: 처리한 모든 거래일의 결정 입력·동결 입력
                 IG.verify_decision_set(db, d, "replay_current_switch")
             db.execute("UPDATE ab_runs SET status='SUPERSEDED' WHERE run_id=?", (parent,))
             db.execute("UPDATE ab_runs SET status='CURRENT', completed_at=?, through_day=?, summary=? WHERE run_id=?",

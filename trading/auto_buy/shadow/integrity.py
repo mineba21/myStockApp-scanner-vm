@@ -14,6 +14,10 @@ FROZEN 거래일 검증 항목 (하나라도 다르면 오류 — 다시 계산�
   과거 버전만 남은 사용된 날은 오류다
 - 저장된 적격 판정(현재 전략 버전) = 같은 스냅샷으로 다시 계산한 판정
 - 계좌별 처리·일 기록 트랜잭션 안에서 위 전체를 다시 검증하고 실제 재계산 지문·후보 행 내용을 대조 (head d95beab P2-2)
+- 결정 입력 ↔ 기존 처리 기록: 입력 행이 없다는 이유만으로 NO_DECISION_SCAN 으로 보지 않는다. 처리 기록이 있는 거래일의 입력
+  소실·상태 불일치는 오류이며 거래일을 격리한다 (``day_record_issues``, head 1906a3f P1)
+- 거래일 격리 표시는 job 시작·replay 실행권 획득 전후·계좌별 처리·거래일 확정·CURRENT 전환 트랜잭션에서 확인한다
+  (``check_day_block``, head 1906a3f P2). 자동 해제·덮어쓰기 없음
 
 불일치 시: 신규 가상 주문을 만들지 않고 처리를 멈춘다. 기존 CURRENT·원장은 그대로 두고 새 CURRENT 로 바꾸지 않는다.
 ERROR 이벤트 ``signal_set_integrity`` 와 runtime ``signal_set_integrity`` (MONITOR 표시·S5 안전 위반)를 남긴다.
@@ -145,18 +149,74 @@ def eligibility_state(db, scan_log_id, day_row) -> tuple:
     return issues, 0
 
 
-def decision_set_issues(db, day) -> list:
-    """FROZEN 거래일의 전체 무결성 오류 목록 (수집·봉인·건수·소속·row_sha256·원본↔정규화·v1·SSV2·적격 판정 완전성·내용).
-    적격 판정이 정상 미완료(pending)인 것은 오류가 아니다 (``eligibility_pending`` 이 따로 센다)."""
-    row = db.execute("SELECT * FROM ab_day_inputs WHERE day=?", (day,)).fetchone()
+def day_records(db, day) -> dict:
+    """그 거래일을 이미 처리한 기록 (run 상태·전략 버전 무관): 일 기록(ab_days), 일 기록 없는 계좌 기록(ab_daily, 일부 계좌만
+    처리된 날), 매수 판단(ab_decisions)이 참조한 스냅샷의 결정 스캔."""
+    days = db.execute("SELECT d.run_id, d.decision_status, d.candidates, r.status, r.strategy_version FROM ab_days d "
+                      "JOIN ab_runs r ON r.run_id=d.run_id WHERE d.day=? ORDER BY d.run_id", (day,)).fetchall()
+    partial = [r[0] for r in db.execute(
+        "SELECT DISTINCT a.run_id FROM ab_daily a WHERE a.day=? AND NOT EXISTS "
+        "(SELECT 1 FROM ab_days d WHERE d.run_id=a.run_id AND d.day=a.day) ORDER BY a.run_id", (day,))]
+    scans = sorted({r[0] for r in db.execute(
+        "SELECT DISTINCT s.scan_log_id FROM ab_decisions x JOIN ab_signal_snapshots s ON s.id=x.snapshot_id "
+        "WHERE x.day=?", (day,))})
+    return {"days": days, "partial_runs": partial, "decision_scans": scans,
+            "any": bool(days or partial or scans)}
+
+
+def day_record_issues(db, day, row=None) -> list:
+    """결정 입력(ab_day_inputs) 상태와 그 거래일의 기존 처리 기록 대조 (Codex 재리뷰 head 1906a3f P1).
+
+    구분: (a) 신규 거래일·결정 입력 미확정 = 입력 행 없음 + 처리 기록 없음 → 오류 아님 (처리하지 않고 대기),
+    (b) 명시적 NO_DECISION_SCAN = 입력 행이 NO_DECISION_SCAN, (c) 기존 거래일의 입력 소실 = 입력 행 없음 + 처리 기록 있음
+    → ``DAY_INPUT_MISSING`` (기록이 FROZEN 이든 NO_DECISION_SCAN 이든), (d) 상태 불일치 = 기존 일 기록의 decision_status ≠
+    입력 상태, 판단이 참조한 결정 스캔 ≠ 입력의 결정 스캔, 현재 버전 일 기록의 후보 수 ≠ 입력의 B00 적격 수.
+    누락된 입력을 NO_DECISION_SCAN 으로 만들거나 다시 동결하지 않는다."""
+    row = row if row is not None else db.execute("SELECT * FROM ab_day_inputs WHERE day=?", (day,)).fetchone()
+    rec = day_records(db, day)
     if row is None:
-        return []
+        if not rec["any"]:
+            return []
+        st = sorted({r["decision_status"] for r in rec["days"]})
+        return [f"DAY_INPUT_MISSING:recorded={st or ['PARTIAL']}:runs={[r['run_id'] for r in rec['days']][:10]}"
+                f":partial={rec['partial_runs'][:10]}"]
+    out = []
+    bad = [f"{r['run_id']}:{r['decision_status']}" for r in rec["days"] if r["decision_status"] != row["decision_status"]]
+    if bad:
+        out.append(f"DAY_RECORD_STATUS_MISMATCH:input={row['decision_status']}:records={bad[:10]}")
+    want = {row["decision_scan_log_id"]} if row["decision_status"] == "FROZEN" else set()
+    if not set(rec["decision_scans"]) <= want:
+        out.append(f"DAY_RECORD_SCAN_MISMATCH:input={row['decision_scan_log_id']}:decisions={rec['decision_scans'][:10]}")
+    if row["decision_status"] == "FROZEN":
+        n = db.execute("SELECT COUNT(*) FROM ab_eligibility e JOIN ab_signal_snapshots s ON s.id=e.snapshot_id "
+                       "WHERE s.scan_log_id=? AND e.pool='B00' AND e.eligible=1 AND e.strategy_version=?",
+                       (row["decision_scan_log_id"], S.STRATEGY_VERSION)).fetchone()[0]
+    else:
+        n = 0
+    cand = [f"{r['run_id']}:{r['candidates']}" for r in rec["days"]
+            if r["strategy_version"] == S.STRATEGY_VERSION and r["candidates"] != n]
+    if cand:
+        out.append(f"DAY_RECORD_CANDIDATES_MISMATCH:input_b00={n}:records={cand[:10]}")
+    return out
+
+
+DAY_INPUT_ISSUES = ("DAY_INPUT_", "DAY_RECORD_", "DAY_SET_")
+
+
+def decision_set_issues(db, day) -> list:
+    """거래일의 전체 무결성 오류 목록: 결정 입력 ↔ 기존 처리 기록(``day_record_issues``), FROZEN 이면 수집·봉인·건수·소속·
+    row_sha256·원본↔정규화·v1·SSV2·적격 판정 완전성·내용. 신규 거래일의 결정 입력 미확정과 적격 판정 정상 미완료(pending)는
+    오류가 아니다."""
+    row = db.execute("SELECT * FROM ab_day_inputs WHERE day=?", (day,)).fetchone()
+    out = day_record_issues(db, day, row)
+    if row is None:
+        return out
     if row["decision_status"] != "FROZEN":
         if row["decision_scan_log_id"] is not None or row["signal_set_hash"] is not None:
-            return ["NO_DECISION_WITH_SCAN"]
-        return []
+            out.append("NO_DECISION_WITH_SCAN")
+        return out
     sid = row["decision_scan_log_id"]
-    out = scan_set_issues(db, sid, day)
+    out += scan_set_issues(db, sid, day)
     if ddl_v7.signal_set_hash_v1(db, sid) != row["signal_set_hash"]:
         out.append("V1_HASH_MISMATCH")
     out += eligibility_state(db, sid, row)[0]
@@ -205,6 +265,7 @@ def check_inputs_current(db, inp, where: str) -> None:
     - build_inputs 이후 후보 집합(행 내용 전체)이 바뀌지 않았는지, 후보가 모두 그날 결정 스캔 구성원인지
     이 트랜잭션이 커밋될 때까지 다른 연결은 쓸 수 없으므로 검증과 계좌 원장 쓰기 사이에 경쟁이 없다."""
     from trading.auto_buy.shadow import engine as EN
+    check_day_block(db, where)                # 다른 연결이 격리했으면 이 트랜잭션에서 쓰지 않는다
     issues, found = [], list(decision_set_issues(db, inp.day))
     fp = fingerprint(db, inp.day)
     if fp != getattr(inp, "set_fingerprint", None):
@@ -238,9 +299,57 @@ def record_failure(db, exc: SignalSetIntegrityError, run: Optional[int] = None) 
                                           "first_at": prev.get("first_at") if same else time.time(),
                                           "repeats": int(prev.get("repeats") or 0) + 1 if same else 1,
                                           "message": str(exc)[:300]})
+            if any(x.startswith(DAY_INPUT_ISSUES) for x in exc.issues):
+                # 결정 입력 소실·불일치: 거래일 격리 (CURRENT 기준, 운영자 확인 전까지 판단·replay 차단)
+                cur = db.execute("SELECT run_id FROM ab_runs WHERE status='CURRENT'").fetchone()
+                _set_block(db, cur[0] if cur else run, exc.day, exc)
         exc.recorded = True
     except Exception:
         pass
+
+
+class IntegrityDayBlocked(RuntimeError):
+    """격리된 거래일이 있어(runtime ``integrity_day_block``) 자동매수 판단·replay·CURRENT 전환을 하지 않는다."""
+
+
+def day_block(db) -> Optional[dict]:
+    return get_runtime(db, DAY_BLOCK_KEY)
+
+
+def check_day_block(db, where: str) -> None:
+    """격리 표시가 있으면 중단한다. 쓰기 트랜잭션 안에서 부르면 격리 기록(같은 DB 의 BEGIN IMMEDIATE)과 직렬화된다."""
+    blk = day_block(db)
+    if blk:
+        raise IntegrityDayBlocked(f"거래일 격리 중 ({where}): {blk.get('day')} run #{blk.get('run')} — 운영자 확인 전까지 "
+                                  f"자동매수 판단·replay·CURRENT 전환 차단")
+
+
+def _set_block(db, run, day, exc: SignalSetIntegrityError, accounts=None) -> dict:
+    """격리 표시 기록 (호출 측 쓰기 트랜잭션 안). 기존 표시를 지우거나 다른 run·거래일로 덮어쓰지 않는다: 같은 run·거래일이면
+    반복 횟수·커밋된 계좌만 갱신하고, 다른 run·거래일이면 원래 표시를 유지한 채 ``also`` 에 덧붙인다."""
+    prev = get_runtime(db, DAY_BLOCK_KEY)
+    now = time.time()
+    if prev and prev.get("run") == run and prev.get("day") == day:
+        info = {**prev, "repeats": int(prev.get("repeats") or 1) + 1, "last_at": now}
+        if accounts is not None:
+            info["accounts_committed"] = accounts
+    elif prev:
+        also = list(prev.get("also") or [])
+        new = {"run": run, "day": day, "where": exc.where, "issues": exc.issues[:5], "at": now}
+        if not any(a.get("run") == run and a.get("day") == day for a in also):
+            also = (also + [new])[-20:]
+            event(db, "ERROR", "integrity_day_block", f"{day} run #{run} 추가 격리 (기존 격리 {prev.get('day')} run "
+                  f"#{prev.get('run')} 유지)", run=run, day=day, issues=exc.issues[:10], where=exc.where)
+        info = {**prev, "also": also, "last_at": now}
+    else:
+        info = {"run": run, "day": day, "scan_log_id": exc.scan_log_id, "where": exc.where,
+                "issues": exc.issues[:10], "accounts_committed": accounts or [], "at": now, "repeats": 1,
+                "policy": "커밋된 계좌 기록 보존(삭제 없음), 그날 ab_days 미기록(COMPLETE 아님), 자동매수 판단·replay·"
+                          "CURRENT 전환·성과 평가 보류, 운영자 확인 후 수동 해제 (자동 해제·덮어쓰기 없음)"}
+        event(db, "ERROR", "integrity_day_block", f"{day} run #{run} 무결성 오류로 거래일 격리 — 기록 보존, 신규 판단·"
+              f"replay 차단", run=run, day=day, accounts=(accounts or [])[:50], issues=exc.issues[:10], where=exc.where)
+    set_runtime(db, DAY_BLOCK_KEY, info)
+    return info
 
 
 def quarantine_day(db, run, day, exc: SignalSetIntegrityError) -> Optional[dict]:
@@ -248,9 +357,11 @@ def quarantine_day(db, run, day, exc: SignalSetIntegrityError) -> Optional[dict]
 
     계좌 하루 처리는 계좌별 트랜잭션이다. 오류가 난 계좌는 롤백되지만 앞서 커밋된 계좌의 기록은 그대로 남는다
     (이미 커밋된 감사 원장·계좌 기록을 삭제해 복구하지 않는다). 그날은 ``ab_days`` 가 기록되지 않아 COMPLETE 가 아니며:
-    - CURRENT run: runtime ``integrity_day_block`` (run·거래일·커밋된 계좌)을 남긴다. job 은 이 표시가 있는 동안 신규 거래일
-      처리·재계산을 하지 않는다 (자동 해제 없음, 운영자 확인 후 수동 해제). 보고서는 그날 기록을 정상 성과에서 뺀다.
-    - BUILDING run(재계산): replay 가 그 run 을 FAILED 로 남기고 기존 CURRENT 를 유지한다 (정상 승격 차단). 표시는 남기지 않는다.
+    - CURRENT run: runtime ``integrity_day_block`` (run·거래일·커밋된 계좌)을 남긴다. 이 표시가 있는 동안 job 시작·replay
+      실행권 획득 전후·계좌별 처리·거래일 확정·CURRENT 전환 트랜잭션이 모두 멈춘다 (자동 해제 없음, 운영자 확인 후 수동 해제).
+      보고서는 성과를 보류(UNAVAILABLE)한다.
+    - BUILDING run(재계산): replay 가 그 run 을 FAILED 로 남기고 기존 CURRENT 를 유지한다 (정상 승격 차단).
+      결정 입력 소실·불일치(``DAY_INPUT_*``)는 ``record_failure`` 가 CURRENT 기준으로 격리한다.
     반환: 기록한 표시 (CURRENT 가 아니면 None)."""
     try:
         with tx(db):
@@ -259,19 +370,6 @@ def quarantine_day(db, run, day, exc: SignalSetIntegrityError) -> Optional[dict]
                 return None
             accts = [r[0] for r in db.execute("SELECT account_id FROM ab_daily WHERE run_id=? AND day=? ORDER BY rowid",
                                               (run, day))]
-            prev = get_runtime(db, DAY_BLOCK_KEY)
-            if prev and prev.get("run") == run and prev.get("day") == day:
-                info = {**prev, "accounts_committed": accts, "repeats": int(prev.get("repeats") or 1) + 1,
-                        "last_at": time.time()}
-            else:
-                info = {"run": run, "day": day, "scan_log_id": exc.scan_log_id, "where": exc.where,
-                        "issues": exc.issues[:10], "accounts_committed": accts, "at": time.time(), "repeats": 1,
-                        "policy": "커밋된 계좌 기록 보존(삭제 없음), 그날 ab_days 미기록(COMPLETE 아님), 신규 거래일·재계산 "
-                                  "차단, 운영자 확인 후 수동 해제"}
-                event(db, "ERROR", "integrity_day_block", f"{day} run #{run} 계좌 처리 중 무결성 오류 — 커밋된 계좌 "
-                      f"{len(accts)}개 보존, 그날 미완료 격리·신규 판단 차단", run=run, day=day, accounts=accts[:50],
-                      issues=exc.issues[:10], where=exc.where)
-            set_runtime(db, DAY_BLOCK_KEY, info)
-        return info
+            return _set_block(db, run, day, exc, accts)
     except Exception:
         return None

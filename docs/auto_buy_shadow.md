@@ -9,6 +9,7 @@
 같은 날 Codex 독립 재리뷰(head 36e5d2f, P1 3건·P2 2건)를 테이블별 데이터 불변성 계약으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)').
 2026-11-28 Codex 재리뷰(head a183b99, FAIL: P1 1건·P2 2건·검증 데이터)를 신호 집합·관계 단위 계약(`ab0007`)과 엔진 공통 무결성 검증으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-28, head a183b99)'). SHADOW 활성화는 계속 보류다.
 같은 날 Codex 독립 재리뷰(head d95beab, FAIL: P1 1건·P2 2건)를 적격 판정 집합 완전성, 계좌별 쓰기 트랜잭션 안의 전체 재검증, 원본 row_json ↔ 정규화 필드 계약으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-28, head d95beab)'). 스키마 변경은 없다 (새 리비전 없음). SHADOW 활성화는 계속 보류다.
+같은 날 Codex 독립 재리뷰(head 1906a3f, FAIL: P1 1건·P2 2건)를 결정 입력 상태 구분, 격리 상태의 트랜잭션 단위 확인, 격리·부분 처리 중 성과 보류로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-28, head 1906a3f)'). 새 Migration 은 없다. SHADOW 활성화는 계속 보류다.
 - **승인 범위:** 로컬 구현·테스트 (사용자 승인: P7/P8 검토 후 I1~I7 SHADOW 구현, 이후 P1·P2 정합성 보완), feature branch `feature/auto-buy-shadow` 커밋·Push·Draft PR.
 - **아직 하지 않은 것:** main 병합, VM 배포, 저널 Migration 실행. Codex 재리뷰를 통과하기 전에는 기본 OFF 배포도, SHADOW 활성화도 하지 않는다.
 - **판정은 그대로 유지한다.**
@@ -18,6 +19,104 @@
 - **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26, 동결) + `ab0004`(종료 run 원장·감사 이력 불변성, 2026-11-27, 동결) + `ab0005`(충돌 교체 차단·남은 감사 자료 불변, 2026-11-27, 동결) + `ab0006`(테이블별 데이터 불변성 계약, 2026-11-27, 동결) + `ab0007`(신호 집합·관계 단위 계약과 수집 봉인, 2026-11-28). 최종 목표 리비전은 `ab0007`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
   - 확인(2026-11-25): Git 이력에 `trading/auto_buy` 커밋 없음(원격도 main 뿐), 로컬 `.env` 저널 경로 미설정, 프로젝트 내 SQLite 에 `ab_alembic_version` 없음. 이전 `ab0001` 이 적용된 파일은 개발 세션 임시 폴더의 데모·벤치 파일뿐이다. 운영 VM 은 Git 으로만 배포되고 이 코드가 Push 된 적이 없어 적용 이력이 없다 (VM 에 접속해 확인하지는 않았다).
   - 이 브랜치가 커밋·Push 된 이후에는 `ab0001` 을 바꾸지 않고 새 리비전으로만 바꾼다.
+
+## Codex 재리뷰 반영 (PR #14, 2026-11-28, head 1906a3f)
+
+판정: FAIL (신규 P1 1건·P2 2건). 범위는 이 세 결함과 직접 관련된 회귀 검증으로 제한했다. 범용 무결성 프레임워크, 자동 복구, 투자 전략·리스크 정책·UI 변경은 하지 않았다. 스키마 변경이 필요 없어 새 Migration 은 없다 (기존 표와 runtime 상태만 사용).
+
+공통 정책: 무결성 오류가 나면 자동매수 판단·replay·성과 평가를 멈추고 기존 기록을 보존한다. 자동 복구는 없고, 운영자 확인 전까지 차단한다.
+
+### 1906a3f 에서 막히지 않던 것
+
+- **P1 결정 입력 누락:** `decision_set_issues` 는 `ab_day_inputs` 행이 없으면 빈 목록을, `build_inputs` 는 `NO_DECISION_SCAN` 을 돌려줬다. 기존 FROZEN 거래일의 입력 행이 사라지면 replay 가 그날을 후보 없는 날로 다시 계산했고, 기존 가상 주문이 빠진 새 run 이 CURRENT 로 승격됐다. CURRENT 전환 직전 검증도 같은 이유로 통과했다.
+- **P2 격리 경쟁:** `integrity_day_block` 은 job 시작 때만 확인했다. 이미 시작된 replay 는 다른 연결이 거래일을 격리해도 계속 계산하고 CURRENT 로 전환했다. 다른 job 의 신규 거래일 처리도 나머지 계좌를 계속 처리했다.
+- **P2 성과 집계:** `account_metrics` 는 `ab_daily` 만 일 기록이 있는 날로 거르고 주문·포지션·판단은 run 전체를 셌다. 일부 계좌만 커밋된 날에 `days=0, orders>0` 같은 값이 정상 성과처럼 표시됐다.
+
+### 1. 결정 입력 상태 구분 (`integrity.day_record_issues`)
+
+| 상태 | 판단 근거 | 처리 |
+|---|---|---|
+| 신규 거래일, 결정 입력 미확정 | 입력 행 없음 + 그 거래일 처리 기록 없음 | 오류 아님. 처리하지 않고 대기 (`build_inputs` 는 `NO_DECISION_SCAN` 으로 보지 않고 멈춤) |
+| 명시적 NO_DECISION_SCAN | 입력 행 = `NO_DECISION_SCAN` | 정상 (후보 없음) |
+| 기존 거래일 입력 소실 | 입력 행 없음 + 처리 기록 있음 (FROZEN 이든 NO_DECISION_SCAN 이든) | 오류 `DAY_INPUT_MISSING` |
+| 기존 기록과 입력 불일치 | 일 기록 `ab_days.decision_status` ≠ 입력 상태, 판단이 참조한 결정 스캔 ≠ 입력의 결정 스캔, 현재 버전 일 기록의 후보 수 ≠ 입력의 B00 적격 수 | 오류 `DAY_RECORD_STATUS_MISMATCH`·`DAY_RECORD_SCAN_MISMATCH`·`DAY_RECORD_CANDIDATES_MISMATCH` |
+
+- **'처리 기록'** = 어떤 run(상태·버전 무관)이든 그날 `ab_days`, 일 기록 없는 `ab_daily`(일부 계좌만 처리된 날), 그날 `ab_decisions` 중 하나.
+- **'기존 입력 지문'**: `ab_days` 에는 결정 스캔 ID·해시가 없다. 대신 판단이 참조한 스냅샷의 결정 스캔과 기록된 후보 수(B00)를 대조한다.
+- **적용 경로** (모두 `decision_set_issues` 하나):
+  - 신규 거래일 입력 생성: `freeze_no_decision` 은 처리 기록이 있는 날의 입력을 `NO_DECISION_SCAN` 으로 만들지 않는다. 수집 시 동결(`snapshot._capture`)도 같은 날을 다시 동결하지 않는다 (수집 기록만 남기고 `refreeze_blocked`).
+  - 계좌별 거래일 처리·거래일 확정 트랜잭션 (`check_inputs_current`)
+  - 재실행·중단 복구 (`build_inputs`)
+  - replay 시작: 실행권 트랜잭션 안에서 parent run 의 모든 거래일·결정 상태를 검증한 뒤에만 BUILDING run 을 만든다 (`replay_start`)
+  - replay 계산 중 (`build_inputs`·계좌 트랜잭션)
+  - CURRENT 전환 직전: 같은 쓰기 트랜잭션에서 parent·신규 run 의 거래일 기록(거래일 집합·결정 상태)이 시작 때 본 parent 기대값과 같은지(`DAY_SET_MISMATCH`), 각 거래일의 실제 결정 입력과 맞는지 다시 대조
+- **실패 시:** 신규 가상 주문·정상 거래일 확정 없음, 새 CURRENT 없음, 기존 CURRENT·원장 보존, ERROR `signal_set_integrity`, 거래일 격리(`integrity_day_block`, CURRENT 기준), 재계산 요청 보존. replay 시작 단계면 run 자체를 만들지 않고, 계산 중·전환 직전이면 그 run 을 FAILED 로 남긴다.
+- 누락된 과거 입력을 자동으로 `NO_DECISION_SCAN` 으로 만들거나 다시 동결하지 않는다.
+
+### 2. 격리 상태와 replay 경쟁 (`integrity.check_day_block`)
+
+격리 표시를 확인하는 지점:
+
+| 지점 | 트랜잭션 |
+|---|---|
+| job 시작 | (기존) |
+| replay 실행권 획득 전 | — |
+| replay 실행권 획득 | 같은 BEGIN IMMEDIATE |
+| 계좌별 처리 | 계좌 쓰기 트랜잭션 (`check_inputs_current` 첫 단계) |
+| 거래일 최종 확정 (`ab_days`) | 같은 쓰기 트랜잭션 |
+| CURRENT 전환 | 전환 쓰기 트랜잭션 (실행권 재확인 다음) |
+
+- 격리 기록(`_set_block`)도 BEGIN IMMEDIATE 트랜잭션이므로 같은 DB 의 쓰기로 직렬화된다. 전환 트랜잭션이 먼저 커밋되면 격리는 그 뒤의 상태를, 격리가 먼저면 전환이 격리를 본다. 이미 시작된 replay 라도 다른 연결이 격리했다면 다음 계좌·확정·전환 트랜잭션에서 멈춘다 (`IntegrityDayBlocked`).
+- 실패한 BUILDING run 은 기존 정책대로 FAILED (실행권 해제·`replay_failed` 이벤트). 실행권 획득 전·획득 트랜잭션에서 막히면 run 을 만들지 않는다. 재계산 요청·세대·멱등성 정책은 그대로다.
+- **덮어쓰지 않음:** 격리 표시는 자동 해제하지 않는다. 다른 run·거래일의 새 격리는 원래 표시(run·거래일·커밋된 계좌)를 유지한 채 `also` 에 덧붙이고 ERROR 이벤트를 1회 남긴다. 같은 run·거래일이면 반복 횟수만 늘린다.
+- 기존 CURRENT 의 부분 기록(일부 계좌 `ab_daily`)과 격리 정보는 보존한다.
+
+### 3. 격리·부분 처리 중 성과 평가 보류 (`report.performance_hold`)
+
+- **보류 사유:** `INTEGRITY_DAY_BLOCK`(격리 표시), `SIGNAL_SET_INTEGRITY`(무결성 오류 표시), `PARTIAL_DAY`(CURRENT run 에 일 기록 없이 일부 계좌 기록만 있는 거래일).
+- **보류하면:** 누적수익률·MDD·PF·미청산 포함 PF·평균 R·손익·거래 수·체결률·손절률·위험 지표를 NULL 로 돌려준다 (0 아님). B02 분포·B01 백분위·S5 성과 비교·채택 판정(`adoption`)은 `UNAVAILABLE`. 화면의 `pct()` 는 NULL 을 `-` 로 표시한다 (UI 변경 없음).
+- **구분 표시:** `summary.performance` (`status`·`hold_reasons`·`note`), 계좌별 `performance_status`·`performance_hold_reasons`, S5 `performance_status`. 진단용 원본 기록 수는 `diagnostic_raw` 에 따로 둔다. `account_detail` 의 일별·주문·포지션 목록은 유지하되 `records_notice` 로 정상 성과가 아님을 표시한다.
+- **안전 표시는 계속:** S5 안전 위반·격리 이력·`safety_pass=false` 는 그대로 보인다. 성과 보류 중 S5 가 통과하거나 전략이 채택되는 경로는 없다. 판정은 NOT_RECOMMENDED·B01 NEED_MORE_DATA 그대로.
+- **일관된 읽기:** `summary`·`account_detail` 은 한 읽기 트랜잭션(BEGIN, 같은 스냅샷)에서 격리·무결성 표시와 성과 집계를 함께 읽는다. 보고서 생성 중 다른 연결이 격리해도 두 값이 어긋나지 않는다 (격리는 보고서 이후 시점으로 보인다).
+
+### 4. Migration
+
+없음. 기존 `ab_days`·`ab_daily`·`ab_decisions`·`ab_day_inputs` 와 runtime 표시만 쓴다. 공개 Migration·운영 DB Alembic·S01 Migration 은 바꾸지 않았다.
+
+### Runbook 추가
+
+- 결정 입력 소실·불일치로 격리되면: 소실된 거래일의 원래 결정 상태(남아 있는 `ab_days`·`ab_decisions`·수집 기록)를 조사한다. 입력을 손으로 다시 만들지 않는다 (재동결·NO_DECISION 기록 금지). 해제는 운영자 확인 후 runtime 표시를 수동으로 지우는 별도 승인 작업이다.
+- 격리 표시가 이미 있을 때 생긴 추가 격리는 `also` 목록에서 확인한다.
+
+### 수정 전 실패·수정 후 통과 (`tests/test_auto_buy_shadow_review10_repro.py`)
+
+1906a3f 와 현재 코드에 모두 있는 API 만 쓴다. 1906a3f worktree 에서 13 실패 / 1 통과 (실패는 모두 동작 단언, API 부재 없음. 통과 1건은 정상 NO_DECISION·빈 스캔 replay 회귀 확인). 현재 코드에서 14 통과.
+
+| 재현 | 1906a3f | 현재 |
+|---|---|---|
+| 기존 FROZEN 거래일(D1·D2) 입력 행 누락 → replay | 실패 (새 CURRENT 전환) | 통과 (CURRENT·원장·요청 보존, 격리) |
+| 기존 NO_DECISION_SCAN 거래일 입력 누락 | 실패 | 통과 |
+| replay 시작 이후 입력 누락 | 실패 | 통과 |
+| CURRENT 전환 직전 입력 누락 | 실패 | 통과 |
+| 신규 거래일 결정 입력 대기 | 실패 (NO_DECISION 으로 처리) | 통과 (처리 안 함) |
+| 정상 NO_DECISION_SCAN·빈 결정 스캔 replay | 통과 | 통과 |
+| replay 시작 직전 격리 (독립 연결) | 실패 | 통과 |
+| replay 처리 중·마지막 계좌 직후·전환 직전 격리 | 3 실패 | 통과 |
+| 다른 job 의 신규 거래일 처리 중 격리 | 실패 (46 계좌 처리) | 통과 (격리 이후 계좌 기록 없음) |
+| 부분 처리일 성과 | 실패 (정상 표시) | 통과 (UNAVAILABLE) |
+| 격리 중 성과·S5 | 실패 | 통과 |
+
+수정 후 계약 테스트: `tests/test_auto_buy_shadow_review10_contract.py` (상태 구분·불일치, 재동결·NO_DECISION 금지·job 차단, 격리 비덮어쓰기·자동 해제 없음, replay 지점별 예외·run 상태, replay 시작 검증, 성과 보류 구분).
+
+기존 테스트 기대값 변경 (정책 변화, 검사 대상 유지):
+- `review8_signal_set` 오염 replay: 이제 replay 시작 검증이 run 을 만들기 전에 막는다 (`replay_start`, FAILED run 없음).
+- `review8_signal_set` 위조 후보: CURRENT 격리 뒤에는 계좌 트랜잭션이 먼저 막는다. 격리 해제를 가정한 뒤 위조 후보 검사도 계속 확인한다.
+- `review9_contract` 격리 성과: 거르기 대신 보류(UNAVAILABLE) 를 확인한다.
+
+### 테스트 환경
+
+- **프로젝트 지정 환경:** Python 3.11 + `requirements.txt` (pandas<2.0, numpy<2.0). 저장소 문서(`docs/step1_review_checklist.md`)가 `python3.11` 을 지정한다. 실행 환경: Python 3.11.18, pandas 1.5.3, numpy 1.26.4, SQLAlchemy 1.4.54, yfinance 1.8.0.
+- **별도 호환성 환경:** Python 3.12.3 + pandas 2.3.3 + numpy 2.3.5 (그 밖은 `requirements.txt`). Codex 재리뷰 환경과 같은 pandas 계열이다. 운영 호환성 검증으로 보지 않는다. 운영 의존성 버전은 바꾸지 않았다.
 
 ## Codex 재리뷰 반영 (PR #14, 2026-11-28, head d95beab)
 
@@ -1344,6 +1443,7 @@ Current Heat 는 여기에 들어가지 않는다.
    - 적격 판정 완전성·계좌 트랜잭션 재검증·원본 계약(`review9_contract`), 결함 재현(`review9_repro`)이 배포 커밋에서 통과
    - 기존 저널(있다면)의 `--check` 가 원본 계약까지 통과 (`RAW_CONTRACT_FAILED` 아님)
    - S5 `integrity_day_block` = 0, runtime `integrity_day_block` 없음
+   - 결정 입력 상태·격리 경쟁·성과 보류(`review10_contract`), 결함 재현(`review10_repro`)이 배포 커밋에서 통과하고, 보고서 `performance.status` = AVAILABLE
    - P7-OPS 실데이터 대조(로컬 캐시)를 최신 커밋으로 다시 실행해 기준값과 일치하고 `raw_contract_issues` = 0
 3. **⛔ SHADOW 활성화 (승인 후):** `AUTO_BUY_US_MODE=SHADOW` 로 재시작한다. 확인:
    - 스케줄러 job `auto_buy_us_shadow` 등록, S01 job 일정 변화 없음

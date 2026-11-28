@@ -157,7 +157,57 @@ def profit_factor(pnls) -> Optional[float]:
     return gw / gl if gl > 0 else None
 
 
-def account_metrics(db, acc, run) -> dict:
+PERF_FIELDS = ("days", "incomplete_days", "last_day", "equity", "cum_return", "mdd", "closed_trades", "open_positions",
+               "pf", "pf_incl_open", "open_pnl", "realized_pnl", "avg_r_closed", "avg_r_incl_open", "stop_rate", "orders",
+               "order_states", "fill_rate", "entry_heat", "current_heat", "current_heat_level", "sleeve_budget",
+               "sleeve_used", "sleeve_usage", "cash", "reserved", "max_pos_w", "max_sector_w", "data_status",
+               "unresolved_positions", "unresolved_orders", "unresolved_value", "stress_full_loss",
+               "stress_equity_after", "safety_blocks", "account_level", "block_reasons")
+HOLD_NOTE = ("성과 평가 보류: 무결성 오류·거래일 격리·부분 처리 상태에서는 성과 원장의 정합성을 확인할 수 없어 성과 값을 "
+             "계산하지 않는다 (NULL = 확인 불가, 0 아님). 원본 주문·포지션 조회는 진단용이며 정상 성과가 아니다.")
+
+
+def performance_hold(db, run) -> list:
+    """성과 평가를 보류할 사유 (Codex 재리뷰 head 1906a3f P2-3). 빈 목록 = 평가 가능.
+    - INTEGRITY_DAY_BLOCK: 거래일 격리 표시 (자동 해제 없음)
+    - SIGNAL_SET_INTEGRITY: 무결성 오류 표시 (운영자 확인 전)
+    - PARTIAL_DAY: 일 기록(ab_days) 없이 일부 계좌 기록(ab_daily)만 있는 거래일 (중단·격리)
+    호출 측은 같은 읽기 트랜잭션(스냅샷) 안에서 이 함수와 성과 집계를 함께 부른다."""
+    out = []
+    if _rt(db, "integrity_day_block"):
+        out.append("INTEGRITY_DAY_BLOCK")
+    if _rt(db, "signal_set_integrity"):
+        out.append("SIGNAL_SET_INTEGRITY")
+    if run is not None:
+        part = db.execute("SELECT DISTINCT a.day FROM ab_daily a WHERE a.run_id=? AND NOT EXISTS (SELECT 1 FROM ab_days d "
+                          "WHERE d.run_id=a.run_id AND d.day=a.day) ORDER BY a.day LIMIT 10", (run,)).fetchall()
+        if part:
+            out.append(f"PARTIAL_DAY:{[r[0] for r in part]}")
+    return out
+
+
+def _held_metrics(db, acc, run, hold) -> dict:
+    """성과 보류: 성과·위험 값은 NULL, 원본 기록 수는 진단용으로 따로 둔다."""
+    a = (run, acc["id"])
+    one = lambda q: db.execute(q, a).fetchone()[0]  # noqa: E731
+    out = {"id": acc["id"], "profile": acc["profile"], "strategy": acc["strategy"], "seed": acc["seed"],
+           "start_day": acc["start_day"], "initial": None, **{k: None for k in PERF_FIELDS},
+           "r_values_incl_open": [], "performance_status": "UNAVAILABLE", "performance_hold_reasons": hold,
+           "performance_note": HOLD_NOTE}
+    out["diagnostic_raw"] = {
+        "note": "진단용 원본 기록 수 (정상 성과에 포함된 거래가 아님)",
+        "daily_rows": one("SELECT COUNT(*) FROM ab_daily WHERE run_id=? AND account_id=?"),
+        "orders": one("SELECT COUNT(*) FROM ab_orders WHERE run_id=? AND account_id=?"),
+        "positions_open": one("SELECT COUNT(*) FROM ab_positions WHERE run_id=? AND account_id=? AND state='OPEN'"),
+        "positions_closed": one("SELECT COUNT(*) FROM ab_positions WHERE run_id=? AND account_id=? AND state='CLOSED'"),
+        "decisions": one("SELECT COUNT(*) FROM ab_decisions WHERE run_id=? AND account_id=?")}
+    return out
+
+
+def account_metrics(db, acc, run, hold: Optional[list] = None) -> dict:
+    hold = performance_hold(db, run) if hold is None else hold
+    if hold:
+        return _held_metrics(db, acc, run, hold)
     # 일 기록(ab_days)이 있는 거래일만 성과로 쓴다 — 계좌 처리 중 무결성 오류로 격리된 날(일부 계좌만 커밋)은 제외
     daily = db.execute("SELECT * FROM ab_daily WHERE run_id=? AND account_id=? AND day IN "
                        "(SELECT day FROM ab_days WHERE run_id=?) ORDER BY day", (run, acc["id"], run)).fetchall()
@@ -218,6 +268,7 @@ def account_metrics(db, acc, run) -> dict:
         "safety_blocks": _loads(last["safety_blocks"], []) if last else [],
         "account_level": _loads(last["account_level"], {}) if last else {},
         "block_reasons": {r["reason"]: r["n"] for r in blocks},
+        "performance_status": "AVAILABLE", "performance_hold_reasons": [],
     }
 
 
@@ -443,7 +494,19 @@ def s5_panel(db, metrics: list, b02: dict, period: dict, safety: dict) -> dict:
     """S5 기준(평가 시작 전 고정)에 대한 현재 상태. 판정은 고정: NOT_RECOMMENDED 유지, B01 = NEED_MORE_DATA."""
     crit = S.S5_CRITERIA
     out = {"criteria": crit, "profiles": {}, "verdict": "NOT_RECOMMENDED", "b01_status": "NEED_MORE_DATA",
-           "note": "기준 충족 여부는 검토 자료일 뿐 LIVE 승인 조건이 아닙니다 (별도 승인 필요)."}
+           "note": "기준 충족 여부는 검토 자료일 뿐 LIVE 승인 조건이 아닙니다 (별도 승인 필요).",
+           "safety_pass": safety["pass"], "safety_violations": safety["total"], "safety_breakdown": safety}
+    hold = sorted({r for m in metrics for r in (m.get("performance_hold_reasons") or [])})
+    if hold:      # 성과 보류: 성과 기준 비교·순위·채택 판정을 하지 않는다 (안전 위반·격리 이력은 그대로 표시)
+        out.update(performance_status="UNAVAILABLE", performance_hold_reasons=hold, adoption="UNAVAILABLE",
+                   performance_note=HOLD_NOTE)
+        for prof in S.PROFILES:
+            out["profiles"][prof] = {"performance_status": "UNAVAILABLE", "performance_hold_reasons": hold,
+                                     "trading_days": period["trading_days"], "safety_pass": safety["pass"],
+                                     "safety_violations": safety["total"], "safety_breakdown": safety,
+                                     "functional_5d": safety["continuity"]}
+        return out
+    out.update(performance_status="AVAILABLE", performance_hold_reasons=[])
     regimes = {}
     for r in db.execute("SELECT s.market_condition mc, COUNT(DISTINCT d.day) n FROM ab_day_inputs d "
                         "JOIN ab_signal_snapshots s ON s.scan_log_id=d.decision_scan_log_id "
@@ -509,10 +572,16 @@ def summary(settings: Optional[S.AutoBuySettings] = None) -> dict:
         return out
     db = ro_connect(settings.journal_path)
     try:
+        db.execute("BEGIN")          # 한 읽기 스냅샷: 격리·무결성 표시와 성과 집계가 같은 시점의 DB 를 본다
+        for k in ("signal_set_integrity", "integrity_day_block"):
+            out["health"][k] = _rt(db, k)
         run = _current_run(db)
+        hold = performance_hold(db, run)
+        out["performance"] = {"status": "UNAVAILABLE" if hold else "AVAILABLE", "hold_reasons": hold,
+                              "note": HOLD_NOTE if hold else None}
         accs = db.execute("SELECT * FROM ab_accounts WHERE strategy_version=? ORDER BY id",
                           (S.STRATEGY_VERSION,)).fetchall()
-        metrics = [account_metrics(db, a, run) for a in accs] if run is not None else []
+        metrics = [account_metrics(db, a, run, hold) for a in accs] if run is not None else []
         out["accounts"] = [{k: v for k, v in m.items() if not k.startswith("_") and k != "r_values_incl_open"}
                            for m in metrics if m["strategy"] != "B02"]
         out["b02"] = {}
@@ -521,6 +590,11 @@ def summary(settings: Optional[S.AutoBuySettings] = None) -> dict:
             b01 = next((m for m in metrics if m["profile"] == prof and m["strategy"] == "B01"), None)
             rets = [m["cum_return"] for m in b02]
             valid = sorted(r for r in rets if r is not None)
+            if hold:
+                out["b02"][prof] = {"accounts": len(b02), "median_return": None, "min_return": None, "max_return": None,
+                                    "b01_percentile": None, "median_closed_trades": None,
+                                    "performance_status": "UNAVAILABLE"}
+                continue
             out["b02"][prof] = {
                 "accounts": len(b02), "median_return": valid[len(valid) // 2] if valid else None,
                 "min_return": valid[0] if valid else None, "max_return": valid[-1] if valid else None,
@@ -536,9 +610,10 @@ def summary(settings: Optional[S.AutoBuySettings] = None) -> dict:
                   "replay_abandoned_suspected":
                       (out["health"].get("replay_state") or {}).get("status") == "ABANDONED_SUSPECTED",
                   "replay_stalled": (out["health"].get("replay_state") or {}).get("status") == "STALLED"}
-        period["complete"] = (period["data_incomplete_days"] == 0 and not period["replay_in_progress"]
+        period["complete"] = (not hold and period["data_incomplete_days"] == 0 and not period["replay_in_progress"]
                               and not period["replay_abandoned_suspected"] and not period["replay_stalled"]
                               and not any(m["unresolved_positions"] or m["unresolved_orders"] for m in metrics))
+        period["performance_status"] = "UNAVAILABLE" if hold else "AVAILABLE"
         period["basis"] = "모든 전략 동일 기준: 같은 거래일 입력(결정 스캔·일봉·계좌 스냅샷)을 공유한다"
         b01_closed = {m["profile"]: m["closed_trades"] for m in metrics if m["strategy"] == "B01"}
         out["validation"] = {**period, "b01_closed_trades": b01_closed,
@@ -627,15 +702,20 @@ def account_detail(account_id: str, settings: Optional[S.AutoBuySettings] = None
         return None
     db = ro_connect(settings.journal_path)
     try:
+        db.execute("BEGIN")          # 성과 보류 판단과 원본 조회를 한 읽기 스냅샷에서
         acc = db.execute("SELECT * FROM ab_accounts WHERE id=?", (account_id,)).fetchone()
         run = _current_run(db)
         if acc is None or run is None:
             return None
-        m = account_metrics(db, acc, run)
+        hold = performance_hold(db, run)
+        m = account_metrics(db, acc, run, hold)
         a = (run, account_id)
         return {
             "run_id": run,
             "metrics": {k: v for k, v in m.items() if not k.startswith("_") and k != "r_values_incl_open"},
+            "performance_status": "UNAVAILABLE" if hold else "AVAILABLE", "performance_hold_reasons": hold,
+            "records_notice": ("아래 일별·주문·체결·포지션·판단은 진단용 원본 기록이며 성과 보류 중에는 정상 성과에 포함된 거래가 아니다"
+                               if hold else None),
             "notice": VIRTUAL_NOTICE,
             "daily": [dict(d) for d in db.execute(
                 "SELECT day, data_status, equity, cash, invested, reserved, entry_heat, current_heat, "
