@@ -439,6 +439,7 @@ class Engine:
             self._recover_stale()
             self._migrate_quote_health()
             self._reconcile_all()
+            self._reconcile_wait_records()
             self._rollover(mc)
             if mc.is_open:
                 self._tick_stats(mc)
@@ -558,6 +559,7 @@ class Engine:
                 # 측정 품질이 불완전한 보고서는 정상(INFO)으로 표시하지 않는다
                 or (rep.get("watched_positions") and (
                     rep["watch"].get("missed") is None or rep["watch"].get("ok_coverage") != "full"
+                    or rep["watch"].get("ok_integrity") != "valid"
                     or (rep["watch"].get("gaps") or {}).get("normal_coverage") != "full")))
         self._alert(f"session:{day}:{self.settings.mode}:summary", "WARN" if warn else "INFO", report_text(rep))
 
@@ -1400,7 +1402,6 @@ class Engine:
             return
         for ev in self.store.events(states=("OPEN",), mode=self.settings.mode):
             pos = self.store.position(ev["position_id"])
-            self._settle_replace_waiting(ev)
             if pos["auto_paused"] or pos["state"] != "EXITING":
                 continue
             unresolved = self.store.orders(event_id=ev["id"], states=UNRESOLVED)
@@ -1444,36 +1445,29 @@ class Engine:
             return
         if status != "order":
             return
+        from trading.auto_stop.service import reconcile_wait_records
         o = self.store.order(detail)
-        if o["state"] in self.ACCEPTED:
-            self.store.runtime_set(f"replace_waiting:{ev['id']}", None, self.now())
-            self.store.runtime_set(f"order_block:{ev['id']}", None, self.now())
-            return
-        for key in (f"replace_waiting:{ev['id']}", f"order_block:{ev['id']}"):
-            prev = self.store.runtime_get(key)
-            if prev:
-                self.store.runtime_set(key, {**prev, "at": self.now(), "outcome": o["state"].lower(),
-                                             "order_id": o["id"]}, self.now())
-        if kind == "REPLACE" and not self.store.runtime_get(f"replace_waiting:{ev['id']}"):
-            self.store.runtime_set(f"replace_waiting:{ev['id']}", {
-                "since": self.now(), "at": self.now(), "reason": f"재주문 결과 {o['state']}", "ticker": pos["ticker"],
-                "remaining": pos["remaining_managed_qty"], "outcome": o["state"].lower(), "order_id": o["id"]},
-                self.now())
+        keys = [f"replace_waiting:{ev['id']}", f"order_block:{ev['id']}"]
+        if kind == "REPLACE" and not self.store.runtime_get(keys[0]) and o["state"] not in self.ACCEPTED:
+            # 접수가 확인되지 않은 재주문: 결과 확인 전까지 대기 기록을 남긴다 (대기 시작 = 주문 생성 시각).
+            self.store.runtime_set(keys[0], {
+                "since": o["created_at"], "at": self.now(), "reason": f"재주문 결과 {o['state']}",
+                "ticker": pos["ticker"], "remaining": pos["remaining_managed_qty"]}, self.now())
+        # 기록 판정은 실제 주문 상태로 한 곳에서 한다 (접수 확인이면 해제, 불명·거부면 결과 기록).
+        reconcile_wait_records(self.store, self.now(), keys=keys)
 
-    def _settle_replace_waiting(self, ev):
-        """대기 중 생긴 주문이 이후 대조로 접수 확인되면(UNKNOWN → SUBMITTED 등) 대기 기록을 해제한다."""
-        for key in (f"replace_waiting:{ev['id']}", f"order_block:{ev['id']}"):
-            w = self.store.runtime_get(key)
-            if w and w.get("order_id"):
-                o = self.store.order(w["order_id"])
-                if o is not None and o["state"] in self.ACCEPTED:
-                    self.store.runtime_set(key, None, self.now())
+    def _reconcile_wait_records(self):
+        """주문 대조 직후, 모든 대기 기록을 실제 주문·이벤트 상태와 맞춘다 (OPEN 이벤트 여부와 무관, 주문 없음)."""
+        from trading.auto_stop.service import reconcile_wait_records
+        reconcile_wait_records(self.store, self.now())
 
     def _note_order_block(self, ev, pos, kind, reason):
         """최초·이월 매도 전송 전 차단: 이벤트·트리거 유지, 실제 사유 기록. Scanner 저널 읽기 실패는 URGENT."""
         now = self.now()
         key = f"order_block:{ev['id']}"
         prev = self.store.runtime_get(key) or {}
+        if prev.get("status", "waiting") != "waiting" or prev.get("order_id"):
+            prev = {}                                  # 이전 시도의 결과 기록 → 새 차단 구간
         self.store.runtime_set(key, {"since": prev.get("since") or now, "at": now, "kind": kind, "reason": reason,
                                      "ticker": pos["ticker"], "remaining": pos["remaining_managed_qty"]}, now)
         cat = reason.split(":")[0]
@@ -1808,6 +1802,8 @@ class Engine:
         now = self.now()
         key = f"replace_waiting:{ev['id']}"
         prev = self.store.runtime_get(key) or {}
+        if prev.get("status", "waiting") != "waiting" or prev.get("order_id"):
+            prev = {}                                  # 이전 시도의 결과 기록 → 새 대기 구간
         detail = {"since": prev.get("since") or now, "at": now, "reason": reason, "ticker": pos["ticker"],
                   "remaining": pos["remaining_managed_qty"], "last_quote_issue": self.store.runtime_get("last_quote_issue"),
                   "last_api_error": self.store.runtime_get("last_api_error")}

@@ -163,6 +163,16 @@ class AutoStopStore:
             db.execute("INSERT OR REPLACE INTO auto_stop_runtime(key,value,updated_at) VALUES(?,?,?)",
                        (key, json.dumps(value), now))
 
+    def runtime_keys(self, prefixes):
+        """값이 있는(null 이 아닌) runtime 키 목록 (접두어 일치, 읽기 전용)."""
+        out = []
+        with self.tx() as db:
+            for prefix in prefixes:
+                out += [r["key"] for r in db.execute(
+                    "SELECT key FROM auto_stop_runtime WHERE substr(key, 1, ?)=? AND value IS NOT NULL AND value!='null' "
+                    "ORDER BY key", (len(prefix), prefix))]
+        return out
+
     def runtime_txn(self, now, keys, fn):
         """여러 runtime 키를 한 BEGIN IMMEDIATE 트랜잭션에서 읽고 바꾼다 (DDL 없음).
 

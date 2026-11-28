@@ -273,7 +273,14 @@ def resolve_unknown(store, broker, order_id, *, order_number: str | None, confir
     if not ok:
         raise Refused("상태가 바뀌어 해제하지 못했습니다.")
     store.review(now, event_id=o["exit_event_id"], reason=f"UNKNOWN 수동 해제 ({row['state']}) — 사람 확인 후 해제/재등록")
-    store.audit(now, actor, "resolve_unknown", order_id, {"order_number": number, "broker_state": row["state"]})
+    ev = store.event(o["exit_event_id"])
+    pos = store.position(ev["position_id"]) if ev else None
+    store.audit(now, actor, "resolve_unknown", order_id, {
+        "order_number": number, "broker_state": row["state"], "event_state": ev["state"] if ev else None,
+        "remaining": pos["remaining_managed_qty"] if pos else None,
+        # 취소 확정은 매도 완료가 아니다: 잔여가 남으면 대체 주문이 필요한 상태임을 기록한다 (자동 재주문은 하지 않음).
+        "replacement_needed": bool(pos and row["state"] == "CANCELLED" and pos["remaining_managed_qty"] > 0)})
+    reconcile_wait_records(store, now, actor=actor)     # 대기 기록을 확정된 실제 상태와 맞춘다
     return store.order(order_id)
 
 
@@ -412,18 +419,31 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     for r in stats:
         if r["metric"] == "slot" and int(r["value"]) == QH.SLOT_CODES["ok"]:
             slot_ok_rows.setdefault(r["key"].split(":", 1)[0], set()).add(round(float(r["key"].split(":", 1)[1]), 3))
-    cands = []
+    cands, followups = [], []
+    all_events = store.events(mode=mode)
     for p in store.positions(mode=mode):
         if p["created_at"] >= end:
             continue
-        p_events = [e for e in store.events(mode=mode) if e["position_id"] == p["id"]]
-        stop_at = min([e["triggered_at"] for e in p_events] + [end])
-        # 감시(engine._watch)는 ACTIVE·EXITING 만 한다. 확인 필요(NEEDS_REVIEW)·종료 상태는 전환 시각에 감시가 끝났다.
-        if p["state"] not in ("ACTIVE", "EXITING") and not p_events:
-            stop_at = min(stop_at, p["updated_at"])
+        # 보고일 감시 대상 = 이 정규장 [개장, 마감·현재] 과 포지션의 실제 일반 감시 구간이 겹치는 포지션.
+        #   감시 시작 = max(개장, 등록), 감시 끝 = 첫 손절 트리거 / 관리 종료·확인 필요 전환 시각 / 마감.
+        #   일반 감시는 ACTIVE 만 하며, 트리거 이후 ACTIVE 로 돌아가는 경로는 없다 → 보고일 감시 시작 전에 트리거된
+        #   포지션은 그날 감시 대상이 아니다 (전날 청산 이벤트의 이월 주문 대조는 exit_followups 로 따로 보인다).
+        p_events = [e for e in all_events if e["position_id"] == p["id"]]
+        triggers = sorted(e["triggered_at"] for e in p_events)
         ws = max(start, p["created_at"])
-        if max(0.0, stop_at - ws) <= 0 and not p_events:
+        if triggers and triggers[0] < ws:
+            if any(ny_date(e["triggered_at"]) != d and (e["state"] in ("OPEN", "CARRY_OVER")
+                   or any(ny_date(o["created_at"]) == d for o in store.orders(event_id=e["id"]))) for e in p_events):
+                followups.append({"position_id": p["id"], "ticker": p["ticker"],
+                                  "events": [e["id"] for e in p_events if ny_date(e["triggered_at"]) != d]})
             continue
+        in_window = [t for t in triggers if t <= end]
+        stop_at = min(in_window + [end])
+        # 감시(engine._watch)는 ACTIVE 만 한다. 확인 필요(NEEDS_REVIEW)·종료 상태는 전환 시각에 감시가 끝났다.
+        if p["state"] not in ("ACTIVE", "EXITING") and not in_window:
+            stop_at = min(stop_at, p["updated_at"])
+        if stop_at - ws <= 0 and not (in_window and ny_date(in_window[0]) == d):
+            continue          # 구간 길이 0 은 그날 개장 시각 트리거처럼 당일 이벤트 근거가 있을 때만 포함
         # 표식이 감시 시작 이전이면 그 감시 구간 전체를 신버전이 기록했다. 감시 중에 바뀌었으면 전환 후보다.
         fmt = ("LEGACY" if v2_since is None or v2_since > stop_at else "SLOT_V2" if v2_since <= ws else "SWITCH")
         cands.append({"p": p, "ws": ws, "stop": stop_at, "fmt": fmt})
@@ -573,6 +593,8 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
             # 감시 슬롯 (거래일 + 모드 + position_id + 슬롯 시작). 완료 슬롯마다 분류 하나, 진행 중 슬롯은 따로.
             "slots": slots, "expected_checks": expected, "ok_checks": ok, "missed_checks": missed, **breakdown,
             "normal_rate_pct": round(ok / expected * 100, 1) if (expected and missed is not None) else None,
+            # 집계 무결성: 값이 있는 것(측정)과 그 값이 유효한 것(정상 ≤ 기대)을 구분한다. 티커 그룹은 그룹에서 판정.
+            "ok_integrity": (None if ok is None else "valid" if ok <= expected else "exceeds_expected"),
             "data_quality": quality,
             # 조회 시도 (목적별, 같은 슬롯의 재시도 포함. HTTP 요청 수와 다를 수 있다)
             "attempts": {k: v2(f"attempt_{k}") for k in ("watch", "recovery", "order", "cancel_check", "incident")},
@@ -603,15 +625,32 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         if any(a[group_key] is None for a in groups):
             return None
         return sum(p[key] for p in solo) + sum(a[group_key] for a in groups)
+    # 집계 순서: (1) position 별 검증 (2) LEGACY 티커 그룹 검증 (3) 유효·불일치 구분 (4) 전체·유효 소계 (5) 품질 표시.
+    # 개별 단위의 정상 > 기대는 전체 합이 정상 범위여도 숨기지 않는다: 전체 정상·누락·정상률은 None, 원시 기록은
+    # ok_recorded 로 따로 보인다. 유효 소계에는 유효한 포지션·그룹만 넣는다.
+    for t, agg in legacy_ticker_totals.items():
+        agg["integrity"] = "valid" if agg["ok"] <= agg["expected"] else "exceeds_expected"
+        agg["missed"] = agg["expected"] - agg["ok"] if agg["integrity"] == "valid" else None
     total_expected = sum(p["expected_checks"] for p in solo) + sum(a["expected"] for a in legacy_ticker_totals.values())
-    total_ok = total_of("ok_checks", "ok")
     measured_solo = [p for p in solo if p["ok_checks"] is not None]
+    valid_solo = [p for p in measured_solo if p["ok_integrity"] == "valid"]
+    valid_groups = [a for a in legacy_ticker_totals.values() if a["integrity"] == "valid"]
+    integrity_errors = (
+        [f"{p['ticker']}#{p['id']}: 정상 {p['ok_checks']} > 기대 {p['expected_checks']}"
+         for p in measured_solo if p["ok_integrity"] != "valid"]
+        + [f"{t} 티커 합계(포지션 {a['positions']}): 정상 {a['ok']} > 기대 {a['expected']}"
+           for t, a in legacy_ticker_totals.items() if a["integrity"] != "valid"])
+    ok_recorded = (sum(p["ok_checks"] for p in measured_solo) + sum(a["ok"] for a in legacy_ticker_totals.values())
+                   if (measured_solo or legacy_ticker_totals) else (0 if not positions else None))
+    total_ok = total_of("ok_checks", "ok") if not integrity_errors else None
     grouped_n = sum(len(a["positions"]) for a in legacy_ticker_totals.values())
     measured_n = len(measured_solo) + grouped_n
+    sub_exp = sum(p["expected_checks"] for p in valid_solo) + sum(a["expected"] for a in valid_groups)
+    sub_ok = sum(p["ok_checks"] for p in valid_solo) + sum(a["ok"] for a in valid_groups)
     measured_subtotal = {
-        "positions": measured_n,
-        "expected": sum(p["expected_checks"] for p in measured_solo) + sum(a["expected"] for a in legacy_ticker_totals.values()),
-        "ok": sum(p["ok_checks"] for p in measured_solo) + sum(a["ok"] for a in legacy_ticker_totals.values())}
+        "positions": len(valid_solo) + sum(len(a["positions"]) for a in valid_groups),
+        "expected": sub_exp, "ok": sub_ok, "missed": sub_exp - sub_ok,
+        "normal_rate_pct": round(sub_ok / sub_exp * 100, 1) if sub_exp else None}
     for t, info in ticker_info.items():
         if info["remainder"] > 0 and not info["claimants"]:
             unattributed.append(f"unattributed_legacy_ok: {t} 구버전 몫 {info['remainder']}회를 귀속할 포지션 없음")
@@ -679,6 +718,7 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     ok_status = ("no_targets" if not positions else "unmeasured" if measured_n == 0
                  else "partial" if measured_n < len(positions) else "full")
     quality = [f"{p['ticker']}#{p['id']}: {q}" for p in positions for q in p["data_quality"]] + unattributed
+    quality += [f"aggregate_exceeds_expected: {e}" for e in integrity_errors if "티커 합계" in e]
     day_full_v2 = v2_since is not None and v2_since <= start + tol      # 그날 전 구간을 신버전이 기록
     if total_ok is not None and total_ok > total_expected:
         quality.append(f"aggregate_exceeds_expected: 전체 정상 {total_ok} > 기대 {total_expected}")
@@ -688,12 +728,16 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         **base,
         "session": {"open_at": start, "close_at": session.close_ts, "early_close": session.early_close},
         "watched_positions": len(positions),
+        # 일반 감시 대상이 아닌, 전 거래일 청산 이벤트의 당일 주문 대조·이월 (감시 통계에 넣지 않는다)
+        "exit_followups": followups,
         "data_quality": quality,
         "format": report_format, "slot_v2_since": v2_since,
         "watch": {"expected": total_expected, "ok": total_ok, "missed": total_missed,
                   "ok_coverage": ok_cov, "ok_status": ok_status,
                   "ok_unmeasured_positions": len(positions) - measured_n, "ok_measured_positions": measured_n,
                   "ok_ticker_aggregated_positions": grouped_n, "measured_subtotal": measured_subtotal,
+                  "ok_recorded": ok_recorded,
+                  "ok_integrity": "invalid" if integrity_errors else "valid", "integrity_errors": integrity_errors,
                   "legacy_ticker_totals": legacy_ticker_totals,
                   "slots": slot_tot, "gaps": gap_tot,
                   "held_slots": bd_sum("held_slots"), "paused_slots": bd_sum("paused_slots"),
@@ -854,6 +898,81 @@ def _slot_state_issues(per_slot, states, interval):
     if any(c == "held" and not covered(s, ("fault", "hold")) for s, c in per_slot.items()):
         issues.append("state_unaudited: 보류 슬롯이 감사 기록의 장애·보류 구간 밖에 있음")
     return issues
+
+
+WAIT_PREFIXES = ("replace_waiting:", "order_block:")
+_ACCEPTED_OPEN = ("SUBMITTED", "PARTIAL_FILLED", "CANCEL_SENDING", "CANCEL_PENDING", "CANCEL_UNKNOWN")
+
+
+def _wait_decision(w, ev, pos, subject):
+    """대기 기록 하나의 정합성 판정 → ("keep", 갱신 기록) | ("close", 사유). 주문을 만들거나 상태를 바꾸지 않는다.
+
+    subject = 같은 청산 이벤트에서 대기 시작(since) 이후 생긴 가장 최근 주문 (없으면 None). 기록의 order_id 가
+    다른 이벤트의 주문이거나 더 새 주문으로 대체됐으면 쓰지 않는다 (최신 대기 기록을 잘못 지우지 않는다)."""
+    if ev is None or pos is None:
+        return "close", "orphan: 청산 이벤트·포지션 없음"
+    facts = {"event_state": ev["state"], "remaining": pos["remaining_managed_qty"], "position_state": pos["state"]}
+    if subject is not None:
+        st = subject["state"]
+        facts.update(order_id=subject["id"], order_state=st, order_filled=subject["filled_qty"])
+        if st in ("SENDING", "UNKNOWN"):
+            # 전송 결과 불명: 기록 유지, 자동 재전송 없음. 긴급 알림은 기존 UNKNOWN 알림이 맡는다.
+            return "keep", {**w, **facts, "status": "result_unknown", "outcome": st.lower()}
+        if st in _ACCEPTED_OPEN:
+            return "close", f"accepted: 증권사 접수 확인 ({st})"
+        if st == "FILLED":
+            return "close", "filled: 대체 주문 전량 체결"
+        if st == "CANCELLED":
+            # 접수 후 취소 확정: 이 대기 구간은 끝났다. 잔여 재주문이 필요하면 다음 진행에서 새 대기 구간으로 기록한다.
+            return "close", "accepted_then_cancelled: 대체 주문이 접수 후 취소 확정 (매도 완료 아님)"
+        if st in ("REJECTED", "NOT_SENT"):
+            if ev["state"] in ("OPEN", "CARRY_OVER", "NEEDS_REVIEW"):
+                # 확인된 최종 결과로 바꿔 둔다. 자동 재주문 없음 (이벤트는 기존 정책대로 확인 필요).
+                return "keep", {**w, **facts, "status": "closed", "outcome": st.lower()}
+            return "close", f"event_ended: 이벤트 {ev['state']} (대체 주문 {st})"
+        return "keep", {**w, **facts, "status": "result_unknown", "outcome": st.lower()}
+    if ev["state"] in ("OPEN", "CARRY_OVER") and pos["state"] == "EXITING" and pos["remaining_managed_qty"] > 0:
+        return "keep", {**w, **facts, "status": w.get("status") or "waiting"}
+    if ev["state"] == "NEEDS_REVIEW" and pos["remaining_managed_qty"] > 0:
+        return "keep", {**w, **facts, "status": "closed", "outcome": "needs_review", "replacement_needed": True}
+    return "close", f"event_ended: 이벤트 {ev['state']}, 관리 잔여 {pos['remaining_managed_qty']}주"
+
+
+def reconcile_wait_records(store, now, *, keys=None, actor="engine") -> dict:
+    """재주문 대기(replace_waiting)·주문 차단(order_block) 기록을 실제 주문·이벤트·포지션 상태와 맞춘다.
+
+    청산 이벤트가 OPEN 인지와 무관하게 모든 기록을 본다 (DONE·NEEDS_REVIEW 로 바뀐 이벤트 포함). 키마다 한 쓰기
+    트랜잭션에서 읽고 판정하며, 바뀐 것이 있을 때만 쓴다 → 반복 실행·중간 재시작에도 결과가 같다. 기록을 닫을 때는
+    같은 트랜잭션에서 감사 기록(wait_record_closed)을 남긴다. 읽기·정합성 처리일 뿐 주문 실행 권한을 주지 않는다."""
+    results = {}
+    for key in (keys if keys is not None else store.runtime_keys(WAIT_PREFIXES)):
+        def fn(vals, db, key=key):
+            w = vals.get(key)
+            if not w:
+                return None
+            eid = int(key.split(":", 1)[1])
+            ev = db.execute("SELECT * FROM auto_stop_exit_events WHERE id=?", (eid,)).fetchone()
+            pos = (db.execute("SELECT * FROM auto_stop_positions WHERE id=?", (ev["position_id"],)).fetchone()
+                   if ev is not None else None)
+            since = float(w.get("since") or 0)
+            later = db.execute("SELECT * FROM auto_stop_orders WHERE exit_event_id=? AND created_at>=? "
+                               "ORDER BY created_at, id", (eid, since)).fetchall()
+            subject = later[-1] if later else None
+            action, detail = _wait_decision(w, ev, pos, subject)
+            if action == "keep":
+                if detail == w:
+                    results[key] = ("keep", None)
+                    return None
+                results[key] = ("keep", detail.get("status"))
+                return {key: {**detail, "checked_at": now}}, []
+            results[key] = ("close", detail)
+            return {key: None}, [(actor, "wait_record_closed", key, {
+                "reason": detail, "record": w, "order_id": subject["id"] if subject is not None else None,
+                "order_state": subject["state"] if subject is not None else None,
+                "event_state": ev["state"] if ev is not None else None,
+                "remaining": pos["remaining_managed_qty"] if pos is not None else None})]
+        store.runtime_txn(now, [key], fn)
+    return results
 
 
 def record_watch_end(store, mode, p, at, rec=None):
@@ -1022,7 +1141,7 @@ def report_text(rep: dict) -> str:
     if w.get("missed") is None:
         miss_text = ("누락 측정 불가"
                      + (f" (측정 가능 {sub.get('positions')}/{total_pos}종목 소계 정상 {sub.get('ok')}/"
-                        f"{sub.get('expected')})" if w.get("ok_coverage") == "partial" else ""))
+                        f"{sub.get('expected')}, 누락 {sub.get('missed')})" if sub.get("positions") else ""))
     elif w.get("held_slots") is None:
         miss_text = f"누락 {w['missed']} (세부 원인 측정 불가)"
     else:
@@ -1033,6 +1152,8 @@ def report_text(rep: dict) -> str:
     return (f"[자동손절 일일 보고 {rep['day']} {rep['mode']}] 형식 {rep.get('format', '-')} · 감시 "
             f"{rep['watched_positions']}종목 · 정상 감시 {_fmt(w['ok'])}/{w['expected']}"
             + (" (일부 종목 측정 불가)" if w.get("ok_coverage") == "partial" else "")
+            + (f" (데이터 무결성 오류 {len(w['integrity_errors'])}건, 원시 성공 기록 {_fmt(w.get('ok_recorded'))})"
+               if w.get("ok_integrity") == "invalid" else "")
             + f" ({miss_text}){gap_text} · 일반 감시 시도 {_fmt(w.get('attempts'))} "
             f"(API 오류 {_fmt(w.get('api_errors'))}, 무효 {_fmt(w.get('invalid'))}) · 회복 조회 {_fmt(r.get('ok'))}/"
             f"{_fmt(r.get('attempts'))} (실패 {_fmt(r.get('fail'))}, 무효 {_fmt(r.get('invalid'))}, 동일시세 "
