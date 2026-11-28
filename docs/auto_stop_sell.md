@@ -724,7 +724,7 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
     - 상한(ended_by, "그 시각엔 이미 끝나 있었다"): `details.watch_ended_by`, 이전 상태가 ACTIVE 가 아닌 관리 해제 감사의 `prev_updated_at`, 이전 상태가 없는 구버전 관리 해제 감사 시각, 현재 `updated_at`. 후속 관리 해제 시각을 최초 종료 시각으로 쓰지 않는다.
     - ACTIVE 가 아닌 포지션 행을 갱신하는 모든 문장(상태 전이·일시중지·체결 반영 등)은 덮어쓰기 전 `updated_at` 을 같은 문장에서 `watch_ended_by` 로 보존한다 (처음 한 번). 갱신 전 `updated_at` 은 그 행의 마지막 변경 시각이고 그 뒤 상태가 바뀌지 않았으므로 그때 이미 ACTIVE 가 아니었다. 전이가 실패하면 남지 않는다.
     - `disable()` 감사에 `prev_state`·`prev_updated_at` 을 남긴다.
-    - 정확한 시각이 없을 때: 상한이 보고일 감시 시작 전이면 그날 감시 대상에서 제외(입증됨). 아니면 감시 대상에 넣되 기대·정상·공백 `null`(`watch_end_unverified`). 존재하지 않았던 감시 구간을 만들지 않으며 과거 기록은 고치지 않는다.
+    - 정확한 시각이 없을 때: 상한이 보고일 감시 시작 시각 이하(같은 시각 포함)면 그날 감시 구간이 없으므로 제외(입증됨). 개장 시각의 실제 손절 트리거는 상한과 별개인 정확한 시각이며 기존 특수 처리(구간 길이 0, 당일 이벤트 근거)를 따른다. 아니면 감시 대상에 넣되 기대·정상·공백 `null`(`watch_end_unverified`). 존재하지 않았던 감시 구간을 만들지 않으며 과거 기록은 고치지 않는다.
 - **보고일 감시 대상 선정 (2026-11-28 Codex 6차 리뷰 P2 반영)** — 그날 정규장 [개장, 마감·현재] 과 포지션의 실제 일반 감시 구간이 겹치는 포지션만 감시 대상이다.
   - 감시 시작 = max(개장, 등록). 감시 끝 = 첫 손절 트리거 / ACTIVE·EXITING 이 아닌 포지션은 최초 영구 감시 종료 시각 / 마감.
   - 일반 감시는 ACTIVE 만 하고 트리거 이후 ACTIVE 로 돌아가는 경로가 없으므로, 그날 감시 시작 전에 트리거된 포지션(전날 SOLD·DONE, 전날 이월 등)은 감시 대상이 아니다. 과거 청산 이벤트가 있다는 이유만으로 포함하지 않는다.
@@ -738,11 +738,18 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
     - `unresolved_at_day_start`: 보고일 전 생성 + 지금도 미해결이거나 최종 종료 근거 시각이 보고일 시작 이후. 나중에 주문이 종료돼도 그날 미해결이었던 사실은 바뀌지 않는다 (`state_now` 만 최신 상태).
     - `resolution_time_unverified`: 종료 근거 시각을 찾지 못했는데 `updated_at`(종료 시각의 상한)이 보고일 이후 (근거 부족 표시)
     - `final_evidence_conflict`: 서로 다른 최종 상태를 입증하는 근거가 함께 있음 (가장 이른 시각을 고르지 않는다)
-  - **최종 종료 증거 (2026-11-28 Codex 8차 리뷰 P2 반영)** — 그 주문 자체의 종료를 입증하는 근거만 쓴다 (`_final_evidence_at`).
-    - `resolve_unknown` 감사: `broker_state` 가 FILLED·CANCELLED·REJECTED 이고 현재 최종 상태와 같을 때만. OPEN(접수 확인)·PARTIAL(부분체결)·누락(구버전 감사)·알 수 없음은 종료 증거가 아니다. UNKNOWN 해제와 최종 종료를 구분한다.
-    - 주문 대조가 최종 상태를 확정할 때 남기는 주문 단위 기록 `details.final`(상태·시스템 확인 시각), 전량 체결 원장, 우리 취소 확정·마감 소멸 알림(`order:{id}:cancelled|expired`), 전송 시점 거부·미전송.
-    - 이벤트 단위 확인 필요 알림(`event:{id}:review`)은 다른 주문·다른 사유일 수 있으므로 쓰지 않는다.
+  - **최종 종료 증거 (2026-11-28 Codex 8·9차 리뷰 반영)** — 그 주문 자체의 종료를 입증하는 근거만 쓴다 (`_final_evidence_at`). 현재 상태에 따라 수집 대상을 고르지 않고, 이 주문의 유효한 종료 증거를 모두 모은 뒤 증거마다 입증하는 최종 상태를 분류한다.
+    - `details.final`(상태·시스템 확인 시각·출처) → 그 상태
+    - `resolve_unknown` 감사의 `broker_state` ∈ FILLED·CANCELLED·REJECTED → 그 상태. OPEN(접수 확인)·PARTIAL(부분체결)·누락(구버전 감사)·알 수 없음은 종료 증거가 아니다.
+    - 전량 체결 원장 → FILLED, 우리 취소 확정·마감 소멸 알림(`order:{id}:cancelled|expired`) → CANCELLED, `details.reject` → REJECTED, `details.not_sent` → NOT_SENT (시각 = 전송 시각)
+    - 취소 요청·대기·거부, 미체결 경과, 접수, 부분체결 기록은 종료 증거가 아니다. 이벤트 단위 확인 필요 알림과 다른 주문의 알림은 쓰지 않는다.
+    - 현재 최종 상태와 다른 상태를 입증하는 증거가 하나라도 있으면 종료 시각을 확정하지 않고 `final_evidence_conflict` (원본 증거는 그대로). 모두 일치하면 가장 이른 시각.
     - 시각은 모두 시스템 확인·반영 시각이며 증권사 실제 체결 시각과 구분한다.
+  - **최종 상태와 종료 증거의 원자 저장 (2026-11-28 Codex 9차 리뷰 P2 반영)** — `store.transition(..., evidence=[(key, value)])` 가 같은 `BEGIN IMMEDIATE` 쓰기 트랜잭션에서 현재 행의 `details` 를 읽어 기존 내용을 보존한 채 증거를 덧붙이고(같은 값은 다시 넣지 않음) 상태와 함께 한 UPDATE 로 쓴다. 조건부 전이가 실패하면 아무것도 쓰지 않고, 상태와 증거는 함께 커밋·롤백된다. 트랜잭션 안에서 외부 API 를 호출하지 않는다.
+    - 증권사 대조 FILLED·CANCELLED·REJECTED: `details.final`(출처 `status`, 확인 체결 수량)
+    - 전송 시점 거부: `details.reject` + `details.final`(출처 `send_reject`), 입력 검증 실패 미전송: `details.not_sent` + `details.final`(출처 `send_not_sent`)
+    - `resolve_unknown()` 이 FILLED·CANCELLED·REJECTED 로 확정할 때: `details.final`(출처 `manual_resolve`). SUBMITTED·PARTIAL_FILLED 해제는 최종 종료가 아니므로 쓰지 않는다. 감사 기록·주문번호·체결 원장·알림·NEEDS_REVIEW 정책은 그대로다.
+    - 롤백되면 기존 미확정 상태가 유지되어 재시작 후 읽기 전용 대조로 다시 확정한다 (자동 재전송 없음, 전송 경로의 SENDING 은 기존 정책대로 UNKNOWN). 체결 원장이 먼저 커밋되고 상태 전이 전에 중단돼도 재대조에서 같은 누적 수량은 NOOP 이라 이중 차감이 없다.
     - 이벤트: 지금도 열림(`event_open`), 보고일 이벤트 알림(`event_alerts_on_day`)
   - 당일 활동이 없는 오래된 종료 이벤트는 제외한다. 최종 상태가 DONE·NEEDS_REVIEW 라는 이유로 보고일 이력을 빼지 않는다.
   - 시각·수량 구분: `fills_on_day[].applied_at` = 시스템이 체결을 확인·반영한 시각, `broker_fill_time` = 원장 증거에 증권사 체결 시각이 있을 때만 (없으면 `null`, 추정 없음). `cum_filled_now` = 현재 누적 체결, `fills_applied_qty_on_day` = 보고일 신규 반영 수량 (원장 PK 로 같은 체결은 한 번만). 합계 `exit_followup_fills_applied_qty` 는 일반 감시 횟수·당일 신규 주문 수와 별개다.

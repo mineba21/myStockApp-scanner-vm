@@ -490,11 +490,25 @@ class AutoStopStore:
             db.executemany("INSERT INTO auto_stop_daily_stats(day,mode,metric,key,value) VALUES(?,?,?,?,?) "
                            "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=excluded.value", rows)
 
-    def transition(self, oid, now, *, frm, to, **fields) -> bool:
-        """조건부 상태 전이. frm 은 상태 하나 또는 튜플."""
+    def transition(self, oid, now, *, frm, to, evidence=None, **fields) -> bool:
+        """조건부 상태 전이. frm 은 상태 하나 또는 튜플.
+
+        evidence=[(key, value), ...] 를 주면 같은 BEGIN IMMEDIATE 쓰기 트랜잭션에서 현재 행의 details 를 읽어 기존 내용을
+        보존한 채 key 목록에 value 를 덧붙이고 상태와 함께 한 UPDATE 로 쓴다 (같은 값은 다시 넣지 않는다). 전이 조건이
+        맞지 않으면 아무것도 쓰지 않는다. 상태와 증거는 함께 커밋되거나 함께 롤백된다. 외부 API 호출 없음."""
         frm = (frm,) if isinstance(frm, str) else tuple(frm)
-        extra = "".join(f", {k}=?" for k in fields)
         with self.tx() as db:
+            if evidence:
+                r = db.execute("SELECT state, details FROM auto_stop_orders WHERE id=?", (oid,)).fetchone()
+                if r is None or r["state"] not in frm:
+                    return False
+                details = json.loads(r["details"] or "{}")
+                for key, value in evidence:
+                    items = details.setdefault(key, [])
+                    if value not in items:
+                        items.append(value)
+                fields = {**fields, "details": json.dumps(details, default=str)}
+            extra = "".join(f", {k}=?" for k in fields)
             return db.execute(f"UPDATE auto_stop_orders SET state=?{extra}, updated_at=? WHERE id=? AND state IN "
                               f"{_in(frm)}", [to, *fields.values(), now, oid]).rowcount == 1
 
@@ -613,6 +627,14 @@ class AutoStopStore:
         """같은 SQLite 의 스캐너 매수 저널에 account1 같은 종목의 미확정·미체결 매수가 있는지."""
         with self.tx() as db:
             return self.scanner_buy_in_flight_db(db, ticker)
+
+
+def final_evidence(state, now, source, filled=None) -> tuple:
+    """최종 상태 종료 증거 (transition(evidence=...) 용). at = 시스템이 확인·반영한 시각."""
+    value = {"state": state, "at": now, "source": source}
+    if filled is not None:
+        value["filled_quantity"] = filled
+    return ("final", value)
 
 
 def _initial_details(f, now) -> dict:

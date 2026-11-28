@@ -13,7 +13,8 @@ from decimal import Decimal, InvalidOperation
 from trading.auto_stop import quote_health as QH
 from trading.auto_stop import settings as S
 from trading.auto_stop.quotes import MIN_AUTO_PRICE, QuoteUnavailable, validate
-from trading.auto_stop.store import UNRESOLVED, watch_end_of, watch_ended_by_of, ClaimRefused
+from trading.auto_stop.store import UNRESOLVED, ClaimRefused, watch_end_of, watch_ended_by_of
+from trading.auto_stop.store import final_evidence as _store_final_evidence
 from trading.auto_stop.us_calendar import NEW_YORK, market_clock, ny_date, session_for
 
 
@@ -267,6 +268,10 @@ def resolve_unknown(store, broker, order_id, *, order_number: str | None, confir
     if not o["order_number"]:
         fields.update(order_number=number,
                       order_date=datetime.fromtimestamp(o["sent_at"] or o["created_at"], NEW_YORK).date().isoformat())
+    if target in FINAL_BROKER_STATES:
+        # 최종 종료(FILLED·CANCELLED·REJECTED)면 종료 증거를 상태와 같은 트랜잭션에 쓴다. 접수 확인(SUBMITTED)·부분체결
+        # (PARTIAL_FILLED)은 최종 종료가 아니므로 쓰지 않는다.
+        fields["evidence"] = [_store_final_evidence(target, now, "manual_resolve", int(row["filled_quantity"]))]
     try:
         ok = store.transition(order_id, now, frm=("UNKNOWN", "CANCEL_UNKNOWN"), to=target, **fields)
     except Exception as exc:
@@ -451,8 +456,8 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
             wend, ended_by, end_src = _watch_end(p, triggers, hist)
             if wend is not None:
                 stop_at = min(stop_at, wend)
-            elif ended_by < ws:
-                continue      # 정확한 종료 시각은 몰라도 보고일 감시 시작 전에 이미 끝나 있었음이 입증됨
+            elif ended_by <= ws:
+                continue      # 정확한 종료 시각은 몰라도 보고일 감시 시작 시각(포함)에 이미 끝나 있었음이 입증됨
         if stop_at - ws <= 0 and not (in_window and ny_date(in_window[0]) == d):
             continue          # 구간 길이 0 은 그날 개장 시각 트리거처럼 당일 이벤트 근거가 있을 때만 포함
         # 표식이 감시 시작 이전이면 그 감시 구간 전체를 신버전이 기록했다. 감시 중에 바뀌었으면 전환 후보다.
@@ -1098,35 +1103,38 @@ FINAL_BROKER_STATES = {"FILLED": "FILLED", "CANCELLED": "CANCELLED", "REJECTED":
 def _final_evidence_at(o, ledger_rows, ctx, resolves):
     """확정 상태 주문의 최종 종료 근거 시각 → (시각 | None, 문제 | None). 그 주문 자체의 종료를 입증하는 근거만 쓴다.
 
-    - 증거 해제 감사(resolve_unknown): broker_state 가 FILLED·CANCELLED·REJECTED 이고 현재 최종 상태와 같을 때만.
-      UNKNOWN 해제(접수 확인 OPEN, 부분체결 PARTIAL)는 종료 증거가 아니다. broker_state 가 없는 구버전 감사도 쓰지 않는다.
-    - 주문 대조의 최종 확인 기록(주문 details.final: 상태·확인 시각), 전량 체결 원장(cum ≥ 요청 수량), 우리 취소 확정·
-      마감 소멸 알림(order:{id}:cancelled|expired), 전송 시점 거부·미전송(details.reject|not_sent → 전송 시각).
-    - 다른 주문일 수 있는 이벤트 단위 확인 필요 알림은 쓰지 않는다.
-    - 현재 상태와 다른 최종 상태를 입증하는 근거가 있으면 가장 이른 시각을 고르지 않고 final_evidence_conflict.
+    현재 상태와 무관하게 먼저 이 주문의 유효한 종료 증거를 모두 모으고, 증거마다 입증하는 최종 상태를 분류한다.
+      - details.final (상태·시스템 확인 시각; 상태 전이와 같은 트랜잭션에서 기록)
+      - resolve_unknown 감사의 broker_state ∈ FILLED·CANCELLED·REJECTED (OPEN·PARTIAL·누락은 종료 증거 아님)
+      - 전량 체결 원장(cum ≥ 요청 수량) → FILLED
+      - 우리 취소 확정·마감 소멸 알림(order:{id}:cancelled|expired) → CANCELLED
+      - 전송 시점 거부·미전송(details.reject|not_sent → 전송 시각) → REJECTED·NOT_SENT
+    취소 요청·대기·거부, 접수, 부분체결 기록은 종료 증거가 아니다. 다른 주문일 수 있는 이벤트 단위 알림은 쓰지 않는다.
+    현재 최종 상태와 다른 상태를 입증하는 유효한 증거가 하나라도 있으면 시각을 확정하지 않고 final_evidence_conflict.
     시각은 시스템이 확인·반영한 시각이다 (증권사 실제 체결 시각과 다를 수 있다)."""
-    st, times, conflicts = o["state"], [], []
     try:
         details = json.loads(o["details"] or "{}")
     except (TypeError, ValueError):
         details = {}
+    evidence = []                                   # (입증하는 최종 상태, 시각)
+    for f in details.get("final") or []:
+        if isinstance(f, dict) and f.get("state"):
+            evidence.append((f["state"], f.get("at")))
     for a in resolves:
         fin = FINAL_BROKER_STATES.get((a.get("details") or {}).get("broker_state"))
         if fin is not None:
-            (times if fin == st else conflicts).append(a["at"])
-    for f in details.get("final") or []:
-        if isinstance(f, dict) and f.get("state"):
-            (times if f["state"] == st else conflicts).append(f.get("at"))
-    full = [r["applied_at"] for r in ledger_rows if r["cum_filled_qty"] >= o["requested_qty"]]
-    (times if st == "FILLED" else conflicts).extend(full)
-    if st == "CANCELLED":
-        times += [a["created_at"] for a in ctx["order_alerts"]
-                  if a["dedup_key"] in (f"order:{o['id']}:cancelled", f"order:{o['id']}:expired")]
-    if (st == "REJECTED" and details.get("reject")) or (st == "NOT_SENT" and details.get("not_sent")):
-        times.append(o["sent_at"] or o["created_at"])
-    if conflicts:
+            evidence.append((fin, a["at"]))
+    evidence += [("FILLED", r["applied_at"]) for r in ledger_rows if r["cum_filled_qty"] >= o["requested_qty"]]
+    evidence += [("CANCELLED", a["created_at"]) for a in ctx["order_alerts"]
+                 if a["dedup_key"] in (f"order:{o['id']}:cancelled", f"order:{o['id']}:expired")]
+    sent_at = o["sent_at"] or o["created_at"]
+    if details.get("reject"):
+        evidence.append(("REJECTED", sent_at))
+    if details.get("not_sent"):
+        evidence.append(("NOT_SENT", sent_at))
+    if any(state != o["state"] for state, _ in evidence):
         return None, "final_evidence_conflict"
-    times = [t for t in times if t is not None]
+    times = [t for _, t in evidence if t is not None]
     return (min(times), None) if times else (None, None)
 
 
