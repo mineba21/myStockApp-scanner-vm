@@ -429,6 +429,13 @@ class AutoStopStore:
                        "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=excluded.value",
                        (day, mode, metric, key, value))
 
+    def stat_min(self, day, mode, metric, key, value):
+        """기존 값과 비교해 작은 값만 남긴다 (예: 상태 근거 1=일치·0=불일치 — 한 번이라도 불일치면 0 유지)."""
+        with self.tx() as db:
+            db.execute("INSERT INTO auto_stop_daily_stats(day,mode,metric,key,value) VALUES(?,?,?,?,?) "
+                       "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=MIN(value, excluded.value)",
+                       (day, mode, metric, key, value))
+
     def stat_set_if_absent(self, day, mode, metric, key, value) -> bool:
         """처음 한 번만 기록한다 (예: 그날 신규 슬롯 형식 기록 시작 시각)."""
         with self.tx() as db:

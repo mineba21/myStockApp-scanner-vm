@@ -214,7 +214,10 @@ def _check_totals(rep):
     w = rep["watch"]
     pos_ok = sum(p["ok_checks"] for p in w["positions"] if p["ok_checks"] is not None)
     grp_ok = sum(a["ok"] for a in w["legacy_ticker_totals"].values())
-    assert w["ok"] == pos_ok + grp_ok
+    # (5차 리뷰 계약) 측정 불가 포지션이 있으면 전체 정상은 None, 측정 범위 합은 measured_subtotal 로만 보인다.
+    unmeasured = [p for p in w["positions"] if p["ok_checks"] is None and not p["ticker_group"]]
+    assert w["measured_subtotal"]["ok"] == pos_ok + grp_ok
+    assert w["ok"] == (None if unmeasured else pos_ok + grp_ok)
     if w["missed"] is not None:
         assert w["missed"] == w["expected"] - w["ok"] >= 0
     assert w["normal_rate_pct"] is None or w["normal_rate_pct"] <= 100

@@ -176,6 +176,7 @@ def disable(store, pid, *, now=None, actor="web") -> dict:
         raise Refused("이미 종료된 자동 손절입니다.")
     if _has_unresolved(store, pid):
         raise Refused("미확정 주문이 있어 해제할 수 없습니다. 일시중지 후 주문이 종료되면 해제하세요.")
+    record_watch_end(store, pos["mode"], pos, now)          # 관리 종료: 감시 종료 시점 상태 근거
     if not store.update_position(pid, now, expect_states=("ACTIVE", "EXITING", "NEEDS_REVIEW"),
                                  state="DISABLED", auto_paused=1):
         raise Refused("상태가 바뀌어 해제하지 못했습니다. 새로고침 후 다시 시도하세요.")
@@ -224,6 +225,7 @@ def promote(store, reader, pid, *, confirmation_ticker, now=None, settings=None,
             review_reason=f"LIVE 전환 시점 현재가 {q.price} ≤ 손절가 {stop}" if below else None)
     except ClaimRefused as exc:
         raise Refused(str(exc)) from exc
+    record_watch_end(store, src["mode"], store.position(pid), now)
     store.update_position(pid, now, expect_states=("ACTIVE",), state="DISABLED",
                           review_reason=f"LIVE 포지션 {new_id}로 전환")
     store.audit(now, actor, "promote", pid, {"live_position_id": new_id, "below_stop": below})
@@ -382,7 +384,6 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
 
     events = [e for e in store.events(mode=mode) if ny_date(e["triggered_at"]) == d]
     positions = []
-    total_expected = total_ok = 0
     health = store.runtime_get(f"quote_health:{mode}", {}) or {}
     day_start = datetime.combine(d, datetime.min.time(), tzinfo=NEW_YORK).timestamp()
     fault_audits = store.audits("quote_fault", day_start, day_start + 86400) + \
@@ -417,7 +418,8 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
             continue
         p_events = [e for e in store.events(mode=mode) if e["position_id"] == p["id"]]
         stop_at = min([e["triggered_at"] for e in p_events] + [end])
-        if p["state"] not in ("ACTIVE", "EXITING", "NEEDS_REVIEW") and not p_events:
+        # 감시(engine._watch)는 ACTIVE·EXITING 만 한다. 확인 필요(NEEDS_REVIEW)·종료 상태는 전환 시각에 감시가 끝났다.
+        if p["state"] not in ("ACTIVE", "EXITING") and not p_events:
             stop_at = min(stop_at, p["updated_at"])
         ws = max(start, p["created_at"])
         if max(0.0, stop_at - ws) <= 0 and not p_events:
@@ -450,7 +452,13 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
                 # 허용 오차만으로 SLOT_V2 를 주지 않는다: 오차 이내이고 그 티커에 구버전 기록이 없을 때만.
                 c["fmt"] = "SLOT_V2" if (c["ws"] + tol >= v2_since and remainder == 0) else "MIXED"
         claimants = [c for c in group if c["fmt"] in ("LEGACY", "MIXED")]
-        ticker_info[t] = {"quote_ok": total, "v2_ok": v2, "remainder": remainder, "claimants": claimants}
+        # 일반 감시 실패·무효: 티커 일계(quote_fail/quote_invalid)와 신버전 포지션 상세(pos_watch_fail/invalid)는 신버전에서
+        # 같은 호출(_record_quote_error, purpose=watch)이 함께 올린다 → 같은 범위·같은 의미. 차이 = 구버전 몫.
+        v2_fail = sum(int(stat("pos_watch_fail", str(c["p"]["id"]))) for c in group if c["fmt"] != "LEGACY")
+        v2_inv = sum(int(stat("pos_watch_invalid", str(c["p"]["id"]))) for c in group if c["fmt"] != "LEGACY")
+        ticker_info[t] = {"quote_ok": total, "v2_ok": v2, "remainder": remainder, "claimants": claimants,
+                          "fail_rem": int(stat("quote_fail", t)) - v2_fail,
+                          "inv_rem": int(stat("quote_invalid", t)) - v2_inv}
     legacy_ticker_totals, unattributed, ok_unmeasured = {}, [], 0
 
     for c in cands:
@@ -476,14 +484,18 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
             + [{"at": hp["to"], "action": "global_hold_off"} for hp in hold_periods if hp["to"]],
             key=lambda x: x["at"])
         if measured_from is not None:
+            # 지금 감시 중인 포지션(마감 처리 전 당일 ACTIVE)만 현재 상태로 확인한다. 이미 감시가 끝난 포지션의 상태를
+            # 현재 값으로 추정하지 않는다.
+            watching_now = live_day and p["state"] == "ACTIVE"
             states, sq = _state_intervals(store, mode, p, measured_from, stop_at, rec, hold_periods,
-                                          check_current=live_day)
-            # 상태 이력의 완전성 근거: 마감 처리 때 저장한 상태 대조 결과(조회 시각과 무관) + 당시 기록된 슬롯 분류
+                                          check_current=watching_now)
+            # 상태 이력의 완전성 근거: 감시 종료 시점(관리 종료·트리거·확인 필요·장 마감)에 포지션별로 저장한 상태 대조
+            # 결과 + 당시 기록된 슬롯 분류. 일자 완료 표식(state_audit_done)은 포지션별 근거가 아니다.
             ev = close_evidence.get(str(pid))
             if ev is not None and int(ev) != 1:
-                sq.append("state_unaudited: 마감 처리 때 상태가 감사 기록과 맞지 않았음")
-            elif ev is None and not finalized and not live_day:
-                sq.append("state_evidence_missing: 마감 처리 기록이 없어 상태 이력 완전성을 확인할 수 없음")
+                sq.append("state_unaudited: 감시 종료 시점 상태가 감사 기록과 맞지 않았음")
+            elif ev is None and not watching_now:
+                sq.append("state_evidence_missing: 이 포지션의 감시 종료 시점 상태 근거가 없음")
             sq += _slot_state_issues(per_slot, states, interval)
             quality += sq
             gaps = _gap_view(pid, stats, measured_from, stop_at, per_slot, interval, transitions, states,
@@ -519,45 +531,87 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
             else:
                 ok = None                    # 같은 티커 구버전 기간 포지션이 여럿: 배분하지 않는다
                 agg = legacy_ticker_totals.setdefault(
-                    t, {"ok": info["remainder"], "expected": 0, "positions": [], "quote_ok": info["quote_ok"]})
+                    t, {"ok": info["remainder"], "expected": 0, "positions": [], "quote_ok": info["quote_ok"],
+                        "quote_fail": info["fail_rem"] if info["fail_rem"] >= 0 else None,
+                        "quote_invalid": info["inv_rem"] if info["inv_rem"] >= 0 else None})
                 agg["ok"] += own_v2_ok
                 agg["expected"] += expected
+                if fmt == "MIXED":
+                    for k, m in (("quote_fail", "watch_fail"), ("quote_invalid", "watch_invalid")):
+                        if agg[k] is not None:
+                            agg[k] += pstat(m, pid)
                 agg["positions"].append(pid)
                 quality.append("legacy_ticker_shared: 같은 티커 구버전 기간 포지션이 여럿이라 포지션별로 나누지 않음")
         missed = None if ok is None or ok > expected else expected - ok
         if ok is not None and ok > expected:
             quality.append(f"aggregate_exceeds_expected: 정상 {ok} > 기대 {expected} (전환 구간 겹침 등)")
-        if ok is not None:
-            total_expected += expected
-            total_ok += ok
-        recovery = {"attempts": pstat("attempt_recovery", pid), "ok": pstat("recovery_ok", pid),
-                    "fail": pstat("recovery_fail", pid), "invalid": pstat("recovery_invalid", pid),
-                    "stale_repeat": pstat("recovery_stale", pid)}
+        group = t if (fmt != "SLOT_V2" and t in legacy_ticker_totals and pid in legacy_ticker_totals[t]["positions"]) \
+            else None
+        # 일반 감시 실패·무효 (같은 범위의 기록만, 임의 차감·합산 없음)
+        if fmt == "SLOT_V2":
+            q_fail, q_inv = pstat("watch_fail", pid), pstat("watch_invalid", pid)
+        elif group or len(info["claimants"]) != 1:
+            q_fail = q_inv = None                     # 티커 그룹 합계로만 보인다
+        else:
+            own_f = pstat("watch_fail", pid) if fmt == "MIXED" else 0
+            own_i = pstat("watch_invalid", pid) if fmt == "MIXED" else 0
+            q_fail = info["fail_rem"] + own_f if info["fail_rem"] >= 0 else None
+            q_inv = info["inv_rem"] + own_i if info["inv_rem"] >= 0 else None
+            if info["fail_rem"] < 0 or info["inv_rem"] < 0:
+                quality.append("aggregate_mismatch: 티커 일계 감시 실패·무효가 신버전 상세보다 작음")
+        # 신버전에만 있는 지표: 전 구간을 신버전이 기록한 포지션(SLOT_V2)만 값이 있다. 구버전 회복 조회 실패는
+        # 저널에 기록되지 않았다 (로그에만 있음) → 측정 불가.
+        full_v2 = fmt == "SLOT_V2"
+
+        def v2(metric):
+            return pstat(metric, pid) if full_v2 else None
+        recovery = {"attempts": v2("attempt_recovery"), "ok": v2("recovery_ok"), "fail": v2("recovery_fail"),
+                    "invalid": v2("recovery_invalid"), "stale_repeat": v2("recovery_stale")}
         positions.append({
             "id": pid, "ticker": t, "state": p["state"], "format": fmt, "window": {"start": ws, "end": stop_at},
+            "ticker_group": group,
             # 감시 슬롯 (거래일 + 모드 + position_id + 슬롯 시작). 완료 슬롯마다 분류 하나, 진행 중 슬롯은 따로.
             "slots": slots, "expected_checks": expected, "ok_checks": ok, "missed_checks": missed, **breakdown,
             "normal_rate_pct": round(ok / expected * 100, 1) if (expected and missed is not None) else None,
             "data_quality": quality,
             # 조회 시도 (목적별, 같은 슬롯의 재시도 포함. HTTP 요청 수와 다를 수 있다)
-            "attempts": {k: pstat(f"attempt_{k}", pid) for k in ("watch", "recovery", "order", "cancel_check",
-                                                                  "incident")},
-            "watch_attempts": pstat("attempt_watch", pid),
-            "quote_fail": pstat("watch_fail", pid) if fmt == "SLOT_V2" else None,
-            "quote_invalid": pstat("watch_invalid", pid) if fmt == "SLOT_V2" else None,
+            "attempts": {k: v2(f"attempt_{k}") for k in ("watch", "recovery", "order", "cancel_check", "incident")},
+            "watch_attempts": v2("attempt_watch"),
+            "watch_attempts_since_switch": pstat("attempt_watch", pid) if fmt == "MIXED" else None,
+            "quote_fail": q_fail, "quote_invalid": q_inv,
+            "quote_fail_source": "position_slots" if fmt == "SLOT_V2" else "ticker_daily",
             "recovery": recovery,
-            "order_quote": {"ok": pstat("order_ok", pid), "fail": pstat("order_fail", pid),
-                            "invalid": pstat("order_invalid", pid), "held": int(stat("order_held_symbol", t))},
-            "held_triggers": pstat("held_trigger", pid), "deferred": pstat("deferred", pid),
+            "order_quote": {"ok": v2("order_ok"), "fail": v2("order_fail"), "invalid": v2("order_invalid"),
+                            "held": int(stat("order_held_symbol", t)) if full_v2 else None},
+            "held_triggers": v2("held_trigger"), "deferred": v2("deferred"),
             "gaps": gaps,
             "max_quote_age_sec": maxstat("max_quote_age_sec", t),
             "last_quote_at": p["last_quote_at"], "last_check_at": p["last_price_check_at"],
             "health_state": rec.get("state"), "fault_started_at": rec.get("fault_started_at"),
             "recovered_at": rec.get("recovered_at"), "faults": faults,
             "first_error": rec.get("first_error") if (rec.get("first_error") or {}).get("day") == day else None})
-    for agg in legacy_ticker_totals.values():
-        total_expected += agg["expected"]
-        total_ok += agg["ok"]
+    # ── 전체 집계: 기대 횟수와 성공 횟수의 측정 가능 여부를 따로 본다 ─────────────────────
+    #   기대: 모든 포지션(티커 그룹 포함)의 확인된 기대를 그대로 합한다.
+    #   성공·실패 등: 측정 불가(None) 포지션이 하나라도 있으면 전체는 None. 티커 그룹은 그룹 합계로 정확히 한 번 센다.
+    #   측정된 범위의 소계는 measured_subtotal 로 따로 보인다 (전체 통계가 아니다).
+    solo = [p for p in positions if not p["ticker_group"]]
+
+    def total_of(key, group_key=None):
+        if any(p[key] is None for p in solo):
+            return None
+        groups = list(legacy_ticker_totals.values()) if group_key else []
+        if any(a[group_key] is None for a in groups):
+            return None
+        return sum(p[key] for p in solo) + sum(a[group_key] for a in groups)
+    total_expected = sum(p["expected_checks"] for p in solo) + sum(a["expected"] for a in legacy_ticker_totals.values())
+    total_ok = total_of("ok_checks", "ok")
+    measured_solo = [p for p in solo if p["ok_checks"] is not None]
+    grouped_n = sum(len(a["positions"]) for a in legacy_ticker_totals.values())
+    measured_n = len(measured_solo) + grouped_n
+    measured_subtotal = {
+        "positions": measured_n,
+        "expected": sum(p["expected_checks"] for p in measured_solo) + sum(a["expected"] for a in legacy_ticker_totals.values()),
+        "ok": sum(p["ok_checks"] for p in measured_solo) + sum(a["ok"] for a in legacy_ticker_totals.values())}
     for t, info in ticker_info.items():
         if info["remainder"] > 0 and not info["claimants"]:
             unattributed.append(f"unattributed_legacy_ok: {t} 구버전 몫 {info['remainder']}회를 귀속할 포지션 없음")
@@ -583,9 +637,13 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     expected_ticks = int((end - start) // max(1, settings.tick_sec))
     max_gap = maxstat("max_tick_gap_sec")
     holds = _hold_periods(store, start, end)
-    sum_pos = lambda key: sum(int(p[key] or 0) for p in positions)  # noqa: E731
-    recovery_tot = {k: sum(int(p["recovery"][k]) for p in positions)
+    def pos_total(get):
+        vals = [get(p) for p in positions]
+        return None if any(v is None for v in vals) else sum(vals)
+    recovery_tot = {k: pos_total(lambda p, k=k: p["recovery"][k])
                     for k in ("attempts", "ok", "fail", "invalid", "stale_repeat")}
+    recovery_tot["coverage"] = ("none" if not positions or all(p["recovery"]["attempts"] is None for p in positions)
+                                else "full" if recovery_tot["attempts"] is not None else "partial")
     slot_tot = {c: sum(p["slots"][c] for p in positions if p["slots"]) for c in QH.SLOT_CLASSES + ("expected",)}
     def coverage(n_ok, n_all):
         return "none" if n_ok == 0 else "full" if n_ok == n_all else "partial"
@@ -611,12 +669,18 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
     bd_unmeasured = sum(p["missed_checks"] for p in positions if p["held_slots"] is None
                         and p["missed_checks"] is not None)
     bd_unmeasured += sum(max(0, a["expected"] - a["ok"]) for a in legacy_ticker_totals.values())
+    total_missed = (total_expected - total_ok) if (total_ok is not None and total_ok <= total_expected) else None
+    if total_missed is None:
+        bd_unmeasured = None                         # 전체 누락을 모르면 원인 미측정 몫도 확정할 수 없다
 
     def bd_sum(key):
         return sum(p[key] for p in measurable_bd) if measurable_bd else None
-    ok_cov = coverage(len(positions) - ok_unmeasured, len(positions)) if positions else "none"
+    ok_cov = coverage(measured_n, len(positions)) if positions else "none"
+    ok_status = ("no_targets" if not positions else "unmeasured" if measured_n == 0
+                 else "partial" if measured_n < len(positions) else "full")
     quality = [f"{p['ticker']}#{p['id']}: {q}" for p in positions for q in p["data_quality"]] + unattributed
-    if total_ok > total_expected:
+    day_full_v2 = v2_since is not None and v2_since <= start + tol      # 그날 전 구간을 신버전이 기록
+    if total_ok is not None and total_ok > total_expected:
         quality.append(f"aggregate_exceeds_expected: 전체 정상 {total_ok} > 기대 {total_expected}")
     heartbeat = store.runtime_get("heartbeat_at")
     unresolved_orders = store.orders(mode=mode, states=UNRESOLVED)
@@ -626,33 +690,38 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         "watched_positions": len(positions),
         "data_quality": quality,
         "format": report_format, "slot_v2_since": v2_since,
-        "watch": {"expected": total_expected, "ok": total_ok,
-                  "missed": total_expected - total_ok if total_ok <= total_expected else None,
-                  "ok_coverage": ok_cov, "ok_unmeasured_positions": ok_unmeasured,
+        "watch": {"expected": total_expected, "ok": total_ok, "missed": total_missed,
+                  "ok_coverage": ok_cov, "ok_status": ok_status,
+                  "ok_unmeasured_positions": len(positions) - measured_n, "ok_measured_positions": measured_n,
+                  "ok_ticker_aggregated_positions": grouped_n, "measured_subtotal": measured_subtotal,
                   "legacy_ticker_totals": legacy_ticker_totals,
                   "slots": slot_tot, "gaps": gap_tot,
                   "held_slots": bd_sum("held_slots"), "paused_slots": bd_sum("paused_slots"),
                   "failed_slots": bd_sum("failed_slots"), "schedule_missed": bd_sum("schedule_missed"),
                   "cause_unmeasured_missed": bd_unmeasured,
-                  "attempts": sum_pos("watch_attempts"),
-                  "api_errors": sum(p["quote_fail"] for p in positions if p["quote_fail"] is not None),
-                  "invalid": sum(p["quote_invalid"] for p in positions if p["quote_invalid"] is not None),
+                  "attempts": pos_total(lambda p: p["watch_attempts"]),
+                  "api_errors": total_of("quote_fail", "quote_fail"),
+                  "invalid": total_of("quote_invalid", "quote_invalid"),
                   "normal_rate_pct": (round(total_ok / total_expected * 100, 1)
-                                      if total_expected and total_ok <= total_expected else None),
+                                      if total_expected and total_missed is not None else None),
                   "positions": positions},
         # 일반 감시와 따로 센다. 회복 확정에 쓴 시세는 정상 감시 성공(watch.ok)에 넣지 않는다.
         "recovery": recovery_tot,
-        "holds": {**holds, "held_triggers": sum(p["held_triggers"] for p in positions)},
+        "holds": {**holds, "held_triggers": pos_total(lambda p: p["held_triggers"])},
         # Scheduler heartbeat (tick) 은 종목별 시세 감시와 별개로 평가한다.
         "ticks": {"expected": expected_ticks, "actual": int(stat("ticks")), "max_gap_sec": max_gap},
         "api": {"errors": int(stat("api_error")), "by_category": {r["key"]: int(r["value"]) for r in stats
                                                                    if r["metric"] == "api_error"},
-                "quote_errors": {r["key"]: int(r["value"]) for r in stats if r["metric"] == "quote_error"},
-                "http_429": int(stat("http_429")), "http_requests": int(stat("http_requests")),
-                "http_requests_by_api": {r["key"]: int(r["value"]) for r in stats if r["metric"] == "http_requests"},
-                "other_recovery": {k: {"attempts": int(stat("recovery_attempt", k)),
-                                       "ok": int(stat("recovery_ok", k)), "fail": int(stat("recovery_fail", k))}
-                                   for k in ("balance", "orders")}},
+                # 아래는 신버전에만 있는 지표: 그날 전 구간을 신버전이 기록했을 때만 값이 있다 (구버전 기간 = 측정 불가).
+                "quote_errors": ({r["key"]: int(r["value"]) for r in stats if r["metric"] == "quote_error"}
+                                 if day_full_v2 else None),
+                "http_429": int(stat("http_429")) if day_full_v2 else None,
+                "http_requests": int(stat("http_requests")) if day_full_v2 else None,
+                "http_requests_by_api": ({r["key"]: int(r["value"]) for r in stats if r["metric"] == "http_requests"}
+                                         if day_full_v2 else None),
+                "other_recovery": ({k: {"attempts": int(stat("recovery_attempt", k)),
+                                        "ok": int(stat("recovery_ok", k)), "fail": int(stat("recovery_fail", k))}
+                                    for k in ("balance", "orders")} if day_full_v2 else None)},
         "triggers": len(events),
         "orders": {"total": len(orders), "by_kind": {k: sum(o["kind"] == k for o in orders)
                                                      for k in ("ORIGINAL", "REPLACE", "CARRY_OVER")},
@@ -785,6 +854,20 @@ def _slot_state_issues(per_slot, states, interval):
     if any(c == "held" and not covered(s, ("fault", "hold")) for s, c in per_slot.items()):
         issues.append("state_unaudited: 보류 슬롯이 감사 기록의 장애·보류 구간 밖에 있음")
     return issues
+
+
+def record_watch_end(store, mode, p, at, rec=None):
+    """감시가 끝나는 시점(관리 종료·손절 트리거·확인 필요 전환·외부 매도·장 마감)의 상태 근거를 포지션별로 남긴다.
+
+    p 는 전환 직전 행이다 (ACTIVE/EXITING 일 때만 감시 대상). 현재 일시중지·종목 시세 상태가 at 까지의 감사 기록과
+    맞으면 1, 아니면 0 — 같은 거래일에 여러 번 기록되면 작은 값(불일치)을 남긴다. 보고서 조회 경로에서는 부르지 않는다."""
+    if p is None or p["state"] not in ("ACTIVE", "EXITING"):
+        return None
+    if rec is None:
+        rec = (store.runtime_get(f"quote_health:{mode}") or {}).get(str(p["id"]))
+    value = 0 if current_state_issues(store, mode, p, rec, at) else 1
+    store.stat_min(ny_date(at).isoformat(), mode, "state_audit", str(p["id"]), value)
+    return value
 
 
 def current_state_issues(store, mode, p, rec, until):
@@ -935,8 +1018,11 @@ def report_text(rep: dict) -> str:
                     f"{g.get('normal_measured_positions', 0)}/{total_pos}종목) · 120초 초과 {_fmt(g.get('over_120'), '건')}"
                     f" (정상 상태 {_fmt(g.get('normal_over_120'), '건')})")
     unmeasured = w.get("cause_unmeasured_missed") or 0
+    sub = w.get("measured_subtotal") or {}
     if w.get("missed") is None:
-        miss_text = "누락 측정 불가 (집계 불일치)"
+        miss_text = ("누락 측정 불가"
+                     + (f" (측정 가능 {sub.get('positions')}/{total_pos}종목 소계 정상 {sub.get('ok')}/"
+                        f"{sub.get('expected')})" if w.get("ok_coverage") == "partial" else ""))
     elif w.get("held_slots") is None:
         miss_text = f"누락 {w['missed']} (세부 원인 측정 불가)"
     else:
@@ -945,16 +1031,16 @@ def report_text(rep: dict) -> str:
                      + (f" + 원인 측정 불가 {unmeasured}" if unmeasured else ""))
     dq = rep.get("data_quality") or []
     return (f"[자동손절 일일 보고 {rep['day']} {rep['mode']}] 형식 {rep.get('format', '-')} · 감시 "
-            f"{rep['watched_positions']}종목 · 정상 감시 {w['ok']}/{w['expected']}"
+            f"{rep['watched_positions']}종목 · 정상 감시 {_fmt(w['ok'])}/{w['expected']}"
             + (" (일부 종목 측정 불가)" if w.get("ok_coverage") == "partial" else "")
-            + f" ({miss_text}){gap_text} · 일반 감시 시도 {w.get('attempts', 0)} "
-            f"(API 오류 {w.get('api_errors', 0)}, 무효 {w.get('invalid', 0)}) · 회복 조회 {r.get('ok', 0)}/"
-            f"{r.get('attempts', 0)} (실패 {r.get('fail', 0)}, 무효 {r.get('invalid', 0)}, 동일시세 "
-            f"{r.get('stale_repeat', 0)}) · 전체 보류 {int(hd.get('global_seconds', 0))}초"
+            + f" ({miss_text}){gap_text} · 일반 감시 시도 {_fmt(w.get('attempts'))} "
+            f"(API 오류 {_fmt(w.get('api_errors'))}, 무효 {_fmt(w.get('invalid'))}) · 회복 조회 {_fmt(r.get('ok'))}/"
+            f"{_fmt(r.get('attempts'))} (실패 {_fmt(r.get('fail'))}, 무효 {_fmt(r.get('invalid'))}, 동일시세 "
+            f"{_fmt(r.get('stale_repeat'))}) · 전체 보류 {int(hd.get('global_seconds', 0))}초"
             + (f" · 종목별 {per}" if per else "")
             + f" · tick {rep['ticks']['actual']}/"
-            f"{rep['ticks']['expected']} (최대 간격 {rep['ticks']['max_gap_sec']}초) · API 오류 합계 {rep['api']['errors']} "
-            f"(HTTP 요청 {rep['api'].get('http_requests', 0)}, 429 {rep['api']['http_429']}) · 손절 {rep['triggers']} · "
+            f"{rep['ticks']['expected']} (최대 간격 {_fmt(rep['ticks']['max_gap_sec'], '초')}) · API 오류 합계 {rep['api']['errors']} "
+            f"(HTTP 요청 {_fmt(rep['api'].get('http_requests'))}, 429 {_fmt(rep['api'].get('http_429'))}) · 손절 {rep['triggers']} · "
             f"주문 {o['total']} (재주문 {o['by_kind']['REPLACE']}, "
             f"체결 {o['filled']}, 미체결 {o['partial_or_open']}) · 미해결 이벤트 {rep['unresolved_events']} · "
             f"알림 실패 {rep['alerts']['failed']}" + (f" · 데이터 품질 오류 {len(dq)}건" if dq else "")

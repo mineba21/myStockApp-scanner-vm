@@ -460,6 +460,19 @@ RECOVERING ──(오류)──> FAULT          RECOVERING ──(같은·더 �
   - 객체 유형이 표 하나가 아니면(VIEW, 같은 이름의 INDEX·TRIGGER 등) 거부한다.
   - 메타데이터 조회 실패, 표가 있는데 미확정 조회 실패(열 누락 등 스키마 불일치, SQLite 오류)는 "부재"로 보지 않고 거부한다.
   - 거부는 모두 `ScannerJournalUnreadable` 이며 LIVE ORIGINAL·REPLACE·CARRY_OVER 매도와 CANCEL_FOR_REPLACE 취소의 선점을 막는다 (sell/cancel 전송 0회). SHADOW 는 증권사로 보내지 않으므로 이 확인을 하지 않는다.
+- **읽기 실패 후속 처리 (2026-11-28 Codex 5차 리뷰 P1 반영)** — `ScannerJournalUnreadable` 은 엔진 치명 오류가 아니라 예상 가능한 주문 안전 차단 사유다.
+  - 사전 검사(`_send`, `_replace_precheck`)와 최종 선점 게이트가 같은 함수(`Engine.scanner_block_db`)와 같은 사유 문구를 쓴다: `scanner_buy_in_flight: …` / `scanner_journal_unreadable: …`. "미확정 없음(False)"으로 바꾸지 않는다.
+  - 이 함수는 `ScannerJournalUnreadable` 만 잡는다. LeaseLost, 저널 자체 손상 등 다른 예외는 기존 정책대로 올라간다 (포괄 `except Exception` 없음). 전송 결과 불명은 기존 UNKNOWN·CANCEL_UNKNOWN 정책 그대로다.
+  - 최초·이월 매도 전: 전송하지 않고 이벤트·트리거·잔여를 유지하며 `auto_stop_runtime.order_block:{event_id}`(대기 시작 시각·종류·사유)를 남긴다. 저널 읽기 실패면 URGENT (시간당 1회), Scanner 미확정 매수면 기존 WARN (하루 1회).
+  - 재주문 목적 취소 전: cancel 을 보내지 않고 기존 매도 주문을 유지한다. 사전 검사 실패와 최종 선점 거부 모두 `cancel_held` WARN 알림(시간당 1회)과 통계를 남긴다. 기존 주문 대조는 tick 시작의 `_reconcile_all` 이 계속한다.
+  - 원주문 취소 확정 후: 대체 매도를 보내지 않고 이벤트·트리거·잔여를 유지하며 `replace_waiting:{event_id}` 에 **실제 사유**를 남기고 URGENT 알림(시간당 1회, 기존 억제 정책)을 보낸다. 반복 tick·재시작에서도 대기 시작 시각(`since`)을 유지한다.
+  - 한 이벤트의 차단은 그 이벤트만 건너뛴다. 다른 이벤트의 주문 대조·종료 판정·마감 처리는 계속된다. 저널 읽기 실패는 저널 공통 장애이므로 각 이벤트가 자기 검사에서 똑같이 차단된다 (신규 주문 0).
+  - 저널이 정상화되면 다음 tick 에 모든 안전 조건(사전 검사 + 최종 게이트)을 다시 확인해 같은 이벤트로 재주문한다. 장애 상태 수동 초기화나 새 손절 이벤트 생성은 없다.
+- **재주문 결과 판정**: 주문 행 생성 ≠ 접수. `_send` 는 (blocked, 사유) 또는 (order, 주문 id) 를 돌려주고, 대기 기록은 실제 주문 상태로 처리한다.
+  - SUBMITTED·PARTIAL_FILLED·FILLED(·이후 취소 단계): 접수 확인 → `replace_waiting`·`order_block` 해제.
+  - SENDING(늦은 응답)·UNKNOWN: 해제하지 않는다 (`outcome` 기록). 긴급 알림은 기존 UNKNOWN 알림이 맡는다. 이후 대조로 접수가 확인되면 다음 tick 에 해제한다.
+  - REJECTED·NOT_SENT: 해제하지 않는다 (`outcome` 기록). 이벤트는 기존 정책대로 NEEDS_REVIEW 이며 그 URGENT 알림이 맡는다.
+  - 주문 상태 머신의 의미는 바꾸지 않았다.
 
 **반대 방향 경쟁 (Scanner 매수 선점 → 자동손절 매도) — 교차 시스템 LIVE 차단 조건 (미해결)**
 - 현재 상태: Scanner 매수의 `prepare()` 는 Scanner 미확정만 보고, `execute()` 의 선점 갱신(PREPARED→SENDING)은 아무 교차 확인 없이 진행한다. 자동손절 LIVE 매도·취소가 진행 중인 같은 종목에 Scanner 매수가 나갈 수 있다. 이 PR 은 자동손절 쪽(정방향)만 막으며 Scanner 매수 코드는 바꾸지 않는다.
@@ -496,7 +509,7 @@ RECOVERING ──(오류)──> FAULT          RECOVERING ──(같은·더 �
 취소 이후
 - 취소 확정(CANCELLED, 잔여 0) 전에는 새 주문을 내지 않는다. 취소 응답 사이의 추가 체결은 누적 체결 증분으로 반영하고, 재주문 수량은 실제 관리 잔여로 다시 계산한다.
 - 재주문(`_send`, REPLACE)은 종목 상태·잔고·매도가능·새 유효 시세·주문 안전 조건을 다시 확인한다.
-- 취소 확정 뒤 시세 장애·전체 보류 등으로 재주문하지 못하면 청산 이벤트와 트리거는 그대로 두고 `auto_stop_runtime.replace_waiting:{event_id}` 에 대기 사유를 기록하고 URGENT 알림을 보낸다 (시간당 1회). 조건이 확인되면 최신 시세로 재주문하고 기록을 지운다.
+- 취소 확정 뒤 시세 장애·전체 보류·Scanner 저널 읽기 실패 등으로 재주문하지 못하면 청산 이벤트와 트리거는 그대로 두고 `auto_stop_runtime.replace_waiting:{event_id}` 에 실제 대기 사유를 기록하고 URGENT 알림을 보낸다 (시간당 1회). 조건이 확인되면 최신 시세로 재주문하고, 증권사 접수가 확인되면 기록을 지운다 (위 "재주문 결과 판정").
 - 취소 결과 불명(CANCEL_UNKNOWN)은 기존대로 자동 재시도·재주문하지 않고 증권사 주문내역 증거로만 해제한다.
 - 사용자의 수동 취소(키움 앱)는 이 경로와 별개다. 외부 취소는 기존 규칙(장중 NEEDS_REVIEW, 마감 후 소멸·이월)을 따른다.
 - 회복을 확정한 시세는 정상 감시 성공으로 세지 않고 손절 판단에도 쓰지 않는다. 다음 감시 슬롯부터 일반 감시로 판단한다.
@@ -632,9 +645,14 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
   - 전체 보류: `global_hold`
 - 정상 상태 공백 = 공백 전 구간이 위 어떤 상태와도 겹치지 않고 보류·일시중지 슬롯도 없는 공백. 상태가 섞인 공백은 정상 상태가 아니다. 각 공백에 겹친 상태(`states`), 상태 전이, 원인(`global_hold`/`symbol_fault`/`paused`/`watch_fail`/`invalid`/`schedule_missed`/`interval`)을 붙이고, 감시 시작 시점의 상태(`state_at_start`)를 보인다.
 - 감사 기록 없는 상태 변경 확인 (2026-11-27 Codex 4차 리뷰 P2 반영) — 조회 시각에 따라 과거 결과가 바뀌지 않게 한다.
-  - **마감 시점 근거 보존**: 엔진의 장 마감 처리(슬롯 확정과 같은 지점, 보고서 조회 경로가 아님)가 포지션마다 현재 상태(`auto_paused`, 종목 상태)를 감사 기록 복원 결과와 비교해 `metric='state_audit'`(key=position_id, 1=일치, 0=불일치)로 남기고, 끝에 `state_audit_done`(시각)을 남긴다. 기존 표·기존 지표 방식이며 스키마 변경은 없다.
-  - 과거 날짜(마감 처리 완료)는 이 근거만 쓴다. 현재 시각·현재 포지션 상태·다음 날 감사 기록으로 판정을 바꾸지 않는다. `state_audit=0` 이면 `state_unaudited`, 마감 근거가 없는 과거 날짜(앱 중단 등)는 `state_evidence_missing` 이며 둘 다 정상 상태 판정 불가로 고정된다.
-  - 당일 장중(마감 처리 전)만 현재 상태로 확인한다.
+  - **감시 종료 시점 근거 보존 (2026-11-28 Codex 5차 리뷰 P2 반영)**: 포지션의 감시가 끝나는 지점마다 전환 직전 상태(`auto_paused`, 종목 상태)를 감사 기록 복원 결과와 비교해 `metric='state_audit'`(key=position_id, 1=일치, 0=불일치)로 남긴다. 같은 날 여러 번 기록되면 작은 값(불일치)을 유지한다(`stat_min`). 기록 지점(보고서 조회 경로가 아님):
+    - 관리 종료(`service.disable`), SHADOW→LIVE 전환(`promote`)
+    - 손절 트리거(감시 구간 종료), 확인 필요 전환(`_review_position`, 포지션을 멈추는 `_review_event`), 외부 전량 매도(EXTERNAL_CLOSED)
+    - 장 마감 처리: 장 마감까지 감시한 ACTIVE·EXITING 포지션. 끝에 `state_audit_done`(시각)을 남긴다.
+  - `state_audit_done` 은 일자 처리 완료 표식일 뿐 개별 포지션 근거가 아니다. 포지션별 `state_audit` 이 없으면 완료 표식이 있어도 `state_evidence_missing` (정상 상태 판정 불가)이다.
+  - 과거 날짜는 이 근거만 쓴다. 현재 시각·현재 포지션 상태·다음 날 감사 기록으로 판정을 바꾸지 않는다. `state_audit=0` 이면 `state_unaudited`.
+  - 현재 상태로 확인하는 것은 **지금 감시 중인 포지션**(마감 처리 전 당일의 ACTIVE)뿐이다. 이미 감시가 끝난 포지션(관리 종료·트리거·확인 필요)의 상태를 현재 값으로 추정하지 않는다.
+  - 감시 구간 끝: 손절 트리거 시각, 또는 ACTIVE·EXITING 이 아닌 포지션(NEEDS_REVIEW 포함, 감시 대상 아님)은 전환 시각. 이전에는 NEEDS_REVIEW 를 장 마감까지 감시한 것으로 계산했다.
   - 슬롯 분류와 복원 구간도 대조한다: 일시중지 구간 밖의 `paused` 슬롯, 장애·보류 구간 밖의 `held` 슬롯이 있으면 `state_unaudited`.
   - 판정 불가 포지션: `gaps.measurable=false`, `max_normal_sec=null`. 실제 전체 공백(`max_sec`, `over_120`)은 그대로 보인다.
 - 지표: 전체 실제 최대 공백(`max_sec`), 정상 상태 공백의 최대(`max_normal_sec`), 120초 초과 전체 공백 수(`over_120`), 120초 초과 정상 상태 공백 수(`normal_over_120`).
@@ -660,6 +678,18 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
 - `0` 은 실제로 측정한 0 이다. 측정할 수 없는 값은 `null` 이며 Slack·웹에는 "측정 불가"로 쓴다.
 - 누락 원인 분해(보류·일시중지·감시 실패·스케줄 지연)는 측정 가능한 포지션 합만 보이고, 원인을 측정할 수 없는 누락은 `cause_unmeasured_missed` 로 따로 보인다. 모두 측정 불가면 "누락 661 (세부 원인 측정 불가)"처럼 쓰고 `= 0 + 0 + 0 + 0` 식의 가짜 분해를 쓰지 않는다.
 - 커버리지: `ok_coverage`(정상 횟수), `gaps.coverage`(실제 공백), `gaps.normal_coverage`(정상 상태 공백) 각각 `full` / `partial` / `none`, 측정·부분 측정·미측정 포지션 수를 함께 보인다. 부분 측정이면 `max_sec`·`max_normal_sec` 은 측정된 포지션 기준의 하한이다. 측정 포지션이 하나도 없으면 `null`.
+- **전체 기대·성공 집계 (2026-11-28 Codex 5차 리뷰 P2 반영)** — 기대와 성공의 측정 가능 여부를 따로 본다.
+  - 기대(`watch.expected`): 모든 포지션의 확인된 기대를 합한다. 성공을 측정할 수 없다고 기대를 빼지 않는다.
+  - 성공·누락·정상률·감시 실패·무효·시도: 측정 불가 포지션이 하나라도 있으면 전체는 `null`. 측정된 범위의 합은 `watch.measured_subtotal`(종목 수·기대·정상)로 따로 보이며 전체 통계가 아니다.
+  - 상태 구분 `watch.ok_status`: `no_targets`(감시 대상 없음, 기대·정상 0 / 감시율 null) · `full`(모두 측정, 실제 성공 0 이면 정상 0) · `partial` · `unmeasured`. 포지션별 배분은 안 되지만 티커 합계가 확인된 LEGACY 동일 티커 포지션은 측정으로 보고 `ok_ticker_aggregated_positions` 로 보인다 (그룹 합계는 전체에 정확히 한 번).
+  - 예: 유일한 MIXED 포지션 기대 8·정상 null → 전체 기대 8, 정상·누락·정상률 null, `ok_coverage=none`.
+- **오류 통계 (LEGACY 복원)**:
+  - 일반 감시 API 실패(`watch.api_errors`)·무효(`watch.invalid`): 신버전은 티커 일계(`quote_fail`/`quote_invalid`)와 포지션 상세(`pos_watch_fail`/`pos_watch_invalid`)를 같은 호출에서 함께 올린다 → 같은 범위·같은 의미. 티커 일계 − 신버전 상세 = 구버전 몫이며 정상 횟수와 같은 규칙으로 귀속한다(하나면 귀속, 여럿이면 티커 그룹, 음수면 `null`·`aggregate_mismatch`).
+  - 구버전(6f196f5) `quote_fail` 은 일반 감시와 주문 직전 시세 조회 실패를 함께 셌다 (`quote_fail_source=ticker_daily`). 2026-11-25 는 주문이 없어 6회 모두 일반 감시 실패다.
+  - 신버전에만 있는 지표 — 일반 감시 시도, 회복 조회, 주문 직전 조회, 보류 중 관측, 지연 처리, HTTP 요청·429, 오류 범주별 수, 잔고·주문 회복 조회 — 는 그 범위를 신버전이 전부 기록했을 때만 값이 있다. 구버전 기간이 섞이면 `null` 이다 (구버전 회복 조회 실패는 저널이 아니라 로그에만 있었으므로 추가하지 않는다).
+  - 전체 API 오류(`api.errors`)는 구버전부터 있던 `api_error` 일계 그대로다.
+  - 2026-11-25: 정상 73/734, 누락 661, 일반 감시 실패 6 (CINF 2, EVRG 4), 전체 API 오류 6, 일반 감시 시도·회복 조회·HTTP 요청·감시 공백 `null`.
+- 장 마감 요약 알림은 감시 대상이 있는데 정상 횟수 커버리지 또는 정상 상태 공백 커버리지가 `full` 이 아니거나 누락이 `null` 이면 INFO 가 아니라 WARN 이다 (측정 품질이 불완전한 날을 정상으로 표시하지 않는다).
 - 보고서 생성은 읽기 전용이다. 기존 저널·저장된 보고서를 바꾸지 않는다.
 
 ### 저장량과 보고서 성능 (측정)

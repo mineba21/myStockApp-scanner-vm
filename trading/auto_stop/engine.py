@@ -395,7 +395,14 @@ class Engine:
                         "[자동손절] 시세 장애 보류 해제 — 영향 종목별 복구 증거와 공통 시세 경로의 연속 정상 응답을 "
                         "확인했습니다.")
 
+    def _watch_end(self, pos, rec=None):
+        """감시 종료 직전(전환 전 행) 상태 근거 기록. 보고서의 정상 상태 공백 판정 근거."""
+        from trading.auto_stop.service import record_watch_end
+        record_watch_end(self.store, pos["mode"], pos, self.now(), rec)
+
     def _review_event(self, ev, reason, *, position=True):
+        if position:
+            self._watch_end(self.store.position(ev["position_id"]))
         self.store.review(self.now(), event_id=ev["id"], position_id=ev["position_id"] if position else None,
                           reason=reason)
         pos = self.store.position(ev["position_id"])
@@ -404,6 +411,7 @@ class Engine:
                     "기존 주문 체결 추적은 계속합니다.")
 
     def _review_position(self, pos, reason):
+        self._watch_end(self.store.position(pos["id"]))
         self.store.review(self.now(), position_id=pos["id"], reason=reason)
         ev = self.store.open_event_for(pos["id"])
         if ev and ev["state"] in ("OPEN", "CARRY_OVER"):
@@ -546,7 +554,11 @@ class Engine:
         rep = daily_report(self.store, day, self.settings.mode, self.settings, now=self.now())
         warn = (rep["unresolved_events"] or rep["unresolved_orders"] or rep["watch"]["missed"] or rep["api"]["errors"]
                 or rep.get("recovery", {}).get("fail") or rep.get("holds", {}).get("global_seconds")
-                or (rep["watch"].get("gaps") or {}).get("over_120") or rep.get("data_quality"))
+                or (rep["watch"].get("gaps") or {}).get("over_120") or rep.get("data_quality")
+                # 측정 품질이 불완전한 보고서는 정상(INFO)으로 표시하지 않는다
+                or (rep.get("watched_positions") and (
+                    rep["watch"].get("missed") is None or rep["watch"].get("ok_coverage") != "full"
+                    or (rep["watch"].get("gaps") or {}).get("normal_coverage") != "full")))
         self._alert(f"session:{day}:{self.settings.mode}:summary", "WARN" if warn else "INFO", report_text(rep))
 
     def _recover_due(self, cat) -> bool:
@@ -785,6 +797,7 @@ class Engine:
             if unresolved:
                 continue
             if h["qty"] == 0 and pos["state"] == "ACTIVE":
+                self._watch_end(pos)
                 self.store.update_position(pos["id"], now, expect_states=("ACTIVE",), state="EXTERNAL_CLOSED",
                                            review_reason="외부에서 전량 매도됨")
                 self._alert(f"position:{pos['id']}:external_closed", "WARN",
@@ -973,13 +986,14 @@ class Engine:
             if start is not None and ny_date(start).isoformat() == day:
                 self._persist_slots(int(k), mode, rec.get("ticker"), QH.close_slot(rec))
         self._health_save(mode, health)
-        # 마감 당시 상태 이력의 완전성 근거: 현재 일시중지·종목 장애 상태가 감사 기록과 맞는지 저장한다.
-        # 과거 거래일 보고서는 이 기록으로 판정한다 (조회 시각·다음 날 상태를 쓰지 않는다).
+        # 마감 당시 상태 이력의 완전성 근거: 장 마감까지 감시한 포지션의 일시중지·종목 장애 상태가 감사 기록과 맞는지
+        # 저장한다. 장중에 감시가 끝난 포지션은 그 시점에 이미 기록했다(_watch_end). 과거 거래일 보고서는 이 기록으로
+        # 판정한다 (조회 시각·다음 날 상태를 쓰지 않는다). state_audit_done 은 일자 처리 완료 표식일 뿐이다.
         from trading.auto_stop.service import current_state_issues
         now = self.now()
         for p in self.store.positions(mode=mode, states=("ACTIVE", "EXITING")):
             issues = current_state_issues(self.store, mode, p, health.get(str(p["id"])), now)
-            self.store.stat_set(day, mode, "state_audit", str(p["id"]), 0 if issues else 1)
+            self.store.stat_min(day, mode, "state_audit", str(p["id"]), 0 if issues else 1)
         self.store.stat_set(day, mode, "state_audit_done", "", now)
         self.store.runtime_set(key, True, self.now())
 
@@ -1118,6 +1132,7 @@ class Engine:
             if q.price > dec(pos["stop_price"]):
                 continue
             state = "OPEN" if mc.before_cutoff else "CARRY_OVER"
+            self._watch_end(pos, rec)                     # 손절 트리거: 감시 구간이 여기서 끝난다
             eid = self.store.create_event(self.now(), pos, state=state, trigger_price=q.price,
                                           trigger_as_of=q.as_of, session_date=mc.session.day.isoformat())
             if eid:
@@ -1330,15 +1345,31 @@ class Engine:
                 if age > settings.quote_max_age_sec or age < -60:
                     return f"quote_stale: 시세 {int(age)}초 경과 (한도 {settings.quote_max_age_sec}초)"
                 if mode == "LIVE":
-                    try:
-                        if store.scanner_buy_in_flight_db(db, pos["ticker"]):
-                            return "scanner_buy_in_flight: 같은 계좌·종목 Scanner 미확정 매수"
-                    except ScannerJournalUnreadable as exc:
-                        return f"scanner_journal_unreadable: {exc}"
+                    block = Engine.scanner_block_db(store, db, pos["ticker"])
+                    if block:
+                        return block
                 self.settings = settings
                 return None
 
         return Gate()
+
+    @staticmethod
+    def scanner_block_db(store, db, ticker):
+        """Scanner 매수 저널 확인 → 차단 사유 | None. 사전 검사와 최종 선점 게이트가 같은 의미·같은 문구를 쓴다.
+
+        ScannerJournalUnreadable(객체 판정·메타데이터·미확정 조회 실패)은 '미확정 없음'이 아니라 예상 가능한 주문
+        안전 차단 사유다. 다른 예외(저널 자체 손상, LeaseLost 등)는 여기서 잡지 않고 기존 정책대로 올린다."""
+        try:
+            if store.scanner_buy_in_flight_db(db, ticker):
+                return "scanner_buy_in_flight: 같은 계좌·종목 Scanner 미확정 매수"
+        except ScannerJournalUnreadable as exc:
+            return f"scanner_journal_unreadable: {exc}"
+        return None
+
+    def _scanner_block(self, ticker):
+        """LIVE 사전 검사용 (별도 읽기 트랜잭션). 최종 판단은 선점 트랜잭션 안의 게이트가 다시 한다."""
+        with self.store.tx() as db:
+            return self.scanner_block_db(self.store, db, ticker)
 
     def _guard(self, mode):
         if self.schema_block:
@@ -1369,6 +1400,7 @@ class Engine:
             return
         for ev in self.store.events(states=("OPEN",), mode=self.settings.mode):
             pos = self.store.position(ev["position_id"])
+            self._settle_replace_waiting(ev)
             if pos["auto_paused"] or pos["state"] != "EXITING":
                 continue
             unresolved = self.store.orders(event_id=ev["id"], states=UNRESOLVED)
@@ -1390,45 +1422,100 @@ class Engine:
                                        f"{ev['session_replace_count']}/{self.settings.max_replaces_per_session}, 이벤트 "
                                        f"{ev['event_replace_count']}/{self.settings.max_replaces_per_event})")
                 continue
-            before = len(orders)
-            self._send(mc, ev, pos)
-            if ev["next_order_kind"] == "REPLACE":
-                if len(self.store.orders(event_id=ev["id"])) > before:
-                    self.store.runtime_set(f"replace_waiting:{ev['id']}", None, self.now())
-                else:
-                    self._note_replace_waiting(ev, pos, "재주문 조건(종목 시세 상태·유효 시세·잔고·안전 조건)을 확인하지 못함")
+            status, detail = self._send(mc, ev, pos)
+            self._after_send(ev, pos, status, detail)
+
+    # _send 결과: 주문 행이 생긴 것과 증권사 접수가 확인된 것은 다르다.
+    ACCEPTED = ("SUBMITTED", "PARTIAL_FILLED", "FILLED", "CANCEL_SENDING", "CANCEL_PENDING", "CANCEL_UNKNOWN")
+
+    def _after_send(self, ev, pos, status, detail):
+        """매도 시도 결과 기록. status: blocked(전송 전 차단, detail=사유) / order(주문 행 생성, detail=주문 id).
+
+        - 접수 확인(SUBMITTED 이후): 재주문 대기·차단 기록 해제.
+        - SENDING·UNKNOWN(전송 결과 불명): 해제하지 않는다. 긴급 알림은 기존 UNKNOWN 알림이 맡는다.
+        - REJECTED·NOT_SENT: 해제하지 않는다. 이벤트는 기존 정책대로 확인 필요(NEEDS_REVIEW) 이며 그 알림이 맡는다.
+        - 차단: 재주문이면 재주문 대기(URGENT, 대기 시작 시각 유지), 최초·이월이면 주문 차단 기록."""
+        kind = ev["next_order_kind"]
+        if status == "blocked":
+            if kind == "REPLACE":
+                self._note_replace_waiting(ev, pos, detail)
+            else:
+                self._note_order_block(ev, pos, kind, detail)
+            return
+        if status != "order":
+            return
+        o = self.store.order(detail)
+        if o["state"] in self.ACCEPTED:
+            self.store.runtime_set(f"replace_waiting:{ev['id']}", None, self.now())
+            self.store.runtime_set(f"order_block:{ev['id']}", None, self.now())
+            return
+        for key in (f"replace_waiting:{ev['id']}", f"order_block:{ev['id']}"):
+            prev = self.store.runtime_get(key)
+            if prev:
+                self.store.runtime_set(key, {**prev, "at": self.now(), "outcome": o["state"].lower(),
+                                             "order_id": o["id"]}, self.now())
+        if kind == "REPLACE" and not self.store.runtime_get(f"replace_waiting:{ev['id']}"):
+            self.store.runtime_set(f"replace_waiting:{ev['id']}", {
+                "since": self.now(), "at": self.now(), "reason": f"재주문 결과 {o['state']}", "ticker": pos["ticker"],
+                "remaining": pos["remaining_managed_qty"], "outcome": o["state"].lower(), "order_id": o["id"]},
+                self.now())
+
+    def _settle_replace_waiting(self, ev):
+        """대기 중 생긴 주문이 이후 대조로 접수 확인되면(UNKNOWN → SUBMITTED 등) 대기 기록을 해제한다."""
+        for key in (f"replace_waiting:{ev['id']}", f"order_block:{ev['id']}"):
+            w = self.store.runtime_get(key)
+            if w and w.get("order_id"):
+                o = self.store.order(w["order_id"])
+                if o is not None and o["state"] in self.ACCEPTED:
+                    self.store.runtime_set(key, None, self.now())
+
+    def _note_order_block(self, ev, pos, kind, reason):
+        """최초·이월 매도 전송 전 차단: 이벤트·트리거 유지, 실제 사유 기록. Scanner 저널 읽기 실패는 URGENT."""
+        now = self.now()
+        key = f"order_block:{ev['id']}"
+        prev = self.store.runtime_get(key) or {}
+        self.store.runtime_set(key, {"since": prev.get("since") or now, "at": now, "kind": kind, "reason": reason,
+                                     "ticker": pos["ticker"], "remaining": pos["remaining_managed_qty"]}, now)
+        cat = reason.split(":")[0]
+        self._stat("order_blocked", cat)
+        if cat == "scanner_journal_unreadable":
+            self._alert(f"event:{ev['id']}:order_block:{cat}:{int(now // 3600)}", "URGENT",
+                        f"[자동손절 매도 보류] {pos['ticker']} Scanner 매수 저널을 읽을 수 없어 매도를 보내지 않습니다 — "
+                        f"{reason}. 청산 이벤트는 유지되며 저널이 정상화되면 모든 안전 조건을 다시 확인해 매도합니다.")
 
     def _send(self, mc, ev, pos):
         mode, now = ev["mode"], self.now()
         if not self._ticker_ok(pos):
             # 이 종목 시세가 장애·회복 확인 중이면 신규 주문을 하지 않는다 (회복 조회는 _watch 가 계속).
             self._stat("order_held_symbol", pos["ticker"])
-            return
+            return "blocked", "symbol_hold: 종목 시세 장애·회복 확인 중"
         if mode == "LIVE":
             reason = S.live_order_block_reason(self.settings_loader())
             if reason:
                 self._alert(f"event:{ev['id']}:blocked:{mc.session.day}", "WARN",
                             f"[자동손절] {pos['ticker']} 매도 대기 — 실거래 스위치 차단: {reason}")
-                return
-            if self.store.scanner_buy_in_flight(pos["ticker"]):
-                self._alert(f"event:{ev['id']}:buy_in_flight:{mc.session.day}", "WARN",
-                            f"[자동손절] {pos['ticker']} 스캐너 매수 주문이 미확정이라 매도를 보류합니다.")
-                return
+                return "blocked", f"live_gate: {reason}"
+            block = self._scanner_block(pos["ticker"])
+            if block:
+                if block.startswith("scanner_buy_in_flight"):
+                    self._alert(f"event:{ev['id']}:buy_in_flight:{mc.session.day}", "WARN",
+                                f"[자동손절] {pos['ticker']} 스캐너 매수 주문이 미확정이라 매도를 보류합니다.")
+                return "blocked", block
         ev = self.store.event(ev["id"])
         pos = self.store.position(pos["id"])
         if ev["state"] != "OPEN" or pos["state"] != "EXITING":
-            return
+            return "skipped", "position_state"
         snapshot = self._snapshot(pos, ev)          # 사전 검증 기준 (선점 시 최신 DB 와 비교)
         holdings = self._balance_sync(force=True)
         if holdings is None:
-            return
+            return "blocked", "balance_unavailable: 잔고 확인 실패"
         pos = self.store.position(pos["id"])
         if pos["state"] != "EXITING":
-            return
+            return "skipped", "position_state"
         h = holdings.get(pos["ticker"])
         if h is None:
             self._review_event(ev, "잔고에 종목이 없습니다")
-            return
+            return "review", "잔고에 종목 없음"
         if mode == "LIVE":
             try:
                 self._renew()
@@ -1441,25 +1528,25 @@ class Engine:
                 raise
             except Exception as exc:
                 self._api_error("orders", f"주문내역 {pos['ticker']}", exc)
-                return
+                return "blocked", "orders_unavailable: 주문내역 확인 실패"
             if external:
                 self._review_event(ev, f"같은 종목의 외부 미체결 주문 {len(external)}건이 있습니다")
-                return
+                return "review", "external_orders"
         qty = min(pos["remaining_managed_qty"], h["sellable"])
         if qty <= 0:
             self._review_event(ev, f"매도가능수량 {h['sellable']}주 — 매도할 수 없습니다")
-            return
+            return "review", "sellable"
         health = self._health_load(mode)
         rec = health.setdefault(str(pos["id"]), QH.new_record(self.now(), pos))
         q, problem, err = self._confirmed_quote(pos, mc, "order")
         if problem:
             self._review_event(ev, problem)
-            return
+            return "review", problem
         if err:
             # 무효 시세는 임계값 전이라도 주문에 쓰지 않는다.
             self._quote_failed(pos, rec, "order", err)
             self._health_save(mode, health)
-            return
+            return "blocked", f"quote_invalid: {err.get('category')}"
         self._quote_ok(pos, rec, "order", q)
         self._health_save(mode, health)
         self._stat("order_quote_ok", pos["ticker"])
@@ -1468,17 +1555,17 @@ class Engine:
         ref, src = reference_price(q, allow_bid=(mode != "LIVE" or self.settings.verified("USA20101_BID")))
         if ref < MIN_AUTO_PRICE:
             self._review_event(ev, f"기준가 {ref} < $1 — 호가 단위 미검증으로 자동 매도하지 않습니다")
-            return
+            return "review", "price"
         price = limit_price(ref, self.settings.slip_bps)
         if price <= 0:
             self._review_event(ev, "지정가 계산 결과가 유효하지 않습니다")
-            return
+            return "review", "price"
         if qty > self.settings.max_order_qty or price * qty > self.settings.max_order_notional_usd:
             self._review_event(ev, f"주문 상한 초과 ({qty}주 × {price})")
-            return
+            return "review", "order_cap"
         if mode == "LIVE" and qty > self.settings.live_qty_cap():
             self._review_event(ev, f"UST20001_SELL 1주 실매도 검증 전에는 LIVE 주문을 1주로 제한합니다 ({qty}주)")
-            return
+            return "review", "order_cap"
         kind = ev["next_order_kind"]
         # 가상 체결 모델을 주문마다 고정 기록한다: 모델이 바뀌어도 이 주문은 만든 모델로 판정·집계한다.
         evidence = {"shadow": [self._shadow_config(mode)]} if mode == "SHADOW" else {}
@@ -1495,7 +1582,7 @@ class Engine:
         except ClaimRefused as exc:
             log.info("[자동손절] 매도 선점 거부: %s %s", pos["ticker"], exc)
             self._stat("claim_refused", str(exc).split(":")[0])
-            return
+            return "blocked", str(exc)
         sent_at = order["sent_at"]
         # 선점 커밋 직후 전송한다: 이 사이에 다른 DB·API 작업을 두지 않는다.
         try:
@@ -1504,28 +1591,29 @@ class Engine:
             self.store.transition(order["id"], self.now(), frm="SENDING", to="REJECTED", broker_state="REJECTED")
             self.store.add_order_evidence(order["id"], self.now(), "reject", str(exc)[:200])
             self._review_event(ev, "매도 주문이 명시적으로 거부되었습니다")
-            return
+            return "order", order["id"]
         except OrderUnknown:
             self._mark_unknown(order, "매도 응답 불명")
-            return
+            return "order", order["id"]
         except KiwoomError as exc:          # 전송 전 입력 검증 실패: 증권사로 나가지 않음
             self.store.transition(order["id"], self.now(), frm="SENDING", to="NOT_SENT")
             self.store.add_order_evidence(order["id"], self.now(), "not_sent", str(exc)[:200])
             self._review_event(ev, "주문 입력 검증 실패로 전송하지 않았습니다")
-            return
+            return "order", order["id"]
         except Exception:
             self._mark_unknown(order, "매도 중 예외")
-            return
+            return "order", order["id"]
         number = str(res.get("order_number") or "")
         if not self.store.transition(order["id"], self.now(), frm="SENDING", to="SUBMITTED",
                                      order_number=number, order_date=ny_date(sent_at).isoformat()):
             # lease 만료로 다른 작업자가 UNKNOWN 처리함 → 상태는 바꾸지 않고 증거만 남긴다
             self.store.add_order_evidence(order["id"], self.now(), "late_response", {"order_number": number})
-            return
+            return "order", order["id"]
         self.summary["sent"] += 1
         label = {"ORIGINAL": "최초 주문", "REPLACE": "재주문", "CARRY_OVER": "이월 주문"}[kind]
         self._alert(f"order:{order['id']}:submitted", "INFO",
                     f"[자동손절] {pos['ticker']} {label} 접수 {qty}주 @ {price} (기준 {src} {ref}, {mode}, 주문 {number})")
+        return "order", order["id"]
 
     def _mark_unknown(self, order, why):
         self.store.transition(order["id"], self.now(), frm="SENDING", to="UNKNOWN")
@@ -1570,6 +1658,9 @@ class Engine:
             # 사전 검증 이후 조건이 바뀜: 기존 주문 상태 유지. 다음 tick 에 주문 대조부터 다시 한다.
             self._stat("claim_refused", str(exc).split(":")[0])
             log.info("[자동손절] 취소 선점 거부: %s %s", o["ticker"], exc)
+            self._alert(f"order:{o['id']}:cancel_held:{int(now // 3600)}", "WARN",
+                        f"[자동손절] {o['ticker']} 미체결 주문 {o['order_number']} 재주문용 취소 보류 — {exc}. "
+                        "기존 주문은 유지하고 체결·상태 대조를 계속합니다.")
             return
         o = {**o, "state": snap["order"]["state"]}
         try:
@@ -1632,8 +1723,9 @@ class Engine:
             return "order_state: 미체결 잔량 없음", None
         snapshot = self._snapshot(pos, ev, o)
         if mode == "LIVE":
-            if self.store.scanner_buy_in_flight(pos["ticker"]):
-                return "buy_in_flight: 스캐너 매수 주문 미확정", None
+            block = self._scanner_block(pos["ticker"])
+            if block:
+                return block, None
             try:
                 self._renew()
                 ours = {x["order_number"] for x in self.store.orders(mode="LIVE") if x["order_number"]}
