@@ -30,9 +30,23 @@ def _in(values) -> str:
 # 최초 영구 감시 종료 시각: 일반 감시(ACTIVE)가 끝나는 상태 전이와 같은 UPDATE 문에서 한 번만 기록한다.
 # SET 식의 state 는 갱신 전 값이므로 ACTIVE 에서 벗어날 때만 남고, 이후 전이(NEEDS_REVIEW → DISABLED 등)·체결·
 # 사용자 조작·재시작으로 바뀌지 않는다. 전이가 실패하면(행 0) 함께 남지 않는다. 기존 details 열 사용 (DDL 없음).
-WATCH_END_SET = ("details=CASE WHEN state='ACTIVE' AND json_extract(details,'$.watch_ended_at') IS NULL "
+# 이미 ACTIVE 가 아닌 포지션(NEEDS_REVIEW·EXITING 등)의 후속 전이는 최초 종료 시각이 아니다. 그 경우 정확한 종료
+# 시각이 없으면 '갱신 전 updated_at 시점에는 이미 감시가 끝나 있었다'는 상한 근거(watch_ended_by)만 같은 문장에서 남긴다.
+# (갱신 전 updated_at 은 그 행의 마지막 변경 시각이고, 그 뒤로 상태가 바뀌지 않았으므로 그때 이미 ACTIVE 가 아니었다.)
+WATCH_END_SET = ("details=CASE "
+                 "WHEN state='ACTIVE' AND json_extract(details,'$.watch_ended_at') IS NULL "
                  "THEN json_set(COALESCE(NULLIF(details,''),'{}'),'$.watch_ended_at',?,'$.watch_end_reason',?) "
+                 "WHEN state<>'ACTIVE' AND json_extract(details,'$.watch_ended_at') IS NULL "
+                 "AND json_extract(details,'$.watch_ended_by') IS NULL "
+                 "THEN json_set(COALESCE(NULLIF(details,''),'{}'),'$.watch_ended_by',updated_at,"
+                 "'$.watch_ended_by_reason','prior_state:'||state) "
                  "ELSE details END")
+# 상태를 바꾸지 않는 갱신(일시중지·체결 반영·잔고 기록 등)도 ACTIVE 가 아닌 행의 updated_at 을 덮어쓴다.
+# 덮어쓰기 전에 같은 문장에서 상한 근거를 보존한다 (ACTIVE 행은 그대로).
+WATCH_BOUND_SET = ("details=CASE WHEN state<>'ACTIVE' AND json_extract(details,'$.watch_ended_at') IS NULL "
+                   "AND json_extract(details,'$.watch_ended_by') IS NULL "
+                   "THEN json_set(COALESCE(NULLIF(details,''),'{}'),'$.watch_ended_by',updated_at,"
+                   "'$.watch_ended_by_reason','prior_state:'||state) ELSE details END")
 
 
 class ClaimRefused(Exception):
@@ -266,6 +280,8 @@ class AutoStopStore:
         if "state" in fields and fields["state"] != "ACTIVE":
             sets += ", " + WATCH_END_SET
             args += [now, f"state:{fields['state']}"]
+        else:
+            sets += ", " + WATCH_BOUND_SET
         sql = f"UPDATE auto_stop_positions SET {sets} WHERE id=?"
         args.append(pid)
         if expect_states:
@@ -518,7 +534,8 @@ class AutoStopStore:
                           (cum_filled, o["requested_qty"] - cum_filled, now, oid, old)).rowcount != 1:
                 raise sqlite3.IntegrityError("체결 반영 경합")
             if db.execute("UPDATE auto_stop_positions SET remaining_managed_qty=remaining_managed_qty-?, "
-                          "total_filled_qty=total_filled_qty+?, updated_at=? WHERE id=? AND remaining_managed_qty>=?",
+                          f"total_filled_qty=total_filled_qty+?, updated_at=?, {WATCH_BOUND_SET} "
+                          "WHERE id=? AND remaining_managed_qty>=?",
                           (delta, delta, now, ev["position_id"], delta)).rowcount != 1:
                 raise sqlite3.IntegrityError("관리 수량 음수")
             return "APPLIED"
@@ -609,10 +626,19 @@ def _initial_details(f, now) -> dict:
 
 def watch_end_of(position) -> float | None:
     """기록된 최초 영구 감시 종료 시각 (없으면 None)."""
+    return _details(position).get("watch_ended_at")
+
+
+def watch_ended_by_of(position) -> float | None:
+    """'이 시각에는 이미 감시가 끝나 있었다'는 기록된 상한 근거 (정확한 종료 시각 아님, 없으면 None)."""
+    return _details(position).get("watch_ended_by")
+
+
+def _details(position) -> dict:
     try:
-        return json.loads(position["details"] or "{}").get("watch_ended_at")
+        return json.loads(position["details"] or "{}") or {}
     except (TypeError, ValueError):
-        return None
+        return {}
 
 
 def dec(value) -> Decimal:

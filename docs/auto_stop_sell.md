@@ -689,6 +689,8 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
   - 정상 > 기대이면 100% 로 자르지 않고 `missed=null`, 감시율 `null`, `aggregate_exceeds_expected`.
 - 예: 같은 티커 구버전 2/2 후 관리 종료 → 신버전 재등록 3/3 = 전체 5/5, 누락 0, 100%. 허용 오차 안 전환인데 구버전 성공 1회가 있으면 MIXED 로 그 1회를 보존한다.
 - 구버전 몫(일시중지·보류·감시 실패·무효 슬롯 수, 최대 공백)은 측정할 수 없으므로 `null` 이다.
+- **귀속 불확실성 (2026-11-28 Codex 8차 리뷰 P2 반영)**: 같은 티커에 감시 구간 끝을 입증할 수 없는 구버전 기간 포지션(LEGACY·MIXED, `watch_end_unverified`)이 있으면, 그 포지션도 티커 일계에 기여했을 수 있으므로 나머지 구버전 포지션을 유일한 귀속 대상으로 보지 않는다. 해당 LEGACY·MIXED 포지션의 정상·누락·정상률·감시 실패·무효는 `null`(`legacy_attribution_uncertain`)이며 유효 소계에서 빠진다. 신버전 슬롯(SLOT_V2)의 position_id 별 성공은 그대로 유지된다. 보고일 시작 전 종료가 입증된 포지션은 기여 후보가 아니다.
+- 원시 일계는 `ticker_daily_raw`(티커별 `quote_ok`·`quote_fail`·`quote_invalid`·신버전 포지션 성공·귀속 상태 single / shared / uncertain / position_slots_only)로 따로 보존하며 전체 평가 집계에 더하지 않는다. Slack·웹은 "티커 일계 정상 N회 귀속 불가"로 표시한다.
 
 ### 측정 불가·부분 측정 표시 (API · Slack · 웹 공통)
 
@@ -717,7 +719,12 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
     - ACTIVE → EXITING (최초 손절 트리거, `create_event`), ACTIVE → NEEDS_REVIEW (`store.review`), ACTIVE → DISABLED·EXTERNAL_CLOSED (`update_position`: 관리 종료, SHADOW→LIVE 전환, 외부 전량 매도), NEEDS_REVIEW 로 등록(`insert_position`, 감시를 시작하지 않음).
   - 이후 NEEDS_REVIEW → DISABLED, 체결 반영, 사용자 해제·일시중지, 주문 대조, 알림·감사, 재시작은 이 값을 바꾸지 않는다. `updated_at`(마지막 수정 시각)은 종료 시각으로 쓰지 않는다.
   - 일일 마감·일시중지는 영구 종료가 아니다. `record_watch_end`(그날 상태 근거, `state_audit`)와 별개이며, ACTIVE 포지션은 다음 거래일에도 그대로 감시한다.
-  - 이전 버전 포지션(기록 없음): 실제 이력 중 가장 이른 것으로 복원한다 — 첫 손절 트리거, `disable`·`promote` 감사, `position:{id}:review*`·`position:{id}:external_closed` 알림 (`watch_end_from_history`). 이력도 없으면 `updated_at` 으로 확정하지 않는다: `updated_at` 이 보고일 감시 시작 전이면 그 전에 끝났음이 확실하므로 제외, 아니면 감시 대상에 넣되 기대·정상·공백을 `null`(`watch_end_unverified`)로 둔다. 과거 기록은 고치지 않는다.
+  - **정확한 시각과 상한 근거 구분 (2026-11-28 Codex 8차 리뷰 P2 반영)** — `_watch_end` → (정확한 시각, 상한, 근거)
+    - 정확한 시각: `watch_ended_at`(recorded), 또는 이전 버전 포지션의 이력 중 ACTIVE 이탈을 입증하는 것 — 첫 손절 트리거, LIVE 전환 감사(ACTIVE 만 가능), 확인 필요·외부 매도 알림, 이전 상태가 ACTIVE 로 기록된 관리 해제 감사 (`watch_end_from_history`).
+    - 상한(ended_by, "그 시각엔 이미 끝나 있었다"): `details.watch_ended_by`, 이전 상태가 ACTIVE 가 아닌 관리 해제 감사의 `prev_updated_at`, 이전 상태가 없는 구버전 관리 해제 감사 시각, 현재 `updated_at`. 후속 관리 해제 시각을 최초 종료 시각으로 쓰지 않는다.
+    - ACTIVE 가 아닌 포지션 행을 갱신하는 모든 문장(상태 전이·일시중지·체결 반영 등)은 덮어쓰기 전 `updated_at` 을 같은 문장에서 `watch_ended_by` 로 보존한다 (처음 한 번). 갱신 전 `updated_at` 은 그 행의 마지막 변경 시각이고 그 뒤 상태가 바뀌지 않았으므로 그때 이미 ACTIVE 가 아니었다. 전이가 실패하면 남지 않는다.
+    - `disable()` 감사에 `prev_state`·`prev_updated_at` 을 남긴다.
+    - 정확한 시각이 없을 때: 상한이 보고일 감시 시작 전이면 그날 감시 대상에서 제외(입증됨). 아니면 감시 대상에 넣되 기대·정상·공백 `null`(`watch_end_unverified`). 존재하지 않았던 감시 구간을 만들지 않으며 과거 기록은 고치지 않는다.
 - **보고일 감시 대상 선정 (2026-11-28 Codex 6차 리뷰 P2 반영)** — 그날 정규장 [개장, 마감·현재] 과 포지션의 실제 일반 감시 구간이 겹치는 포지션만 감시 대상이다.
   - 감시 시작 = max(개장, 등록). 감시 끝 = 첫 손절 트리거 / ACTIVE·EXITING 이 아닌 포지션은 최초 영구 감시 종료 시각 / 마감.
   - 일반 감시는 ACTIVE 만 하고 트리거 이후 ACTIVE 로 돌아가는 경로가 없으므로, 그날 감시 시작 전에 트리거된 포지션(전날 SOLD·DONE, 전날 이월 등)은 감시 대상이 아니다. 과거 청산 이벤트가 있다는 이유만으로 포함하지 않는다.
@@ -728,8 +735,14 @@ SHADOW 보고에는 `shadow` 항목이 붙는다.
     - `fill_applied_on_day`: 체결 원장 `auto_stop_fill_ledger.applied_at` 이 보고일인 증분 체결
     - `order_events_on_day:*`: 보고일 주문 알림(취소 확정·소멸·체결·미체결 경과·UNKNOWN 해제 등)
     - `unknown_resolved_on_day`: 보고일 `resolve_unknown` 감사
-    - `unresolved_at_day_start`: 보고일 전 생성 + 지금도 미해결이거나 확정 근거 시각(전량 체결 원장·취소 확정 알림·증거 해제·거부의 확인 필요 알림)이 보고일 이후
-    - `resolution_time_unverified`: 확정 근거 시각을 찾지 못했는데 `updated_at` 이 보고일 이후 (근거 부족 표시)
+    - `unresolved_at_day_start`: 보고일 전 생성 + 지금도 미해결이거나 최종 종료 근거 시각이 보고일 시작 이후. 나중에 주문이 종료돼도 그날 미해결이었던 사실은 바뀌지 않는다 (`state_now` 만 최신 상태).
+    - `resolution_time_unverified`: 종료 근거 시각을 찾지 못했는데 `updated_at`(종료 시각의 상한)이 보고일 이후 (근거 부족 표시)
+    - `final_evidence_conflict`: 서로 다른 최종 상태를 입증하는 근거가 함께 있음 (가장 이른 시각을 고르지 않는다)
+  - **최종 종료 증거 (2026-11-28 Codex 8차 리뷰 P2 반영)** — 그 주문 자체의 종료를 입증하는 근거만 쓴다 (`_final_evidence_at`).
+    - `resolve_unknown` 감사: `broker_state` 가 FILLED·CANCELLED·REJECTED 이고 현재 최종 상태와 같을 때만. OPEN(접수 확인)·PARTIAL(부분체결)·누락(구버전 감사)·알 수 없음은 종료 증거가 아니다. UNKNOWN 해제와 최종 종료를 구분한다.
+    - 주문 대조가 최종 상태를 확정할 때 남기는 주문 단위 기록 `details.final`(상태·시스템 확인 시각), 전량 체결 원장, 우리 취소 확정·마감 소멸 알림(`order:{id}:cancelled|expired`), 전송 시점 거부·미전송.
+    - 이벤트 단위 확인 필요 알림(`event:{id}:review`)은 다른 주문·다른 사유일 수 있으므로 쓰지 않는다.
+    - 시각은 모두 시스템 확인·반영 시각이며 증권사 실제 체결 시각과 구분한다.
     - 이벤트: 지금도 열림(`event_open`), 보고일 이벤트 알림(`event_alerts_on_day`)
   - 당일 활동이 없는 오래된 종료 이벤트는 제외한다. 최종 상태가 DONE·NEEDS_REVIEW 라는 이유로 보고일 이력을 빼지 않는다.
   - 시각·수량 구분: `fills_on_day[].applied_at` = 시스템이 체결을 확인·반영한 시각, `broker_fill_time` = 원장 증거에 증권사 체결 시각이 있을 때만 (없으면 `null`, 추정 없음). `cum_filled_now` = 현재 누적 체결, `fills_applied_qty_on_day` = 보고일 신규 반영 수량 (원장 PK 로 같은 체결은 한 번만). 합계 `exit_followup_fills_applied_qty` 는 일반 감시 횟수·당일 신규 주문 수와 별개다.

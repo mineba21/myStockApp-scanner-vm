@@ -682,14 +682,16 @@ class Engine:
                         f"{o['requested_qty']}주 @ 지정가 {o['limit_price']} ({o['mode']})")
         state = row["state"]
         if state == "FILLED":
-            self.store.transition(o["id"], now, frm=UNRESOLVED, to="FILLED", broker_state=state)
+            if self.store.transition(o["id"], now, frm=UNRESOLVED, to="FILLED", broker_state=state):
+                self._final_evidence(o, state, now, row)
         elif state == "CANCELLED":
             if int(row.get("remaining_quantity", 0)) != 0:
                 self._review_event(ev, "취소 응답의 잔여 수량이 0이 아닙니다")
                 return row
             was_ours = o["state"] in ("CANCEL_PENDING", "CANCEL_UNKNOWN")
             expired = self._after_order_session(o)
-            self.store.transition(o["id"], now, frm=UNRESOLVED, to="CANCELLED", broker_state=state)
+            if self.store.transition(o["id"], now, frm=UNRESOLVED, to="CANCELLED", broker_state=state):
+                self._final_evidence(o, state, now, row)
             if was_ours:
                 self._alert(f"order:{o['id']}:cancelled", "INFO",
                             f"[자동손절] {o['ticker']} 취소 확정 (최종 체결 {row['filled_quantity']}주)")
@@ -701,7 +703,8 @@ class Engine:
             else:
                 self._review_event(ev, "자동 손절 주문이 외부에서 취소되었습니다")
         elif state == "REJECTED":
-            self.store.transition(o["id"], now, frm=UNRESOLVED, to="REJECTED", broker_state=state)
+            if self.store.transition(o["id"], now, frm=UNRESOLVED, to="REJECTED", broker_state=state):
+                self._final_evidence(o, state, now, row)
             self._review_event(ev, "증권사가 주문을 무효/거부 처리했습니다")
         elif state in ("OPEN", "PARTIAL"):
             if o["state"] in ("SUBMITTED", "PARTIAL_FILLED", "UNKNOWN"):
@@ -716,6 +719,11 @@ class Engine:
             self.store.set_order_fields(o["id"], now, broker_state=state)
             self._review_event(ev, f"증권사 주문 상태 해석 불가({state})")
         return row
+
+    def _final_evidence(self, o, state, now, row):
+        """주문 대조로 최종 상태를 확정한 기록 (주문 단위, 보고서의 종료 근거). 시각은 시스템 확인 시각이다."""
+        self.store.add_order_evidence(o["id"], now, "final", {"state": state, "at": now, "source": "status",
+                                                             "filled_quantity": row.get("filled_quantity")})
 
     def _after_order_session(self, o) -> bool:
         day = date.fromisoformat(o["order_date"]) if o["order_date"] else (

@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from trading.auto_stop import quote_health as QH
 from trading.auto_stop import settings as S
 from trading.auto_stop.quotes import MIN_AUTO_PRICE, QuoteUnavailable, validate
-from trading.auto_stop.store import UNRESOLVED, watch_end_of, ClaimRefused
+from trading.auto_stop.store import UNRESOLVED, watch_end_of, watch_ended_by_of, ClaimRefused
 from trading.auto_stop.us_calendar import NEW_YORK, market_clock, ny_date, session_for
 
 
@@ -183,7 +183,8 @@ def disable(store, pid, *, now=None, actor="web") -> dict:
     for e in store.events():
         if e["position_id"] == pid and e["state"] in ("OPEN", "CARRY_OVER", "NEEDS_REVIEW"):
             store.update_event(e["id"], now, state="DONE", review_reason="사용자 해제")
-    store.audit(now, actor, "disable", pid, {})
+    # 이전 상태·마지막 수정 시각을 남긴다: ACTIVE 에서 바로 해제한 경우만 이 시각이 최초 감시 종료다.
+    store.audit(now, actor, "disable", pid, {"prev_state": pos["state"], "prev_updated_at": pos["updated_at"]})
     return store.position(pid)
 
 
@@ -447,11 +448,11 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         # updated_at(마지막 수정 시각)을 종료 시각으로 쓰지 않는다: 후속 조작(NEEDS_REVIEW → 관리 종료 등)이 바꾼다.
         end_src = None
         if p["state"] not in ("ACTIVE", "EXITING"):
-            wend, end_src = _watch_end(p, triggers, hist)
+            wend, ended_by, end_src = _watch_end(p, triggers, hist)
             if wend is not None:
                 stop_at = min(stop_at, wend)
-            elif p["updated_at"] < ws:
-                continue      # 종료 시각을 모르더라도 마지막 수정이 보고일 감시 시작 전이면 그 전에 끝났음이 확실
+            elif ended_by < ws:
+                continue      # 정확한 종료 시각은 몰라도 보고일 감시 시작 전에 이미 끝나 있었음이 입증됨
         if stop_at - ws <= 0 and not (in_window and ny_date(in_window[0]) == d):
             continue          # 구간 길이 0 은 그날 개장 시각 트리거처럼 당일 이벤트 근거가 있을 때만 포함
         # 표식이 감시 시작 이전이면 그 감시 구간 전체를 신버전이 기록했다. 감시 중에 바뀌었으면 전환 후보다.
@@ -482,11 +483,16 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
                 # 허용 오차만으로 SLOT_V2 를 주지 않는다: 오차 이내이고 그 티커에 구버전 기록이 없을 때만.
                 c["fmt"] = "SLOT_V2" if (c["ws"] + tol >= v2_since and remainder == 0) else "MIXED"
         claimants = [c for c in group if c["fmt"] in ("LEGACY", "MIXED") and c["end_src"] != "unverified"]
+        # 감시 구간 끝을 입증할 수 없는 구버전 기간 포지션(LEGACY·MIXED)도 이 티커 일계에 기여했을 수 있다.
+        # 그런 포지션이 있으면 나머지 구버전 포지션이 유일한 귀속 대상이라고 판단하지 않는다 (임의 배분 금지).
+        # 신버전 슬롯(SLOT_V2, MIXED 의 전환 후)은 position_id 별로 따로 기록되므로 영향을 받지 않는다.
+        uncertain = [c["p"]["id"] for c in group if c["fmt"] in ("LEGACY", "MIXED") and c["end_src"] == "unverified"]
         # 일반 감시 실패·무효: 티커 일계(quote_fail/quote_invalid)와 신버전 포지션 상세(pos_watch_fail/invalid)는 신버전에서
         # 같은 호출(_record_quote_error, purpose=watch)이 함께 올린다 → 같은 범위·같은 의미. 차이 = 구버전 몫.
         v2_fail = sum(int(stat("pos_watch_fail", str(c["p"]["id"]))) for c in group if c["fmt"] != "LEGACY")
         v2_inv = sum(int(stat("pos_watch_invalid", str(c["p"]["id"]))) for c in group if c["fmt"] != "LEGACY")
         ticker_info[t] = {"quote_ok": total, "v2_ok": v2, "remainder": remainder, "claimants": claimants,
+                          "uncertain": uncertain,
                           "fail_rem": int(stat("quote_fail", t)) - v2_fail,
                           "inv_rem": int(stat("quote_invalid", t)) - v2_inv}
     legacy_ticker_totals, unattributed, ok_unmeasured = {}, [], 0
@@ -554,6 +560,10 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
                 quality.append(f"mixed_format: 슬롯·공백은 {measured_from:.0f} 이후만 측정 (구버전 구간은 일계 기준)")
             if c["end_src"] == "unverified":
                 ok = None                    # 감시 구간 끝을 입증할 수 없음: 구버전 몫을 귀속하지 않는다
+            elif info["uncertain"]:
+                ok = None                    # 같은 티커에 기여 범위를 모르는 포지션이 있다: 귀속을 입증할 수 없음
+                quality.append(f"legacy_attribution_uncertain: 같은 티커의 종료 시각 미확인 포지션 {info['uncertain']}"
+                               f" 이 일계 {info['quote_ok']}회에 기여했을 수 있어 포지션별로 귀속하지 않음")
             elif info["remainder"] < 0:
                 ok = None
                 ok_unmeasured += 1
@@ -592,8 +602,8 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         # 일반 감시 실패·무효 (같은 범위의 기록만, 임의 차감·합산 없음)
         if fmt == "SLOT_V2":
             q_fail, q_inv = pstat("watch_fail", pid), pstat("watch_invalid", pid)
-        elif group or len(info["claimants"]) != 1:
-            q_fail = q_inv = None                     # 티커 그룹 합계로만 보인다
+        elif group or len(info["claimants"]) != 1 or info["uncertain"] or c["end_src"] == "unverified":
+            q_fail = q_inv = None                     # 티커 그룹 합계로만 보이거나 귀속을 입증할 수 없다
         else:
             own_f = pstat("watch_fail", pid) if fmt == "MIXED" else 0
             own_i = pstat("watch_invalid", pid) if fmt == "MIXED" else 0
@@ -675,7 +685,7 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         "expected": sub_exp, "ok": sub_ok, "missed": sub_exp - sub_ok,
         "normal_rate_pct": round(sub_ok / sub_exp * 100, 1) if sub_exp else None}
     for t, info in ticker_info.items():
-        if info["remainder"] > 0 and not info["claimants"]:
+        if info["remainder"] > 0 and not info["claimants"] and not info["uncertain"]:
             unattributed.append(f"unattributed_legacy_ok: {t} 구버전 몫 {info['remainder']}회를 귀속할 포지션 없음")
     formats = {p["format"] for p in positions}
     report_format = ("LEGACY" if v2_since is None else "SLOT_V2" if formats <= {"SLOT_V2"} else "MIXED")
@@ -753,6 +763,13 @@ def daily_report(store, day: str, mode: str, settings=None, now=None) -> dict:
         "watched_positions": len(positions),
         # 일반 감시 대상이 아닌, 전 거래일 청산 이벤트의 당일 주문 대조·이월 (감시 통계에 넣지 않는다)
         "exit_followups": followups,
+        # 거래일+모드+티커 원시 일계와 포지션 귀속 상태 (유효 평가용 집계와 별개로 보존, 전체 합계에 더하지 않는다)
+        "ticker_daily_raw": {t: {"quote_ok": info["quote_ok"], "quote_fail": int(stat("quote_fail", t)),
+                                 "quote_invalid": int(stat("quote_invalid", t)), "v2_position_ok": info["v2_ok"],
+                                 "attribution": ("uncertain" if info["uncertain"] else "shared" if len(info["claimants"]) > 1
+                                                 else "single" if info["claimants"] else "position_slots_only"),
+                                 "uncertain_positions": info["uncertain"]}
+                             for t, info in ticker_info.items()},
         # 전 거래일 주문의 당일 신규 반영 체결 수량 (일반 감시·당일 신규 주문 수와 별개, 원장 증분이라 중복 없음)
         "exit_followup_fills_applied_qty": sum(o["fills_applied_qty_on_day"] for f in followups
                                                for e in f["events"] for o in e["orders"]),
@@ -1043,11 +1060,12 @@ def _followup(store, p, p_events, d0, d1, ctx):
                 if o["state"] in UNRESOLVED:
                     reasons.append("unresolved_at_day_start")
                 else:
-                    fin = _final_evidence_at(o, ledger.get(oid, []), ctx, e["id"], resolves)
+                    fin, issue = _final_evidence_at(o, ledger.get(oid, []), ctx, resolves)
                     if fin is not None and fin >= d0:
-                        reasons.append("unresolved_at_day_start")
+                        reasons.append("unresolved_at_day_start")     # 나중에 종료돼도 그날 미해결이었던 사실은 유지
                     elif fin is None and o["updated_at"] >= d0:
-                        reasons.append("resolution_time_unverified")
+                        # 종료 시각은 마지막 수정 이전이다: 마지막 수정이 보고일 이후면 그날 미해결이었을 수 있다
+                        reasons.append(issue or "resolution_time_unverified")
             if not reasons:
                 continue
 
@@ -1073,37 +1091,79 @@ def _followup(store, p, p_events, d0, d1, ctx):
     return {"position_id": p["id"], "ticker": p["ticker"], "events": events_out}
 
 
-def _final_evidence_at(o, ledger_rows, ctx, eid, resolves):
-    """확정 상태 주문의 확정 근거 시각 (가장 이른 것): 전량 체결 원장, 취소 확정·소멸 알림, 증거 해제 감사, 거부·미전송의
-    이벤트 확인 필요 알림. 근거가 없으면 None (updated_at 으로 확정하지 않는다)."""
-    st, times = o["state"], []
-    if st == "FILLED":
-        times += [r["applied_at"] for r in ledger_rows if r["cum_filled_qty"] >= o["requested_qty"]]
+# resolve_unknown 감사의 broker_state 중 주문의 최종 종료를 입증하는 것. OPEN(접수)·PARTIAL(부분체결)·누락·알 수 없음은 아니다.
+FINAL_BROKER_STATES = {"FILLED": "FILLED", "CANCELLED": "CANCELLED", "REJECTED": "REJECTED"}
+
+
+def _final_evidence_at(o, ledger_rows, ctx, resolves):
+    """확정 상태 주문의 최종 종료 근거 시각 → (시각 | None, 문제 | None). 그 주문 자체의 종료를 입증하는 근거만 쓴다.
+
+    - 증거 해제 감사(resolve_unknown): broker_state 가 FILLED·CANCELLED·REJECTED 이고 현재 최종 상태와 같을 때만.
+      UNKNOWN 해제(접수 확인 OPEN, 부분체결 PARTIAL)는 종료 증거가 아니다. broker_state 가 없는 구버전 감사도 쓰지 않는다.
+    - 주문 대조의 최종 확인 기록(주문 details.final: 상태·확인 시각), 전량 체결 원장(cum ≥ 요청 수량), 우리 취소 확정·
+      마감 소멸 알림(order:{id}:cancelled|expired), 전송 시점 거부·미전송(details.reject|not_sent → 전송 시각).
+    - 다른 주문일 수 있는 이벤트 단위 확인 필요 알림은 쓰지 않는다.
+    - 현재 상태와 다른 최종 상태를 입증하는 근거가 있으면 가장 이른 시각을 고르지 않고 final_evidence_conflict.
+    시각은 시스템이 확인·반영한 시각이다 (증권사 실제 체결 시각과 다를 수 있다)."""
+    st, times, conflicts = o["state"], [], []
+    try:
+        details = json.loads(o["details"] or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    for a in resolves:
+        fin = FINAL_BROKER_STATES.get((a.get("details") or {}).get("broker_state"))
+        if fin is not None:
+            (times if fin == st else conflicts).append(a["at"])
+    for f in details.get("final") or []:
+        if isinstance(f, dict) and f.get("state"):
+            (times if f["state"] == st else conflicts).append(f.get("at"))
+    full = [r["applied_at"] for r in ledger_rows if r["cum_filled_qty"] >= o["requested_qty"]]
+    (times if st == "FILLED" else conflicts).extend(full)
     if st == "CANCELLED":
         times += [a["created_at"] for a in ctx["order_alerts"]
                   if a["dedup_key"] in (f"order:{o['id']}:cancelled", f"order:{o['id']}:expired")]
-    if st in ("REJECTED", "NOT_SENT"):
-        times += [a["created_at"] for a in ctx["event_alerts"]
-                  if a["dedup_key"] == f"event:{eid}:review" and a["created_at"] >= o["created_at"]]
-    times += [a["at"] for a in resolves]
-    return min(times) if times else None
+    if (st == "REJECTED" and details.get("reject")) or (st == "NOT_SENT" and details.get("not_sent")):
+        times.append(o["sent_at"] or o["created_at"])
+    if conflicts:
+        return None, "final_evidence_conflict"
+    times = [t for t in times if t is not None]
+    return (min(times), None) if times else (None, None)
 
 
 def _watch_end(p, triggers, hist):
-    """최초 영구 감시 종료 시각 → (시각, 근거). 근거: recorded(상태 전이와 함께 기록) / history(이전 버전 포지션의 실제
-    이력: 첫 손절 트리거, 관리 종료·LIVE 전환 감사, 확인 필요·외부 매도 알림 중 가장 이른 것) / unverified(입증 불가)."""
+    """최초 영구 감시 종료 → (정확한 시각 | None, 상한 | None, 근거).
+
+    - 정확한 시각(exact): recorded = 상태 전이와 함께 기록된 watch_ended_at. history = 이전 버전 포지션의 실제 이력 중
+      ACTIVE 에서 벗어난 전이를 입증하는 것 — 첫 손절 트리거, LIVE 전환 감사(ACTIVE 만 가능), 확인 필요·외부 매도 알림,
+      이전 상태가 ACTIVE 로 기록된 관리 해제 감사.
+    - 상한(ended_by): 그 시각에는 이미 감시가 끝나 있었다는 근거일 뿐 종료 시각이 아니다 — watch_ended_by, 이전 상태가
+      ACTIVE 가 아닌 관리 해제 감사의 prev_updated_at, 이전 상태가 없는 구버전 관리 해제 감사 시각, 현재 updated_at.
+      후속 관리 해제 시각을 최초 종료 시각으로 쓰지 않는다.
+    - unverified: 정확한 시각이 없다. 상한이 보고일 감시 시작 전이면 그날 감시 대상이 아님이 확실하다."""
     rec = watch_end_of(p)
     if rec is not None:
-        return float(rec), "recorded"
+        return float(rec), None, "recorded"
     pid = str(p["id"])
-    times = list(triggers[:1])
-    times += [a["at"] for a in hist["audits"] if str(a["target"]) == pid]
-    times += [a["created_at"] for a in hist["alerts"]
+    exact = list(triggers[:1])
+    bounds = [p["updated_at"]]
+    if watch_ended_by_of(p) is not None:
+        bounds.append(float(watch_ended_by_of(p)))
+    for a in hist["audits"]:
+        if str(a["target"]) != pid:
+            continue
+        det = a.get("details") or {}
+        if a["action"] == "promote" or det.get("prev_state") == "ACTIVE":
+            exact.append(a["at"])
+        elif det.get("prev_state"):
+            bounds.append(det.get("prev_updated_at") or a["at"])
+        else:
+            bounds.append(a["at"])                 # 구버전 관리 해제 감사: 이전 상태 모름 → 상한만
+    exact += [a["created_at"] for a in hist["alerts"]
               if a["dedup_key"].startswith(f"position:{pid}:review") or a["dedup_key"] == f"position:{pid}:external_closed"]
-    times = [t for t in times if t >= p["created_at"]]
-    if times:
-        return min(times), "history"
-    return None, "unverified"
+    exact = [t for t in exact if t >= p["created_at"]]
+    if exact:
+        return min(exact), None, "history"
+    return None, min(bounds), "unverified"
 
 
 def _linked_order(db, key, w, eid, ev, pos, since):
@@ -1316,6 +1376,8 @@ def report_text(rep: dict) -> str:
             + (" (일부 종목 측정 불가)" if w.get("ok_coverage") == "partial" else "")
             + (f" (데이터 무결성 오류 {len(w['integrity_errors'])}건, 원시 성공 기록 {_fmt(w.get('ok_recorded'))})"
                if w.get("ok_integrity") == "invalid" else "")
+            + ("".join(f" ({t} 티커 일계 정상 {r['quote_ok']}회 귀속 불가)" for t, r in (rep.get("ticker_daily_raw") or {}).items()
+                       if r.get("attribution") == "uncertain"))
             + f" ({miss_text}){gap_text} · 일반 감시 시도 {_fmt(w.get('attempts'))} "
             f"(API 오류 {_fmt(w.get('api_errors'))}, 무효 {_fmt(w.get('invalid'))}) · 회복 조회 {_fmt(r.get('ok'))}/"
             f"{_fmt(r.get('attempts'))} (실패 {_fmt(r.get('fail'))}, 무효 {_fmt(r.get('invalid'))}, 동일시세 "
