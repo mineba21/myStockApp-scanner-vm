@@ -46,6 +46,8 @@ _FORCED = {
     "KIWOOM_TRADING_ENABLED":  "false",
     "KIWOOM_WEB_ENABLED":      "false",
     "AUTO_STOP_US_MODE":       "OFF",
+    "AUTO_BUY_US_RT_MODE":     "OFF",
+    "AUTO_BUY_US_RT_JOURNAL_PATH": "",
     "AUTO_STOP_US_REPLACE_ENABLED": "false",
     "ALLOCATION_JOURNAL_PATH": os.path.join(_TMPDIR, "allocation.sqlite"),
     "ALLOCATION_LIQUIDATION_SCOPE": "",
