@@ -458,21 +458,33 @@ class KiwoomReadOnlyClient:
 
     @staticmethod
     def _parse_response(response: requests.Response, operation: str) -> dict[str, Any]:
+        # 오류 원인 분류용 속성(kind/http_status/return_code)을 붙인다. 메시지 형식은 기존과 같다.
         try:
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise KiwoomError(f"{operation} HTTP 오류: {response.status_code}") from exc
+            raise _tagged(KiwoomError(f"{operation} HTTP 오류: {response.status_code}"),
+                          kind="http", http_status=response.status_code) from exc
         try:
             data = response.json()
         except ValueError as exc:
-            raise KiwoomError(f"{operation} 응답이 JSON 형식이 아닙니다.") from exc
+            raise _tagged(KiwoomError(f"{operation} 응답이 JSON 형식이 아닙니다."),
+                          kind="json", http_status=getattr(response, "status_code", None)) from exc
         if not isinstance(data, dict):
-            raise KiwoomError(f"{operation} 응답 형식이 올바르지 않습니다.")
+            raise _tagged(KiwoomError(f"{operation} 응답 형식이 올바르지 않습니다."),
+                          kind="format", http_status=getattr(response, "status_code", None))
         return_code = data.get("return_code")
         if return_code not in (None, 0, "0"):
             message = data.get("return_msg") or "메시지 없음"
-            raise KiwoomError(f"{operation} 실패 ({return_code}): {message}")
+            raise _tagged(KiwoomError(f"{operation} 실패 ({return_code}): {message}"),
+                          kind="api", http_status=getattr(response, "status_code", None),
+                          return_code=str(return_code))
         return data
+
+
+def _tagged(exc: KiwoomError, **attrs) -> KiwoomError:
+    for key, value in attrs.items():
+        setattr(exc, key, value)
+    return exc
 
 
 def _masked_token(token: str) -> str:

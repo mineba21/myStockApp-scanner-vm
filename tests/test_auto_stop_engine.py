@@ -484,6 +484,13 @@ def test_api_errors_hold_new_entries(tmp_path, monkeypatch):
     h.broker.price = Decimal("44")
     h.tick()
     assert h.broker.sells == []                 # 시세 오류 보류 중: 신규 진입 없음 (이번 tick 은 회복 확인만)
+    # 2026-11-26 강화: 같은 시세 시각의 반복 수신은 복구 근거가 아니다 (시계가 그대로면 as_of 도 같다).
+    h.tick()
+    assert h.broker.sells == []
+    h.clock.advance(60)                         # 서로 다른 시세 시각으로 두 번째 회복 확인 → 종목·전체 보류 해제
+    h.tick()
+    assert h.broker.sells == []                 # 회복 확정 시세는 손절 판단에 쓰지 않는다 (다음 슬롯부터)
+    h.clock.advance(60)
     h.tick()
     assert len(h.broker.sells) == 1             # 회복 확인 후 정상 진행
 

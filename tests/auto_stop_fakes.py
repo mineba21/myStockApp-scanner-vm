@@ -52,14 +52,37 @@ class FakeBroker:
         self.rows = {}
         self.sell_exc = self.cancel_exc = self.quote_exc = self.holdings_exc = None
         self.external = []
+        # 다종목 시나리오용 (기본값이면 기존 동작과 같다)
+        self.prices = {}          # ticker → 가격
+        self.quote_exc_by = {}    # ticker → 예외
+        self.exc_seq = []         # 호출 순서대로 소비할 예외(None 이면 정상)
+        self.fixed_as_of = {}     # ticker → 고정 시세 시각 (같은 시세 반복)
+        self.age_by = {}          # ticker → 시세 나이
+        self.latency = []         # 호출마다 순환 적용할 응답 지연(초). FakeClock 을 앞당긴다
+        self.quote_log = []       # (ticker, 시작 시각)
+        self.http_429 = 0
+
+    def pop_429(self):
+        n, self.http_429 = self.http_429, 0
+        return n
 
     # 조회
     def quote(self, ticker, exchange):
         self.quote_calls += 1
+        self.quote_log.append((ticker, self.clock()))
+        if self.latency:
+            self.clock.advance(self.latency[(self.quote_calls - 1) % len(self.latency)])
+        if self.exc_seq:
+            exc = self.exc_seq.pop(0)
+            if exc is not None:
+                raise exc
+        if ticker in self.quote_exc_by and self.quote_exc_by[ticker] is not None:
+            raise self.quote_exc_by[ticker]
         if self.quote_exc:
             raise self.quote_exc
-        price = Decimal(self.quotes.pop(0)) if self.quotes else self.price
-        return Quote(ticker, exchange, price, self.clock() - self.quote_age, "FAKE")
+        price = Decimal(self.quotes.pop(0)) if self.quotes else Decimal(self.prices.get(ticker, self.price))
+        as_of = self.fixed_as_of.get(ticker, self.clock() - self.age_by.get(ticker, self.quote_age))
+        return Quote(ticker, exchange, price, as_of, "FAKE")
 
     def probe_exchange(self, ticker):
         return self.quote(ticker, "ND")

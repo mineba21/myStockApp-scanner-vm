@@ -21,10 +21,41 @@ POSITION_STATES = POSITION_LIVE_STATES + ("SOLD", "EXTERNAL_CLOSED", "DISABLED")
 EVENT_OPEN_STATES = ("OPEN", "CARRY_OVER")
 EVENT_STATES = EVENT_OPEN_STATES + ("DONE", "NEEDS_REVIEW")
 ORDER_KINDS = ("ORIGINAL", "REPLACE", "CARRY_OVER")
+# 수동 UNKNOWN 해제 재검증 투영: 사전 조회(증권사 조회 전)와 쓰기 잠금 후의 값이 하나라도 다르면 해제를 거부한다.
+# last_checked_at·updated_at 처럼 대조만으로 바뀌는 값은 넣지 않는다 (상태·수량·연결이 같으면 증거가 유효하다).
+RESOLVE_VIEW = {
+    "order": ("id", "state", "order_number", "mode", "account_profile", "ticker", "exit_event_id", "requested_qty",
+              "filled_qty", "remaining_order_qty"),
+    "event": ("id", "position_id", "mode", "state"),
+    "position": ("id", "mode", "account_profile", "ticker", "state", "remaining_managed_qty", "total_filled_qty",
+                 "initial_managed_qty"),
+}
 
 
 def _in(values) -> str:
     return "(" + ",".join(f"'{v}'" for v in values) + ")"
+
+
+# 최초 영구 감시 종료 시각: 일반 감시(ACTIVE)가 끝나는 상태 전이와 같은 UPDATE 문에서 한 번만 기록한다.
+# SET 식의 state 는 갱신 전 값이므로 ACTIVE 에서 벗어날 때만 남고, 이후 전이(NEEDS_REVIEW → DISABLED 등)·체결·
+# 사용자 조작·재시작으로 바뀌지 않는다. 전이가 실패하면(행 0) 함께 남지 않는다. 기존 details 열 사용 (DDL 없음).
+# 이미 ACTIVE 가 아닌 포지션(NEEDS_REVIEW·EXITING 등)의 후속 전이는 최초 종료 시각이 아니다. 그 경우 정확한 종료
+# 시각이 없으면 '갱신 전 updated_at 시점에는 이미 감시가 끝나 있었다'는 상한 근거(watch_ended_by)만 같은 문장에서 남긴다.
+# (갱신 전 updated_at 은 그 행의 마지막 변경 시각이고, 그 뒤로 상태가 바뀌지 않았으므로 그때 이미 ACTIVE 가 아니었다.)
+WATCH_END_SET = ("details=CASE "
+                 "WHEN state='ACTIVE' AND json_extract(details,'$.watch_ended_at') IS NULL "
+                 "THEN json_set(COALESCE(NULLIF(details,''),'{}'),'$.watch_ended_at',?,'$.watch_end_reason',?) "
+                 "WHEN state<>'ACTIVE' AND json_extract(details,'$.watch_ended_at') IS NULL "
+                 "AND json_extract(details,'$.watch_ended_by') IS NULL "
+                 "THEN json_set(COALESCE(NULLIF(details,''),'{}'),'$.watch_ended_by',updated_at,"
+                 "'$.watch_ended_by_reason','prior_state:'||state) "
+                 "ELSE details END")
+# 상태를 바꾸지 않는 갱신(일시중지·체결 반영·잔고 기록 등)도 ACTIVE 가 아닌 행의 updated_at 을 덮어쓴다.
+# 덮어쓰기 전에 같은 문장에서 상한 근거를 보존한다 (ACTIVE 행은 그대로).
+WATCH_BOUND_SET = ("details=CASE WHEN state<>'ACTIVE' AND json_extract(details,'$.watch_ended_at') IS NULL "
+                   "AND json_extract(details,'$.watch_ended_by') IS NULL "
+                   "THEN json_set(COALESCE(NULLIF(details,''),'{}'),'$.watch_ended_by',updated_at,"
+                   "'$.watch_ended_by_reason','prior_state:'||state) ELSE details END")
 
 
 class ClaimRefused(Exception):
@@ -33,6 +64,18 @@ class ClaimRefused(Exception):
 
 class LeaseLost(Exception):
     """lease 를 잃음. 이 작업자는 더 이상 주문·상태 변경을 하지 않는다."""
+
+
+class ScannerJournalUnreadable(Exception):
+    """Scanner 매수 저널을 읽을 수 없음 (스키마 불일치·조회 오류). 미확정 주문 없음으로 보지 않는다."""
+
+
+# Scanner 매수의 미확정 정의 (trading/scanner_buy_orders.py): 전송 중·접수 불명(SENDING/UNKNOWN), 그리고
+# 접수(SUBMITTED)됐지만 브로커 최종 상태(FILLED/CANCELLED/REJECTED)가 확인되지 않은 주문(미체결·부분체결 포함).
+# PREPARED(미리보기, 미전송)·BLOCKED·REJECTED·ABANDONED·RESOLVED_MANUAL 은 증권사에 살아 있는 주문이 아니다.
+SCANNER_IN_FLIGHT_SQL = ("SELECT 1 FROM main.scanner_buy_orders WHERE account_profile='account1' AND ticker=? AND "
+                         "(state IN ('SENDING','UNKNOWN') OR (state='SUBMITTED' AND "
+                         "COALESCE(broker_state,'') NOT IN ('FILLED','CANCELLED','REJECTED'))) LIMIT 1")
 
 
 def _row(r):
@@ -151,10 +194,45 @@ class AutoStopStore:
             db.execute("INSERT OR REPLACE INTO auto_stop_runtime(key,value,updated_at) VALUES(?,?,?)",
                        (key, json.dumps(value), now))
 
+    def runtime_keys(self, prefixes):
+        """값이 있는(null 이 아닌) runtime 키 목록 (접두어 일치, 읽기 전용)."""
+        out = []
+        with self.tx() as db:
+            for prefix in prefixes:
+                out += [r["key"] for r in db.execute(
+                    "SELECT key FROM auto_stop_runtime WHERE substr(key, 1, ?)=? AND value IS NOT NULL AND value!='null' "
+                    "ORDER BY key", (len(prefix), prefix))]
+        return out
+
+    def runtime_txn(self, now, keys, fn):
+        """여러 runtime 키를 한 BEGIN IMMEDIATE 트랜잭션에서 읽고 바꾼다 (DDL 없음).
+
+        fn(values: dict, db) → (updates: dict, audits: list[(actor, action, target, details)]) 이거나 None.
+        fn 이나 쓰기 도중 예외가 나면 전부 롤백된다 (부분 변경 없음). 반환: updates (None 이면 변경 없음)."""
+        with self.tx() as db:
+            values = {}
+            for key in keys:
+                r = db.execute("SELECT value FROM auto_stop_runtime WHERE key=?", (key,)).fetchone()
+                values[key] = json.loads(r["value"]) if r and r["value"] is not None else None
+            result = fn(values, db)
+            if not result:
+                return None
+            updates, audits = result
+            for key, value in (updates or {}).items():
+                db.execute("INSERT OR REPLACE INTO auto_stop_runtime(key,value,updated_at) VALUES(?,?,?)",
+                           (key, json.dumps(value, default=str), now))
+            for actor, action, target, details in (audits or []):
+                self._audit_db(db, now, actor, action, target, details)
+            return updates
+
+    @staticmethod
+    def _audit_db(db, now, actor, action, target, details):
+        db.execute("INSERT INTO auto_stop_audit(at,actor,action,target,details) VALUES(?,?,?,?,?)",
+                   (now, actor, action, str(target), json.dumps(details, default=str)))
+
     def audit(self, now, actor, action, target, details):
         with self.tx() as db:
-            db.execute("INSERT INTO auto_stop_audit(at,actor,action,target,details) VALUES(?,?,?,?,?)",
-                       (now, actor, action, str(target), json.dumps(details, default=str)))
+            self._audit_db(db, now, actor, action, target, details)
 
     def audits(self, action, since, until):
         with self.tx() as db:
@@ -184,7 +262,7 @@ class AutoStopStore:
                      f["scan_result_id"], json.dumps(f["signal_snapshot"], default=str), str(f["stop_price"]),
                      f["qty"], f["qty"], f["broker_qty"], f.get("avg_cost"), f.get("state", "ACTIVE"),
                      f.get("review_reason"), f.get("quote_price"), f.get("quote_at"), now, now,
-                     json.dumps(f.get("details", {}), default=str)))
+                     json.dumps(_initial_details(f, now), default=str)))
             except sqlite3.IntegrityError as exc:
                 raise ClaimRefused("이미 자동 손절이 등록된 종목입니다.") from exc
             return cur.lastrowid
@@ -206,8 +284,14 @@ class AutoStopStore:
         if not fields:
             return False
         sets = ", ".join(f"{k}=?" for k in fields) + ", updated_at=?"
+        args = list(fields.values()) + [now]
+        if "state" in fields and fields["state"] != "ACTIVE":
+            sets += ", " + WATCH_END_SET
+            args += [now, f"state:{fields['state']}"]
+        else:
+            sets += ", " + WATCH_BOUND_SET
         sql = f"UPDATE auto_stop_positions SET {sets} WHERE id=?"
-        args = list(fields.values()) + [now, pid]
+        args.append(pid)
         if expect_states:
             sql += f" AND state IN {_in(expect_states)}"
         with self.tx() as db:
@@ -216,8 +300,9 @@ class AutoStopStore:
     # ── events ──────────────────────────────────────────────────
     def create_event(self, now, position, *, state, trigger_price, trigger_as_of, session_date) -> int | None:
         with self.tx() as db:
-            ok = db.execute("UPDATE auto_stop_positions SET state='EXITING', updated_at=? "
-                            "WHERE id=? AND state='ACTIVE' AND auto_paused=0", (now, position["id"])).rowcount
+            ok = db.execute(f"UPDATE auto_stop_positions SET state='EXITING', updated_at=?, {WATCH_END_SET} "
+                            "WHERE id=? AND state='ACTIVE' AND auto_paused=0",
+                            (now, now, "trigger", position["id"])).rowcount
             if ok != 1:
                 return None
             cur = db.execute(
@@ -258,12 +343,18 @@ class AutoStopStore:
     def review(self, now, *, event_id=None, position_id=None, reason):
         """신규 전송을 멈추고 사람 확인을 요구한다. 미확정 주문 대조는 계속된다."""
         with self.tx() as db:
-            if event_id:
-                db.execute(f"UPDATE auto_stop_exit_events SET state='NEEDS_REVIEW', review_reason=?, updated_at=? "
-                           f"WHERE id=? AND state IN {_in(EVENT_OPEN_STATES)}", (reason, now, event_id))
-            if position_id:
-                db.execute("UPDATE auto_stop_positions SET state='NEEDS_REVIEW', review_reason=?, updated_at=? "
-                           "WHERE id=? AND state IN ('ACTIVE','EXITING')", (reason, now, position_id))
+            self._review_db(db, now, event_id=event_id, position_id=position_id, reason=reason)
+
+    @staticmethod
+    def _review_db(db, now, *, event_id=None, position_id=None, reason):
+        """review 의 본문 (호출자의 트랜잭션 안에서 실행, 새 연결·중첩 트랜잭션 없음)."""
+        if event_id:
+            db.execute(f"UPDATE auto_stop_exit_events SET state='NEEDS_REVIEW', review_reason=?, updated_at=? "
+                       f"WHERE id=? AND state IN {_in(EVENT_OPEN_STATES)}", (reason, now, event_id))
+        if position_id:
+            db.execute(f"UPDATE auto_stop_positions SET state='NEEDS_REVIEW', review_reason=?, updated_at=?, "
+                       f"{WATCH_END_SET} WHERE id=? AND state IN ('ACTIVE','EXITING')",
+                       (reason, now, now, "state:NEEDS_REVIEW", position_id))
 
     # ── orders ──────────────────────────────────────────────────
     def orders(self, *, event_id=None, states=None, mode=None):
@@ -281,10 +372,23 @@ class AutoStopStore:
         with self.tx() as db:
             return _row(db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (oid,)).fetchone())
 
+    @staticmethod
+    def rt(db, key, default=None):
+        """트랜잭션 안에서 runtime 값 읽기 (공통 실행 게이트용)."""
+        r = db.execute("SELECT value FROM auto_stop_runtime WHERE key=?", (key,)).fetchone()
+        return json.loads(r["value"]) if r and r["value"] is not None else default
+
     def claim_sell(self, now, *, owner, event_id, kind, qty, ref_price, ref_source, quote_as_of, limit_price,
-                   settings, guard) -> dict:
-        """한 트랜잭션에서 모든 조건을 확인하고 SENDING 행을 만든다. guard()는 실거래 스위치 재검증."""
+                   settings, guard, clock=None, gate=None, sent_evidence=None) -> dict:
+        """한 트랜잭션에서 모든 조건을 확인하고 SENDING 행을 만든다. guard()는 실거래 스위치 재검증.
+
+        clock 을 주면 쓰기 잠금(BEGIN IMMEDIATE)을 얻은 뒤의 실제 현재 시각으로 lease·게이트를 판단한다 (잠금 대기
+        동안 흐른 시간을 반영). gate(db, now) 는 공통 실행 게이트(정규장·cutoff·모드·보류·스냅샷·시세 신선도)이며
+        사유 문자열을 돌려주면 선점을 거부한다. 선점과 같은 트랜잭션에서 sent_at·증거를 기록하므로 커밋 직후 곧바로
+        증권사 요청을 보낸다 (선점과 전송 사이에 다른 DB·API 작업이 없다)."""
         with self.tx() as db:
+            if clock is not None:
+                now = clock()
             self._check_lease(db, owner, now)
             kill = self._kill(db)
             if kill:
@@ -292,6 +396,12 @@ class AutoStopStore:
             reason = guard()
             if reason:
                 raise ClaimRefused(reason)
+            if gate is not None:
+                reason = gate(db, now)
+                if reason:
+                    raise ClaimRefused(reason)
+                # 게이트가 이 트랜잭션에서 읽은 최신 설정으로 한도·lease 를 판단한다 (서로 다른 시점의 설정 금지).
+                settings = getattr(gate, "settings", None) or settings
             self._extend_lease(db, owner, now, settings.lease_sec)
             ev = db.execute("SELECT * FROM auto_stop_exit_events WHERE id=?", (event_id,)).fetchone()
             if ev is None or ev["state"] != "OPEN":
@@ -319,20 +429,27 @@ class AutoStopStore:
                 if ev["event_replace_count"] >= settings.max_replaces_per_event:
                     raise ClaimRefused("이벤트 재주문 한도 도달")
             attempt = 0 if last is None else last["attempt_no"] + 1
+            details = json.dumps(sent_evidence or {}, default=str)
             cur = db.execute(
                 '''INSERT INTO auto_stop_orders(exit_event_id,mode,account_profile,attempt_no,kind,parent_order_id,
                    ticker,exchange,ref_price,ref_source,quote_as_of,limit_price,requested_qty,remaining_order_qty,
-                   state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'SENDING',?,?)''',
+                   state,sent_at,details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'SENDING',?,?,?,?)''',
                 (event_id, ev["mode"], "account1", attempt, kind, last["id"] if last else None, pos["ticker"],
-                 pos["exchange"], str(ref_price), ref_source, quote_as_of, str(limit_price), qty, qty, now, now))
+                 pos["exchange"], str(ref_price), ref_source, quote_as_of, str(limit_price), qty, qty,
+                 now if clock is not None else None, details, now, now))
             inc = ", session_replace_count=session_replace_count+1, event_replace_count=event_replace_count+1" \
                 if kind == "REPLACE" else ""
             db.execute(f"UPDATE auto_stop_exit_events SET next_order_kind='REPLACE'{inc}, updated_at=? WHERE id=?",
                        (now, event_id))
             return dict(db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (cur.lastrowid,)).fetchone())
 
-    def claim_cancel(self, now, *, owner, order_id, expect_state, guard, lease_sec=90) -> dict:
+    def claim_cancel(self, now, *, owner, order_id, expect_state, guard, lease_sec=90, clock=None, gate=None,
+                     evidence=None) -> dict:
+        """재주문 목적 취소 선점. clock·gate 의미는 claim_sell 과 같다. 사전 검증 스냅샷이 최신 DB 상태와 다르면
+        gate 가 거부한다 (상태가 같은 PARTIAL_FILLED 여도 누적 체결·잔량이 바뀌었으면 거부)."""
         with self.tx() as db:
+            if clock is not None:
+                now = clock()
             self._check_lease(db, owner, now)
             kill = self._kill(db)
             if kill:
@@ -340,23 +457,143 @@ class AutoStopStore:
             reason = guard()
             if reason:
                 raise ClaimRefused(reason)
+            if gate is not None:
+                reason = gate(db, now)
+                if reason:
+                    raise ClaimRefused(reason)
+                eff = getattr(gate, "settings", None)
+                lease_sec = eff.lease_sec if eff is not None else lease_sec
             self._extend_lease(db, owner, now, lease_sec)
             o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (order_id,)).fetchone()
             if o is None or o["state"] != expect_state or o["cancel_rejected"] or not o["order_number"]:
                 raise ClaimRefused("취소 조건이 맞지 않습니다.")
             details = json.loads(o["details"])
             details["cancel_from_state"] = expect_state
+            if evidence:
+                details.setdefault("cancel_claim", []).append(evidence)
             db.execute("UPDATE auto_stop_orders SET state='CANCEL_SENDING', cancel_sent_at=?, details=?, updated_at=? "
-                       "WHERE id=? AND state=?", (now, json.dumps(details), now, order_id, expect_state))
+                       "WHERE id=? AND state=?", (now, json.dumps(details, default=str), now, order_id, expect_state))
             return dict(db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (order_id,)).fetchone())
 
-    def transition(self, oid, now, *, frm, to, **fields) -> bool:
-        """조건부 상태 전이. frm 은 상태 하나 또는 튜플."""
-        frm = (frm,) if isinstance(frm, str) else tuple(frm)
-        extra = "".join(f", {k}=?" for k in fields)
+    def stat_set(self, day, mode, metric, key, value):
+        """일별 통계 한 행을 지정 값으로 쓴다 (감시 슬롯 최종 분류·성공 시각 등, 재기록 시 덮어씀)."""
         with self.tx() as db:
-            return db.execute(f"UPDATE auto_stop_orders SET state=?{extra}, updated_at=? WHERE id=? AND state IN "
-                              f"{_in(frm)}", [to, *fields.values(), now, oid]).rowcount == 1
+            db.execute("INSERT INTO auto_stop_daily_stats(day,mode,metric,key,value) VALUES(?,?,?,?,?) "
+                       "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=excluded.value",
+                       (day, mode, metric, key, value))
+
+    def stat_min(self, day, mode, metric, key, value):
+        """기존 값과 비교해 작은 값만 남긴다 (예: 상태 근거 1=일치·0=불일치 — 한 번이라도 불일치면 0 유지)."""
+        with self.tx() as db:
+            db.execute("INSERT INTO auto_stop_daily_stats(day,mode,metric,key,value) VALUES(?,?,?,?,?) "
+                       "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=MIN(value, excluded.value)",
+                       (day, mode, metric, key, value))
+
+    def stat_set_if_absent(self, day, mode, metric, key, value) -> bool:
+        """처음 한 번만 기록한다 (예: 그날 신규 슬롯 형식 기록 시작 시각)."""
+        with self.tx() as db:
+            return db.execute("INSERT OR IGNORE INTO auto_stop_daily_stats(day,mode,metric,key,value) "
+                              "VALUES(?,?,?,?,?)", (day, mode, metric, key, value)).rowcount == 1
+
+    def stat_set_many(self, rows):
+        """여러 통계 행을 한 트랜잭션에서 쓴다. rows: [(day, mode, metric, key, value)]."""
+        if not rows:
+            return
+        with self.tx() as db:
+            db.executemany("INSERT INTO auto_stop_daily_stats(day,mode,metric,key,value) VALUES(?,?,?,?,?) "
+                           "ON CONFLICT(day,mode,metric,key) DO UPDATE SET value=excluded.value", rows)
+
+    def transition(self, oid, now, *, frm, to, evidence=None, **fields) -> bool:
+        """조건부 상태 전이. frm 은 상태 하나 또는 튜플.
+
+        evidence=[(key, value), ...] 를 주면 같은 BEGIN IMMEDIATE 쓰기 트랜잭션에서 현재 행의 details 를 읽어 기존 내용을
+        보존한 채 key 목록에 value 를 덧붙이고 상태와 함께 한 UPDATE 로 쓴다 (같은 값은 다시 넣지 않는다). 전이 조건이
+        맞지 않으면 아무것도 쓰지 않는다. 상태와 증거는 함께 커밋되거나 함께 롤백된다. 외부 API 호출 없음."""
+        with self.tx() as db:
+            return self._transition_db(db, oid, now, frm=frm, to=to, evidence=evidence, **fields)
+
+    @staticmethod
+    def _transition_db(db, oid, now, *, frm, to, evidence=None, **fields) -> bool:
+        """transition 의 본문 (호출자의 트랜잭션 안에서 실행)."""
+        frm = (frm,) if isinstance(frm, str) else tuple(frm)
+        if evidence:
+            r = db.execute("SELECT state, details FROM auto_stop_orders WHERE id=?", (oid,)).fetchone()
+            if r is None or r["state"] not in frm:
+                return False
+            details = json.loads(r["details"] or "{}")
+            for key, value in evidence:
+                items = details.setdefault(key, [])
+                if value not in items:
+                    items.append(value)
+            fields = {**fields, "details": json.dumps(details, default=str)}
+        extra = "".join(f", {k}=?" for k in fields)
+        return db.execute(f"UPDATE auto_stop_orders SET state=?{extra}, updated_at=? WHERE id=? AND state IN "
+                          f"{_in(frm)}", [to, *fields.values(), now, oid]).rowcount == 1
+
+    def transition_review(self, oid, now, *, frm, to, reason, event_id, position_id=None, evidence=None, alert=None,
+                          **fields) -> bool:
+        """사람 확인이 필요한 최종 상태 전이: 주문 상태(+종료 증거)·이벤트(·포지션) NEEDS_REVIEW·긴급 알림 적재를 한
+        BEGIN IMMEDIATE 트랜잭션에서 함께 커밋하거나 함께 롤백한다. 중간에 중단돼도 '최종 상태인데 신규 주문 허용'인
+        부분 저장이 생기지 않는다. 사람 확인 요구는 전이 성공 여부와 무관하게 적용한다 (기존 엔진 순서와 같다).
+        alert=(dedup_key, severity, text) 는 기존 영속 알림 저널·중복 방지 키로 적재한다. 외부 API 호출 없음.
+        반환: 주문 상태 전이 성공 여부."""
+        with self.tx() as db:
+            ok = self._transition_db(db, oid, now, frm=frm, to=to, evidence=evidence, **fields)
+            self._review_db(db, now, event_id=event_id, position_id=position_id, reason=reason)
+            if alert:
+                self._enqueue_alert_db(db, now, *alert)
+            return ok
+
+    # 수동 UNKNOWN 해제의 사전 조회 스냅샷 (증권사 조회 전·쓰기 잠금 후 같은 투영으로 비교)
+    @staticmethod
+    def _resolve_view(db, oid):
+        o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (oid,)).fetchone()
+        if o is None:
+            return None
+        ev = db.execute("SELECT * FROM auto_stop_exit_events WHERE id=?", (o["exit_event_id"],)).fetchone()
+        pos = None if ev is None else db.execute("SELECT * FROM auto_stop_positions WHERE id=?",
+                                                 (ev["position_id"],)).fetchone()
+        pick = lambda r, keys: None if r is None else {k: r[k] for k in keys}   # noqa: E731
+        return {"order": pick(o, RESOLVE_VIEW["order"]), "event": pick(ev, RESOLVE_VIEW["event"]),
+                "position": pick(pos, RESOLVE_VIEW["position"])}
+
+    def resolve_snapshot(self, oid):
+        """수동 해제 사전 조회 시점의 주문·청산 이벤트·포지션 기록 (읽기 전용)."""
+        with self.tx() as db:
+            return self._resolve_view(db, oid)
+
+    def resolve_unknown_txn(self, oid, now, *, expect, cum_filled, fill_evidence, to, fields, evidence, review_reason,
+                            actor, audit_details) -> dict:
+        """수동 UNKNOWN/CANCEL_UNKNOWN 해제를 한 BEGIN IMMEDIATE 트랜잭션으로 처리한다 (증권사 조회는 호출 전에 끝낸다).
+
+        쓰기 잠금을 얻은 뒤 사전 조회 스냅샷(expect)과 최신 기록을 같은 투영으로 비교·연결을 재검증하고, 체결 증분 반영·
+        관리 잔여 갱신, 주문번호·증권사 상태, 조건부 상태 전이(+최종이면 details.final), 청산 이벤트 NEEDS_REVIEW,
+        resolve_unknown 감사 기록을 함께 커밋한다. 하나라도 실패하면 전부 롤백된다 (ClaimRefused·예외).
+        포지션 상태는 바꾸지 않는다 (기존 수동 해제 정책: 이벤트만 사람 확인)."""
+        with self.tx() as db:
+            view = self._resolve_view(db, oid)
+            if view != expect:
+                raise ClaimRefused("사전 조회 이후 주문·이벤트·포지션 기록이 바뀌었습니다. 다시 대조하세요.")
+            o, ev, pos = view["order"], view["event"], view["position"]
+            if (ev is None or pos is None or o["state"] not in ("UNKNOWN", "CANCEL_UNKNOWN")
+                    or ev["id"] != o["exit_event_id"] or pos["id"] != ev["position_id"]
+                    or not (o["mode"] == ev["mode"] == pos["mode"]) or o["ticker"] != pos["ticker"]
+                    or o["account_profile"] != pos["account_profile"] or pos["state"] not in POSITION_LIVE_STATES
+                    or ev["state"] not in EVENT_OPEN_STATES + ("NEEDS_REVIEW",)):
+                raise ClaimRefused("주문·청산 이벤트·포지션 연결이 맞지 않습니다.")
+            if self._apply_fill_db(db, oid, now, cum_filled, fill_evidence) == "ANOMALY":
+                raise ClaimRefused("체결 수량이 기록과 맞지 않습니다. 해제하지 않습니다.")
+            try:
+                ok = self._transition_db(db, oid, now, frm=(o["state"],), to=to, evidence=evidence, **fields)
+            except sqlite3.IntegrityError as exc:
+                raise ClaimRefused("주문번호가 다른 주문 기록과 겹칩니다.") from exc
+            if not ok:
+                raise ClaimRefused("상태가 바뀌어 해제하지 못했습니다.")
+            self._review_db(db, now, event_id=ev["id"], reason=review_reason)
+            ev_now = dict(db.execute("SELECT * FROM auto_stop_exit_events WHERE id=?", (ev["id"],)).fetchone())
+            pos_now = dict(db.execute("SELECT * FROM auto_stop_positions WHERE id=?", (pos["id"],)).fetchone())
+            self._audit_db(db, now, actor, "resolve_unknown", oid, audit_details(ev_now, pos_now))
+            return dict(db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (oid,)).fetchone())
 
     def add_order_evidence(self, oid, now, key, value):
         with self.tx() as db:
@@ -374,36 +611,46 @@ class AutoStopStore:
     def apply_fill(self, oid, now, cum_filled: int, evidence: dict) -> str:
         """증권사 누적 체결 수량을 증분으로만 반영한다 (중복 조회에도 1회 차감)."""
         with self.tx() as db:
-            o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (oid,)).fetchone()
-            if o is None:
-                return "MISSING"
-            old = o["filled_qty"]
-            if cum_filled == old:
-                return "NOOP"
-            if cum_filled < old or cum_filled > o["requested_qty"]:
-                return "ANOMALY"
-            delta = cum_filled - old
-            ev = db.execute("SELECT position_id FROM auto_stop_exit_events WHERE id=?", (o["exit_event_id"],)).fetchone()
-            try:
-                db.execute("INSERT INTO auto_stop_fill_ledger(order_id,cum_filled_qty,applied_delta,applied_at,evidence) "
-                           "VALUES(?,?,?,?,?)", (oid, cum_filled, delta, now, json.dumps(evidence, default=str)))
-            except sqlite3.IntegrityError:
-                return "NOOP"
-            if db.execute("UPDATE auto_stop_orders SET filled_qty=?, remaining_order_qty=?, updated_at=? "
-                          "WHERE id=? AND filled_qty=?",
-                          (cum_filled, o["requested_qty"] - cum_filled, now, oid, old)).rowcount != 1:
-                raise sqlite3.IntegrityError("체결 반영 경합")
-            if db.execute("UPDATE auto_stop_positions SET remaining_managed_qty=remaining_managed_qty-?, "
-                          "total_filled_qty=total_filled_qty+?, updated_at=? WHERE id=? AND remaining_managed_qty>=?",
-                          (delta, delta, now, ev["position_id"], delta)).rowcount != 1:
-                raise sqlite3.IntegrityError("관리 수량 음수")
-            return "APPLIED"
+            return self._apply_fill_db(db, oid, now, cum_filled, evidence)
+
+    @staticmethod
+    def _apply_fill_db(db, oid, now, cum_filled: int, evidence: dict) -> str:
+        """apply_fill 의 본문 (호출자의 트랜잭션 안에서 실행)."""
+        o = db.execute("SELECT * FROM auto_stop_orders WHERE id=?", (oid,)).fetchone()
+        if o is None:
+            return "MISSING"
+        old = o["filled_qty"]
+        if cum_filled == old:
+            return "NOOP"
+        if cum_filled < old or cum_filled > o["requested_qty"]:
+            return "ANOMALY"
+        delta = cum_filled - old
+        ev = db.execute("SELECT position_id FROM auto_stop_exit_events WHERE id=?", (o["exit_event_id"],)).fetchone()
+        try:
+            db.execute("INSERT INTO auto_stop_fill_ledger(order_id,cum_filled_qty,applied_delta,applied_at,evidence) "
+                       "VALUES(?,?,?,?,?)", (oid, cum_filled, delta, now, json.dumps(evidence, default=str)))
+        except sqlite3.IntegrityError:
+            return "NOOP"
+        if db.execute("UPDATE auto_stop_orders SET filled_qty=?, remaining_order_qty=?, updated_at=? "
+                      "WHERE id=? AND filled_qty=?",
+                      (cum_filled, o["requested_qty"] - cum_filled, now, oid, old)).rowcount != 1:
+            raise sqlite3.IntegrityError("체결 반영 경합")
+        if db.execute("UPDATE auto_stop_positions SET remaining_managed_qty=remaining_managed_qty-?, "
+                      f"total_filled_qty=total_filled_qty+?, updated_at=?, {WATCH_BOUND_SET} "
+                      "WHERE id=? AND remaining_managed_qty>=?",
+                      (delta, delta, now, ev["position_id"], delta)).rowcount != 1:
+            raise sqlite3.IntegrityError("관리 수량 음수")
+        return "APPLIED"
 
     # ── alerts ──────────────────────────────────────────────────
     def enqueue_alert(self, now, key, severity, text) -> bool:
         with self.tx() as db:
-            return db.execute("INSERT OR IGNORE INTO auto_stop_alerts(dedup_key,severity,text,created_at) "
-                              "VALUES(?,?,?,?)", (key, severity, text, now)).rowcount == 1
+            return self._enqueue_alert_db(db, now, key, severity, text)
+
+    @staticmethod
+    def _enqueue_alert_db(db, now, key, severity, text) -> bool:
+        return db.execute("INSERT OR IGNORE INTO auto_stop_alerts(dedup_key,severity,text,created_at) "
+                          "VALUES(?,?,?,?)", (key, severity, text, now)).rowcount == 1
 
     def pending_alerts(self, max_attempts=5):
         with self.tx() as db:
@@ -415,23 +662,97 @@ class AutoStopStore:
             db.execute("UPDATE auto_stop_alerts SET state=?, attempts=attempts+1, sent_at=? WHERE id=?",
                        ("SENT" if ok else "FAILED", now if ok else None, aid))
 
+    def fill_ledger(self, order_ids):
+        """체결 원장 (증분 반영 이력, 읽기 전용). applied_at = 시스템이 체결을 확인·반영한 시각."""
+        ids = list(order_ids)
+        if not ids:
+            return []
+        with self.tx() as db:
+            return [dict(r) for r in db.execute(
+                f"SELECT order_id, cum_filled_qty, applied_delta, applied_at, evidence FROM auto_stop_fill_ledger "
+                f"WHERE order_id IN ({','.join('?' * len(ids))}) ORDER BY applied_at, cum_filled_qty", ids)]
+
+    def alerts_with_prefix(self, prefix):
+        """dedup_key 접두어가 같은 알림 (읽기 전용, 생성 시각 순)."""
+        with self.tx() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT dedup_key, severity, created_at FROM auto_stop_alerts WHERE substr(dedup_key, 1, ?)=? "
+                "ORDER BY created_at, id", (len(prefix), prefix))]
+
     def recent_alerts(self, limit=50):
         with self.tx() as db:
             return [dict(r) for r in db.execute("SELECT * FROM auto_stop_alerts ORDER BY id DESC LIMIT ?", (limit,))]
 
     # ── 외부 저널 대조 ──────────────────────────────────────────
+    @staticmethod
+    def scanner_buy_in_flight_db(db, ticker) -> bool:
+        """현재 트랜잭션의 db 로 Scanner 미확정 매수를 확인한다 (새 연결·중첩 트랜잭션 없음).
+
+        표가 없으면 False: Scanner 매수 모듈은 첫 사용 때 같은 저널에 표를 만들므로(CREATE TABLE IF NOT EXISTS),
+        표가 없다는 것은 이 저널에서 Scanner 매수가 한 번도 준비되지 않았다는 뜻이다. 선점 트랜잭션은 쓰기 잠금을
+        쥐고 있어 그 사이 다른 연결이 표를 만들거나 행을 넣을 수 없다. 표가 있는데 조회가 실패하면(열 누락 등)
+        ScannerJournalUnreadable 로 올려 선점을 거부하게 한다."""
+        # 1) 객체 존재·유형: main 스키마 메타데이터에서 SQLite 식별자 규칙(대소문자 무시)으로 찾는다.
+        #    유형으로 미리 거르지 않는다 (VIEW·INDEX 등 동명 객체를 '표 없음'으로 오판하지 않게).
+        try:
+            objects = db.execute("SELECT type, name FROM main.sqlite_master "
+                                 "WHERE name = 'scanner_buy_orders' COLLATE NOCASE").fetchall()
+            temp = db.execute("SELECT type FROM temp.sqlite_master "
+                              "WHERE name = 'scanner_buy_orders' COLLATE NOCASE").fetchall()
+        except sqlite3.Error as exc:
+            raise ScannerJournalUnreadable(f"메타데이터 조회 실패: {exc}") from exc
+        types = sorted({r[0] for r in objects})
+        if not types:
+            if temp:
+                # main 에는 없고 TEMP 에만 같은 이름이 있음: 정상 저널 구조가 아니다 (부재로 보지 않는다)
+                raise ScannerJournalUnreadable("TEMP 스키마에만 scanner_buy_orders 가 있습니다")
+            return False                    # 실제 부재: Scanner 매수가 이 저널에서 준비된 적 없음
+        if types != ["table"]:
+            raise ScannerJournalUnreadable(f"scanner_buy_orders 객체 유형이 표가 아닙니다: {types}")
+        # 2) 미확정 주문: main 스키마를 명시해 TEMP 동명 객체가 가리지 못하게 한다. 열 누락·오류는 fail closed.
+        try:
+            return db.execute(SCANNER_IN_FLIGHT_SQL, (ticker,)).fetchone() is not None
+        except sqlite3.Error as exc:
+            raise ScannerJournalUnreadable(f"미확정 주문 조회 실패: {exc}") from exc
+
     def scanner_buy_in_flight(self, ticker) -> bool:
         """같은 SQLite 의 스캐너 매수 저널에 account1 같은 종목의 미확정·미체결 매수가 있는지."""
         with self.tx() as db:
-            exists = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scanner_buy_orders'"
-                                ).fetchone()
-            if not exists:
-                return False
-            r = db.execute("SELECT 1 FROM scanner_buy_orders WHERE account_profile='account1' AND ticker=? AND "
-                           "(state IN ('SENDING','UNKNOWN') OR (state='SUBMITTED' AND "
-                           "COALESCE(broker_state,'') NOT IN ('FILLED','CANCELLED','REJECTED')))",
-                           (ticker,)).fetchone()
-            return r is not None
+            return self.scanner_buy_in_flight_db(db, ticker)
+
+
+def final_evidence(state, now, source, filled=None) -> tuple:
+    """최종 상태 종료 증거 (transition(evidence=...) 용). at = 시스템이 확인·반영한 시각."""
+    value = {"state": state, "at": now, "source": source}
+    if filled is not None:
+        value["filled_quantity"] = filled
+    return ("final", value)
+
+
+def _initial_details(f, now) -> dict:
+    """ACTIVE 가 아닌 상태로 등록(예: LIVE 전환 시점에 이미 손절가 이하 → NEEDS_REVIEW)하면 일반 감시를 시작하지 않는다."""
+    details = dict(f.get("details") or {})
+    if f.get("state", "ACTIVE") != "ACTIVE":
+        details.setdefault("watch_ended_at", now)
+        details.setdefault("watch_end_reason", f"registered:{f['state']}")
+    return details
+
+
+def watch_end_of(position) -> float | None:
+    """기록된 최초 영구 감시 종료 시각 (없으면 None)."""
+    return _details(position).get("watch_ended_at")
+
+
+def watch_ended_by_of(position) -> float | None:
+    """'이 시각에는 이미 감시가 끝나 있었다'는 기록된 상한 근거 (정확한 종료 시각 아님, 없으면 None)."""
+    return _details(position).get("watch_ended_by")
+
+
+def _details(position) -> dict:
+    try:
+        return json.loads(position["details"] or "{}") or {}
+    except (TypeError, ValueError):
+        return {}
 
 
 def dec(value) -> Decimal:

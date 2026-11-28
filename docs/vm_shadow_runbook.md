@@ -131,3 +131,24 @@ VM의 Claude Code에 "Claude Code 프롬프트" 절 전체를 붙여 넣거나, 
 마지막에 보고: 배포 커밋, 운영 DB Alembic head/current, Migration 사전 점검·실행 결과(종료 코드, 테이블 건수 전후, 백업·보고서 파일명), 재시작 시각, health 결과, Scanner 확인 결과, 저널 권한, 조회 전용 확인 요약(민감값 제외), SHADOW 상태, 남은 일.
 
 ---
+
+## 부록: 시세 장애 격리 수정 배포 (2026-11-26, 첫날 SHADOW FAIL 대응)
+
+설계·정책은 `docs/auto_stop_sell.md` "시세 장애 격리와 복구"를 따른다. 위 1~2단계와 같은 방식으로 배포하되 다음을 추가로 확인한다.
+⛔ 배포(앱 재시작)는 사용자 승인 후, 미국 장외 시간에만 한다.
+
+1. 배포 전 (변경 없음)
+   - 대상 커밋과 `git diff --stat <현재 배포 커밋> <대상 커밋>` 보고. `alembic/`, `database/`, `trading/auto_stop/journal_migrations/` 변경이 **없어야** 한다 (운영 DB·저널 Migration 불필요).
+   - `.venv/bin/python -m pytest -q` 전체 통과.
+   - 현재 저널 상태를 읽기 전용으로 기록 (mode=ro, 값 출력은 아래 키만):
+     `api_errors`, `consecutive_api_errors`, `quote_global_hold`, `quote_health_version`, `global_hold_state`, 미확정 주문 수.
+     첫날 이후라면 `api_errors.quote=6` 이 남아 있을 것이다. **수동으로 0으로 바꾸거나 행을 지우지 않는다.**
+2. 재시작 후 첫 tick (장외)
+   - health: `mode=SHADOW`, `schema_version=as0001`(변경 없음), `quote_global_hold.reason=legacy_common_counter`, `api_errors.quote` 이전 값 유지, `quote_health` 에 등록 종목 전부 `FAULT`(legacy_unattributed). 감사 기록 `quote_health_migrate` 1건.
+   - 실거래 스위치·`AUTO_STOP_US_REPLACE_ENABLED`·`KIWOOM_TRADING_ENABLED`·`ACCOUNT1_ORDER_ENABLED` 값이 바뀌지 않았는지.
+3. 다음 정규장 첫 5분
+   - 두 종목 모두 회복 조회가 일어나는지(로그 `[자동손절] 시세 오류` JSON 또는 health `recent_quote_errors`, `quote_health[].last_ok_at`).
+   - 정상이면 `RECOVERING` → `OK`, `quote_global_hold=null`, `api_errors.quote=0`, `global_hold.reasons=[]`.
+   - 실패가 이어지면 `first_error`/`recent_quote_errors` 의 `category`, `http_status`, `return_code`, `message`(민감정보 제거됨)를 보고한다. 이것이 첫날 미확인 원인의 근거가 된다.
+4. 장 마감 후 일일 보고 (판정은 `docs/auto_stop_sell.md` "SHADOW 운영 통과 기준": 정상 거래일 감시율 99% 이상, 설명되지 않는 누락 0건, 정상 상태 최대 감시 공백 120초 이내, 실제 주문·취소 0건): `watch.normal_rate_pct`, `watch.missed`와 분해(`held_slots`/`failed_slots`/`schedule_missed`), `recovery`, `holds.global_seconds`, `api.errors`(회복 조회 실패 포함), `api.http_requests`·`api.http_429`, 종목별 `faults`.
+5. 문제가 있으면 위 9단계(장애 시 복구)를 따른다. 코드 되돌리기는 직전 배포 커밋으로만 하고 저널은 그대로 둔다 (새 runtime 키는 이전 코드가 무시한다. 다만 이전 코드는 공통 카운터 하나로 다시 판단한다).
