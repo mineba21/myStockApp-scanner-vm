@@ -2,6 +2,7 @@
 
 대상은 ``config.attributes["journal_path"]`` 의 SQLite 파일 하나뿐이다. config·database 모듈을 import 하지 않아
 운영 DB URL 을 읽지 않는다. 버전 표는 ``ab_alembic_version``. 전체 upgrade 는 BEGIN IMMEDIATE 트랜잭션 하나다.
+리비전 적용 전 같은 트랜잭션에서 원본 정합성 사전 검사(``raw_contract.journal_issues``)를 한다 — 실패하면 전체 롤백.
 """
 from alembic import context
 from sqlalchemy import create_engine, event, pool
@@ -33,5 +34,14 @@ with engine.connect() as connection:
     context.configure(connection=connection, target_metadata=None, version_table=VERSION_TABLE,
                       transactional_ddl=True, transaction_per_migration=False)
     with context.begin_transaction():
+        # 원본 정합성 사전 검사 (같은 BEGIN IMMEDIATE 트랜잭션, 어떤 리비전보다 먼저): 기존 스냅샷의 정규화 필드가 원본
+        # row_json 과 다르면 ab0007 backfill 이 오염을 봉인하기 전에 전체를 중단한다 (원본·리비전 그대로, 자동 수정 없음).
+        raw = connection.connection.driver_connection if hasattr(connection.connection, "driver_connection") \
+            else connection.connection
+        from trading.auto_buy.shadow.raw_contract import journal_issues
+        bad = journal_issues(raw)
+        if bad:
+            raise RuntimeError("기존 스냅샷의 정규화 필드가 원본 row_json 과 달라 Migration 을 적용하지 않습니다 "
+                               "(원본·봉인 보존, 자동 수정 없음): " + "; ".join(bad[:5]))
         context.run_migrations()
 engine.dispose()

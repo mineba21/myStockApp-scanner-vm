@@ -23,6 +23,9 @@
 - 대상은 AUTO_BUY_SHADOW_JOURNAL_PATH (또는 --journal). 운영 주문 저널(SCANNER_ORDER_JOURNAL_PATH)·ETF 저널과 같은 파일이면 중단.
 - 파일이 없으면 --allow-create 일 때만 새로 만든다. 있으면 백업(읽기 전용 원본 → 사본, 무결성 검사) 후 upgrade.
 - upgrade 는 BEGIN IMMEDIATE 트랜잭션 하나. 실패하면 롤백. 운영 DB·S01 저널 Migration 과 무관하다.
+- 원본 정합성: 기존 저널(이미 최신 포함)의 스냅샷 정규화 필드를 원본 row_json 과 대조한다 (``raw_contract``). 다르면
+  ``RAW_CONTRACT_FAILED`` (종료 코드 2) — 백업·upgrade·권한 변경 없이 중단, 자동 수정·해시 재생성·재봉인 없음.
+  upgrade 트랜잭션 안에서도 리비전 적용 전에 같은 검사를 다시 한다 (env.py).
 - 실패해도 백업으로 자동 복원하지 않는다.
 
 종료 코드: 0 성공 · 2 사전 점검 실패 · 3 Migration 실패 · 4 사후 검증 실패
@@ -87,6 +90,16 @@ def dry_run_upgrade(journal: str) -> dict:
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
         return {"ok": True, "schema_version": version}
+
+
+def raw_contract_issues(journal: str) -> list:
+    """읽기 전용으로 원본 row_json ↔ 정규화 필드 계약을 검사한다 (``raw_contract.journal_issues``)."""
+    from trading.auto_buy.shadow.raw_contract import journal_issues
+    db = sqlite3.connect(Path(journal).as_uri() + "?mode=ro", uri=True)
+    try:
+        return journal_issues(db)
+    finally:
+        db.close()
 
 
 def _files(path: str) -> list:
@@ -206,6 +219,14 @@ def _run(journal: str, backup_dir: str, *, allow_create=False, check=False) -> d
             db.close()
         if integ != "ok":
             raise Abort(2, f"무결성 검사 실패: {integ}")
+        if not foreign:
+            # 원본 정합성 (이미 최신이어도 검사 — ab0007 backfill 로 봉인된 기존 저널 포함). 바꾸지 않고 중단만 한다.
+            rep["raw_contract_issues"] = raw_contract_issues(journal)
+            if rep["raw_contract_issues"]:
+                rep["result"] = "RAW_CONTRACT_FAILED"
+                _write(rep, backup_dir)
+                raise Abort(2, "기존 스냅샷의 정규화 필드가 원본 row_json 과 다릅니다 (원본·봉인 보존, 자동 수정·재봉인 "
+                            "없음): " + "; ".join(rep["raw_contract_issues"][:3]))
         if foreign:
             raise Abort(2, f"자동매수 SHADOW 저널이 아닌 객체가 있습니다 (다른 DB 로 보임): {foreign[:10]}")
     if exists and not rep["status_before"]["schema_ready"]:

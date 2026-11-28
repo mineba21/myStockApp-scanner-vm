@@ -137,7 +137,9 @@ def journal_integrity(journal: str) -> dict:
                           " AND s.strict_passed=1) ns FROM ab_scan_captures c").fetchall()
         days = [r[0] for r in db.execute("SELECT day FROM ab_day_inputs WHERE decision_status='FROZEN'")]
         issues = sum(1 for d in days if IG.decision_set_issues(db, d))
-        return {"snapshots": len(snaps), "valid_row_sha": sum(ddl_v7.row_sha_ok(j, h) for j, h in snaps),
+        from trading.auto_buy.shadow.raw_contract import journal_issues
+        raw_bad = journal_issues(db, limit=1000)
+        return {"raw_contract_issues": len(raw_bad), "snapshots": len(snaps), "valid_row_sha": sum(ddl_v7.row_sha_ok(j, h) for j, h in snaps),
                 "captures": len(caps), "count_consistent": sum((r[1], r[2]) == (r[3], r[4]) for r in caps),
                 "nonempty_captures": sum(r[3] > 0 for r in caps), "frozen_days": len(days), "issues": issues}
     finally:

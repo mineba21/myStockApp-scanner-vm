@@ -114,7 +114,8 @@ def health(settings: Optional[S.AutoBuySettings] = None) -> dict:
         try:
             rt = {r["key"]: _loads(r["value"], None) for r in db.execute("SELECT key, value FROM ab_runtime")}
             for k in ("last_job", "last_capture", "last_error", "collection_started_at", "shadow_start_day",
-                      "scan_reconciliation", "version_block", "replay_in_progress", "signal_set_integrity"):
+                      "scan_reconciliation", "version_block", "replay_in_progress", "signal_set_integrity",
+                      "integrity_day_block"):
                 out[k] = rt.get(k)
             lj = rt.get("last_job") or {}
             out["heartbeat_age_sec"] = round(time.time() - lj["at"]) if lj.get("at") else None
@@ -157,8 +158,9 @@ def profit_factor(pnls) -> Optional[float]:
 
 
 def account_metrics(db, acc, run) -> dict:
-    daily = db.execute("SELECT * FROM ab_daily WHERE run_id=? AND account_id=? ORDER BY day",
-                       (run, acc["id"])).fetchall()
+    # 일 기록(ab_days)이 있는 거래일만 성과로 쓴다 — 계좌 처리 중 무결성 오류로 격리된 날(일부 계좌만 커밋)은 제외
+    daily = db.execute("SELECT * FROM ab_daily WHERE run_id=? AND account_id=? AND day IN "
+                       "(SELECT day FROM ab_days WHERE run_id=?) ORDER BY day", (run, acc["id"], run)).fetchall()
     ar = db.execute("SELECT * FROM ab_account_runs WHERE run_id=? AND account_id=?", (run, acc["id"])).fetchone()
     eq = [d["equity"] for d in daily if d["equity"] is not None]
     base = ar["initial_cash"] if ar else None
@@ -235,7 +237,8 @@ def _ci95(vals: list) -> Optional[list]:
 
 
 OPERATIONAL_SAFETY_KEYS = ("non_virtual_rows", "error_events", "heartbeat_stale", "version_block",
-                           "replay_abandoned_suspected", "replay_stalled", "signal_set_integrity")
+                           "replay_abandoned_suspected", "replay_stalled", "signal_set_integrity",
+                           "integrity_day_block")
 DATA_INTEGRITY_KEYS = ("abandoned_scans", "unrecoverable_scans", "uncaptured_scans", "data_incomplete_days",
                        "fill_unknown_orders", "unresolved_positions", "manual_review_bars")
 OBSERVED_RUNS = "('CURRENT','SUPERSEDED')"      # 실제로 결과로 쓰였던 run (FAILED·BUILDING 재계산 잔여는 제외)
@@ -379,7 +382,9 @@ def safety_violations(db, health: dict, settings=None, now: Optional[datetime] =
           "replay_abandoned_suspected": int(rs.get("status") == "ABANDONED_SUSPECTED"),
           "replay_stalled": int(warn.get("replay_stalled", 0)) + int(stalled_now and not stall_recorded),
           # 동결 신호 집합 무결성 오류 (자동으로 지우지 않음 — 운영자 확인 전까지 관찰 기간·현재 미해결 모두 위반)
-          "signal_set_integrity": int(bool(health.get("signal_set_integrity")))}
+          "signal_set_integrity": int(bool(health.get("signal_set_integrity"))),
+          # 계좌 처리 중 무결성 오류로 격리된 거래일 (자동 해제 없음)
+          "integrity_day_block": int(bool(health.get("integrity_day_block")))}
     obs_days = one(f"SELECT COUNT(DISTINCT d.day) FROM ab_days d JOIN ab_runs r ON r.run_id=d.run_id "
                    f"WHERE r.status IN {OBSERVED_RUNS} AND d.status!='COMPLETE'")
     obs_fu = one(f"SELECT COUNT(*) FROM (SELECT DISTINCT o.account_id, o.signal_key, o.target_day FROM ab_orders o "
@@ -400,7 +405,7 @@ def safety_violations(db, health: dict, settings=None, now: Optional[datetime] =
            "uncaptured_scans": int(rec.get("uncaptured") or 0), "manual_review_bars": manual,
            "heartbeat_stale": hb_now, "version_block": op["version_block"],
            "replay_abandoned_suspected": op["replay_abandoned_suspected"], "replay_stalled": stalled_now,
-           "signal_set_integrity": op["signal_set_integrity"],
+           "signal_set_integrity": op["signal_set_integrity"], "integrity_day_block": op["integrity_day_block"],
            "non_virtual_rows": op["non_virtual_rows"]}
     recovered = {k: max(0, di[k] - cur[k]) for k in ("data_incomplete_days", "fill_unknown_orders",
                                                      "unresolved_positions", "uncaptured_scans")}

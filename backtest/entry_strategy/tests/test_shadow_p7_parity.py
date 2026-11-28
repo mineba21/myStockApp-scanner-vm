@@ -112,18 +112,20 @@ def _shadow(tmp_path, days, tickers, ohlc, cand):
         rows.setdefault(r.ticker_pos, []).append(
             {"cid": int(r.cid), "signal_key": f"US:{r.ticker}:BREAKOUT:{d}", "ticker": r.ticker, "signal_type": "BREAKOUT",
              "day": d, "close": float(r.close), "stop": float(r.stop), "grade": r.grade, "quality": r.quality,
-             "market_condition": "BULL", "first_seen": True, "ext_pct": None, "stop_pct": None, "warnings": [],
-             "sector": "Tech"})
+             "market_condition": "BULL", "first_seen": True, "ext_pct": 0.0,
+             "stop_pct": (1 - float(r.stop) / float(r.close)) * 100, "warnings": [], "sector": "Tech"})
     with tx(db):            # 운영과 같은 수집·봉인·동결 규칙 (공통 무결성 검증 통과 필수)
         for i, d in enumerate(days):
             write_scan_capture(db, i + 1, d, rows.get(i, []), now, None, logic_hash())
+    # 후보는 제품 적격 판정 경로로만 만든다 (직접 주입 없음 — 계좌 트랜잭션이 저장된 적격 후보 집합과 대조한다).
+    # P7 과 같은 정의(피벗 이격 0, 손절폭 4~13%, 최초 탐지·BULL)라 모든 재구성 후보가 B01 적격이다.
+    EN.record_eligibility(db)
     for i, d in enumerate(days):
         by_day[d] = [x[0] for x in db.execute("SELECT id FROM ab_signal_snapshots WHERE scan_log_id=? ORDER BY id",
                                                (i + 1,))]
     for i, d in enumerate(days):
-        ids = by_day.get(d, [])
-        cands = {"B01": [dict(x) for x in db.execute(
-            "SELECT * FROM ab_signal_snapshots WHERE id IN (%s)" % ",".join("?" * len(ids)), ids)] if ids else []}
+        cands = EN.candidates(db, i + 1)
+        assert [c["id"] for c in cands["B01"]] == by_day.get(d, [])          # 재구성 후보 전부 B01 적격
         bars = {t: EN.BarRec(Bar(*(float(a[i]) for a in ohlc[t])), "synthetic", 0.0, 1) for t in tickers}
         inp = EN.DayInputs(day=d, decision_status="FROZEN", decision_scan_log_id=i + 1, required=tickers, bars=bars,
                            cands=cands, acct=None, account_status=None, next_day=days[i + 1] if i + 1 < len(days)

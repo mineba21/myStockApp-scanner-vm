@@ -25,6 +25,7 @@ from trading.auto_buy.settings import AutoBuySettings
 from trading.auto_buy.shadow import calendar as CAL
 from trading.auto_buy.shadow import engine as EN
 from trading.auto_buy.shadow import inputs as IN
+from trading.auto_buy.shadow import integrity as IG
 from trading.auto_buy.shadow import snapshot as SN
 from trading.auto_buy.shadow.schema import schema_status
 from trading.auto_buy.shadow.snapshot import catch_up
@@ -79,6 +80,13 @@ def run_shadow_job(*, now: Optional[datetime] = None, settings: Optional[AutoBuy
         _record_heartbeat_gap(db, now, settings)
         out["captures"] = catch_up(settings, session_factory=session_factory, scan_running=running,
                                    start_day=settings.start_day, now=now)
+        blk = get_runtime(db, IG.DAY_BLOCK_KEY)
+        if blk:          # 계좌 처리 중 무결성 오류로 격리된 거래일 — 운영자 확인 전까지 신규 판단·재계산 없음 (수집만 계속)
+            out["error"] = "IntegrityDayBlocked"
+            out["blocked"] = {k: blk.get(k) for k in ("run", "day", "where", "accounts_committed")}
+            _rt(db, "last_job", {"at": time.time(), "logical_at": now.timestamp(), "blocked": "IntegrityDayBlocked",
+                                 "day": blk.get("day")})
+            return out
         start = get_runtime(db, "shadow_start_day")
         if start is None:
             row = db.execute("SELECT MIN(trading_day) FROM ab_scan_captures WHERE intraday=0 "

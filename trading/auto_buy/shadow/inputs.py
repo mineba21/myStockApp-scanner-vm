@@ -368,8 +368,9 @@ def process_day(db, run_id: int, inp: EN.DayInputs, settings=None, on_account: O
     """46 계좌 처리 → 일 요약. ``on_account``: 계좌마다 처리 전에 부른다 (재계산 실행권 heartbeat·소유 확인)."""
     try:
         return _process_day(db, run_id, inp, settings, on_account)
-    except IG.SignalSetIntegrityError as exc:      # 해당 트랜잭션은 롤백됨 (주문·일 기록 없음)
+    except IG.SignalSetIntegrityError as exc:      # 해당 계좌(또는 일 기록) 트랜잭션은 롤백됨
         IG.record_failure(db, exc, run_id)
+        IG.quarantine_day(db, run_id, inp.day, exc)
         raise
 
 

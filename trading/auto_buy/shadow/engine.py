@@ -205,19 +205,32 @@ def record_eligibility(db) -> int:
     return n
 
 
+def _decision_row(db, decision_scan_log_id):
+    return db.execute("SELECT * FROM ab_day_inputs WHERE decision_scan_log_id=? AND decision_status='FROZEN'",
+                      (decision_scan_log_id,)).fetchone()
+
+
 def eligibility_pending(db, decision_scan_log_id: Optional[int]) -> int:
-    """결정 스캔 스냅샷 중 현재 버전 적격 판정이 아직 없는 행 수. 0 이 아니면 그날 후보를 확정할 수 없다."""
+    """결정 스캔의 정상 미완료(최초 생성 전) 적격 판정 구성원 수. 0 이 아니면 그날 후보를 확정할 수 없다.
+
+    존재 여부만 세지 않는다: 기대 집합(구성원마다 현재 버전 B00·B01 정확히 1개)과 실제 집합을 대조하고, 일부 누락·사용 후
+    누락·과거 버전만 남은 사용된 날·내용 불일치는 무결성 오류(``SignalSetIntegrityError``, 감사 기록·MONITOR·S5)다."""
     if decision_scan_log_id is None:
         return 0
-    return db.execute(
-        "SELECT COUNT(*) FROM ab_signal_snapshots s WHERE s.scan_log_id=? AND NOT EXISTS ("
-        "SELECT 1 FROM ab_eligibility e WHERE e.snapshot_id=s.id AND e.strategy_version=?)",
-        (decision_scan_log_id, S.STRATEGY_VERSION)).fetchone()[0]
+    row = _decision_row(db, decision_scan_log_id)
+    if row is None:
+        raise IG.SignalSetIntegrityError(None, decision_scan_log_id, ["DECISION_INPUT_MISSING"], "eligibility_pending")
+    issues, pending = IG.eligibility_state(db, decision_scan_log_id, row)
+    if issues:
+        exc = IG.SignalSetIntegrityError(row["day"], decision_scan_log_id, issues, "eligibility_pending")
+        IG.record_failure(db, exc)
+        raise exc
+    return pending
 
 
-def candidates(db, decision_scan_log_id: Optional[int]) -> dict:
-    """{'B00': [...], 'B01': [...]} — 그날 결정 스캔 1회의 적격 스냅샷."""
-    out = {"B00": [], "B01": []}
+def candidate_rows(db, decision_scan_log_id: Optional[int]) -> dict:
+    """완전성 검증 없이 저장된 적격 후보 행만 읽는다 (검증 경로 내부 비교용)."""
+    out = {p: [] for p in EL.POOLS}
     if decision_scan_log_id is None:
         return out
     for pool in out:
@@ -226,6 +239,22 @@ def candidates(db, decision_scan_log_id: Optional[int]) -> dict:
             "WHERE s.scan_log_id=? AND e.pool=? AND e.strategy_version=? AND e.eligible=1 ORDER BY s.id",
             (decision_scan_log_id, pool, S.STRATEGY_VERSION)).fetchall()]
     return out
+
+
+def candidates(db, decision_scan_log_id: Optional[int]) -> dict:
+    """{'B00': [...], 'B01': [...]} — 그날 결정 스캔 1회의 적격 스냅샷. 판정 집합이 완전하고(B00·B01 정확히 1개씩)
+    재계산과 일치할 때만 돌려준다. 불완전하면 후보 0건으로 확정하지 않고 멈춘다 (오류 → 무결성 오류, 생성 전 → RuntimeError)."""
+    if decision_scan_log_id is None:
+        return candidate_rows(db, None)
+    row = _decision_row(db, decision_scan_log_id)
+    if row is None:
+        raise IG.SignalSetIntegrityError(None, decision_scan_log_id, ["DECISION_INPUT_MISSING"], "candidates")
+    issues, pending = IG.eligibility_state(db, decision_scan_log_id, row)
+    if issues:
+        raise IG.SignalSetIntegrityError(row["day"], decision_scan_log_id, issues, "candidates")
+    if pending:
+        raise RuntimeError(f"{row['day']} 결정 스캔 #{decision_scan_log_id} 적격 판정 미기록 {pending}건")
+    return candidate_rows(db, decision_scan_log_id)
 
 
 # ── 체결 ledger ─────────────────────────────────────────────────────

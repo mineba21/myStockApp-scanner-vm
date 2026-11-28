@@ -8,6 +8,7 @@
 같은 날 Codex 재리뷰(head c27d9d0, 신규 P1 2건·P2 1건)를 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)').
 같은 날 Codex 독립 재리뷰(head 36e5d2f, P1 3건·P2 2건)를 테이블별 데이터 불변성 계약으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)').
 2026-11-28 Codex 재리뷰(head a183b99, FAIL: P1 1건·P2 2건·검증 데이터)를 신호 집합·관계 단위 계약(`ab0007`)과 엔진 공통 무결성 검증으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-28, head a183b99)'). SHADOW 활성화는 계속 보류다.
+같은 날 Codex 독립 재리뷰(head d95beab, FAIL: P1 1건·P2 2건)를 적격 판정 집합 완전성, 계좌별 쓰기 트랜잭션 안의 전체 재검증, 원본 row_json ↔ 정규화 필드 계약으로 반영했다 (아래 'Codex 재리뷰 반영 (2026-11-28, head d95beab)'). 스키마 변경은 없다 (새 리비전 없음). SHADOW 활성화는 계속 보류다.
 - **승인 범위:** 로컬 구현·테스트 (사용자 승인: P7/P8 검토 후 I1~I7 SHADOW 구현, 이후 P1·P2 정합성 보완), feature branch `feature/auto-buy-shadow` 커밋·Push·Draft PR.
 - **아직 하지 않은 것:** main 병합, VM 배포, 저널 Migration 실행. Codex 재리뷰를 통과하기 전에는 기본 OFF 배포도, SHADOW 활성화도 하지 않는다.
 - **판정은 그대로 유지한다.**
@@ -17,6 +18,169 @@
 - **저널 스키마:** `ab0001`(공개 후 동결) + `ab0002`(거래량, 2026-11-26, 동결) + `ab0003`(거래량 출처·근거, run fencing, 2026-11-26, 동결) + `ab0004`(종료 run 원장·감사 이력 불변성, 2026-11-27, 동결) + `ab0005`(충돌 교체 차단·남은 감사 자료 불변, 2026-11-27, 동결) + `ab0006`(테이블별 데이터 불변성 계약, 2026-11-27, 동결) + `ab0007`(신호 집합·관계 단위 계약과 수집 봉인, 2026-11-28). 최종 목표 리비전은 `ab0007`. 아래는 `ab0001` 의 공개 전 이력이다 — 배포·커밋 전이라 첫 재리뷰 반영 때 같은 리비전을 **제자리에서 교체**했다 (run 단위 상태, 거래일 입력·일봉 표 추가).
   - 확인(2026-11-25): Git 이력에 `trading/auto_buy` 커밋 없음(원격도 main 뿐), 로컬 `.env` 저널 경로 미설정, 프로젝트 내 SQLite 에 `ab_alembic_version` 없음. 이전 `ab0001` 이 적용된 파일은 개발 세션 임시 폴더의 데모·벤치 파일뿐이다. 운영 VM 은 Git 으로만 배포되고 이 코드가 Push 된 적이 없어 적용 이력이 없다 (VM 에 접속해 확인하지는 않았다).
   - 이 브랜치가 커밋·Push 된 이후에는 `ab0001` 을 바꾸지 않고 새 리비전으로만 바꾼다.
+
+## Codex 재리뷰 반영 (PR #14, 2026-11-28, head d95beab)
+
+판정: FAIL (P1 1건·P2 2건, 모두 재현). 범위는 이 세 결함과 전체 검증 재실행으로 제한했다. 투자 전략, 매매 계산, 리스크 정책, UI 기능, 기존 S01 은 바꾸지 않았다. 공개된 `ab0001`~`ab0007` 리비전·DDL 은 그대로다. 스키마 변경이 필요 없어 `ab0008` 은 만들지 않았다 (모두 애플리케이션 코드·Migration 진입점에서 처리).
+
+### d95beab 에서 막히지 않던 것 (조사 결과)
+
+- **P1 적격 판정 완전성:** `eligibility_pending()` 은 스냅샷에 현재 버전 판정이 **하나라도** 있으면 완료로 셌다. 공통 검증은 **저장된 판정만** 다시 계산했다. 그래서 B00 판정만 지우면(B01 유지) 대기 0, 검증 통과, 후보 조회는 B00 후보 없음이 됐다. replay 는 기존 B00 가상 주문이 빠진 새 CURRENT 를 만들었다. 현재 버전 판정이 모두 없어지고 과거 버전만 남으면 `record_eligibility` 가 다시 만들어 누락을 숨겼다.
+- **P2 계좌별 쓰기:** 계좌 트랜잭션의 `fingerprint` 는 저장된 봉인 해시를 다시 읽고 행 수만 셌다. 후보 검증 이후 구성원 수를 유지한 채 `stop_loss` 를 바꾸면 46 계좌가 모두 커밋된 뒤에야 일 기록 단계에서 막혔다. 적격 판정 변경은 지문에 없어 아예 막히지 않았다.
+- **P2 기존 데이터 봉인:** `row_sha256` 은 `row_json` 만 보호한다. ab0006 저널에서 `row_json`·`row_sha256`·건수를 그대로 두고 정규화 컬럼(`stop_loss`)만 바꾸면 ab0007 사전 검사를 통과했다. backfill 은 그 값을 SSV2 로 봉인했고, 이후 런타임 검증(SSV2 = 봉인)도 통과했다.
+
+### 1. 적격 판정 집합 완전성 (`integrity.eligibility_state`)
+
+기대 집합은 결정 스캔 구성원마다 현재 전략 버전 (B00, B01) 정확히 1개씩이다. 이것을 실제 저장 집합과 대조하고, 있는 판정은 모두 같은 스냅샷 재계산과 비교한다.
+
+| 상태 | 분류 |
+|---|---|
+| B00·B01 모두 있음, 재계산 일치 | 완료 |
+| eligible=0 정상 부적격 판정 | 유효한 판정 (완료) |
+| 정상 빈 결정 스캔 | 유효한 빈 집합 (완료) |
+| 현재 버전 판정 전부 없음, 아직 어떤 현재 버전 run 도 쓰지 않음 | 정상 미완료 (pending) → 최초 생성 허용 |
+| 과거 버전 판정만 있음, 미사용 (버전 전환 직후) | 정상 미완료 (pending) → 최초 생성 허용 |
+| B00 만 / B01 만 / 일부 구성원만 | 오류 `ELIGIBILITY_INCOMPLETE` |
+| 현재 버전 판정 전부 없음, 이미 사용됨 (과거 버전만 남은 경우 포함) | 오류 `ELIGIBILITY_MISSING_AFTER_USE` |
+| 저장 판정 ≠ 재계산 | 오류 `ELIGIBILITY_MISMATCH` |
+
+- **'사용됨'의 정의** (`integrity.eligibility_used`): 현재 버전 run(상태 무관)에 그날 `ab_days` 나 `ab_daily`(일부 계좌만 처리된 날 포함)가 있거나, 이 스캔 구성원에 대한 `ab_decisions` 가 있으면 사용된 것이다. 이것으로 "아직 만들지 않은 정상 상태"와 "확정된 판정의 누락·훼손"을 구분한다.
+- 일부 누락은 사용 여부와 상관없이 오류다. `record_eligibility` 는 한 트랜잭션에서 구성원 전체를 기록하므로 정상 경로에서는 생기지 않는다.
+- **자동 재생성 금지:** `record_eligibility` 는 기록 전에 공통 검증을 한다. 그래서 사용된 날의 누락이나 일부 누락을 다시 만들지 않고 멈춘다.
+- **적용 경로** (모두 `decision_set_issues` 하나를 쓴다):
+  - `eligibility_pending`: 오류면 감사 기록 후 예외
+  - 후보 조회(`candidates`): 완전하고 재계산과 일치할 때만 돌려준다. 아니면 후보 0건으로 확정하지 않는다
+  - `build_inputs`
+  - 신규 거래일 처리 (계좌별·일 기록 트랜잭션)
+  - 중단 후 재실행, replay
+  - CURRENT 전환 직전 최종 검증
+- 불일치 시 처리는 기존과 같다: 기존 CURRENT·원장 보존, 처리 중단, ERROR `signal_set_integrity`, MONITOR 표시, S5 안전 위반. 불완전 판정으로 기존 가상 주문이 빠진 새 CURRENT 를 만들지 않는다.
+
+### 2. 무결성 검사와 계좌별 쓰기 원자성 (`integrity.check_inputs_current`)
+
+계좌 하루 처리 트랜잭션(BEGIN IMMEDIATE) 안에서, 원장 쓰기와 같은 트랜잭션으로 다음을 **다시 계산해** 확인한다. 저장된 봉인 해시를 다시 읽는 것만으로는 통과시키지 않는다.
+
+- 공통 검증 전체:
+  - 실제 SSV2 재계산 = 봉인
+  - 구성원별 `sha256(row_json) = row_sha256`
+  - 원본 ↔ 정규화 필드 (아래 3)
+  - 동결 v1 해시 재계산
+  - 적격 판정 완전성·재계산
+- 지문(`fingerprint`)이 `build_inputs` 때와 같은지. 지문은 실제 재계산 값이다: 실제 SSV2, 봉인 다이제스트, 건수, v1 저장값·재계산값, 현재 버전 적격 판정 다이제스트.
+- `build_inputs` 이후 후보 집합(행 내용 전체)이 바뀌지 않았는지, 후보가 모두 그날 결정 스캔 구성원인지.
+
+같은 쓰기 트랜잭션이므로 검증과 계좌 원장 쓰기 사이에 다른 연결이 쓸 수 없다. 일 기록(`ab_days`) 트랜잭션도 같은 검증을 한다.
+
+**트랜잭션 구조는 바꾸지 않았다.** 46 계좌를 한 장시간 쓰기 트랜잭션으로 묶는 방안을 검토했고, 다음 이유로 채택하지 않았다.
+
+1. 그동안 Scanner hook 수집 쓰기가 잠금을 기다리다 30초 timeout 에 걸릴 수 있다.
+2. 재계산 heartbeat 가 같은 연결의 미커밋 트랜잭션에 묶인다. 다른 프로세스에는 보이지 않으므로 실행권이 응답 없음으로 오판될 수 있다.
+3. 중단 후 재실행의 계좌 단위 멱등(`ab_daily` 가 있으면 건너뜀)이 사라진다.
+
+fencing 트리거에는 영향이 없다. 계좌별 커밋은 유지하고, 아래 복구 정책으로 불완전한 날을 격리한다.
+
+### 일부 계좌 처리 후 오류 — 복구 정책 (`integrity.quarantine_day`)
+
+| 시점 | 결과 |
+|---|---|
+| 첫 계좌 처리 전 변경 | 첫 계좌 트랜잭션 롤백. 신규 주문·체결·포지션·예약·판단·`ab_daily`·`ab_days` 커밋 0건 |
+| 일부 계좌 커밋 후 변경 | 앞선 계좌 기록은 **보존(삭제 없음)**. 오류 계좌부터는 기록 없음. 그날 `ab_days` 미기록 (COMPLETE 아님) |
+| CURRENT 신규 거래일 처리 중 | runtime `integrity_day_block`(run·거래일·커밋된 계좌·사유)과 ERROR `integrity_day_block` 기록. 표시가 있는 동안 job 은 **신규 거래일 처리·재계산을 하지 않는다** (수집은 계속). 자동 해제 없음 — 운영자 확인 후 수동 해제 |
+| BUILDING run(재계산) 중 | 기존과 같이 그 run 을 FAILED 로 남기고 기존 CURRENT 유지 (정상 승격 차단). 격리 표시는 남기지 않는다 |
+| CURRENT 전환 직전 | 전환 트랜잭션의 최종 검증이 막는다 (`replay_current_switch`). run FAILED, 기존 CURRENT 유지 |
+
+- **성과:** `account_metrics` 는 `ab_days` 가 있는 거래일의 `ab_daily` 만 쓴다. 격리된 날은 정상 성과에서 빠진다.
+- **S5·MONITOR:** S5 `integrity_day_block` 은 관찰 기간·현재 미해결 모두 위반이다. MONITOR 는 기존 '동결 신호 집합 무결성 오류' 표시를 그대로 쓴다 (UI 변경 없음).
+- **기존 복구 정책과의 관계:** 일반 계좌 실패(예외)는 그 계좌만 롤백되고 다음 job 이 이어서 처리한다. 이 정책은 그대로다. 무결성 오류만 예외로, 이어서 처리하지 않고 격리한다. 오염 데이터로 나머지 계좌를 처리하지 않기 위해서다. 커밋된 기록을 지우거나 해시를 다시 만들어 정상화하지 않는다.
+
+### 3. 원본 row_json ↔ 정규화 필드 계약 (`raw_contract.py`)
+
+원본에서 재현 가능한 필드를 실제 수집 코드와 같은 규칙으로 다시 계산해 **정확히** 대조한다. 같은 연산이므로 허용 오차는 없다. 정상 정규화는 오탐하지 않는다: 문자열 → 실수, NaN·무한대 → NULL, 피벗 0·손절가 없음 → 파생값 NULL, 경고 문자열 → 목록.
+
+| 원본 형식 (`capture_source`) | 대조 필드 |
+|---|---|
+| `SCANNER_ROW` (HOOK·CATCHUP, 운영 `ScanResult` 행 전체) | scan_result_id, signal_key, market, ticker, name, signal_type, signal_date, first_detected_at, strict_passed, strict_reasons, grade, signal_quality, market_condition, decision_price(`price`), pivot_price, stop_loss, ext_pct·stop_pct(파생식), entry_warnings, rs_value, volume_ratio, weekly_volume_ratio, sector_name, sector_source |
+| `P7_RECONSTRUCTED` (BACKTEST_REPLAY, `source=P7_RECONSTRUCTED_CANDIDATE`) | scan_result_id(`cid`), signal_key, market, ticker, name, signal_type, signal_date, is_first_detection(`first_seen`), strict_passed, grade, signal_quality, market_condition, decision_price(`close`), pivot_price, stop_loss(`stop`), ext_pct, stop_pct, entry_warnings(`warnings`), sector_name |
+
+- **원본 근거가 부족한 필드** (정확성을 추정·보증하지 않는다):
+  - 운영 형식의 최초 탐지·최초 Strict 통과 판정(`is_first_detection`·`first_strict_pass`·`first_pass_basis`): 수집 이력·캘린더 설정에 의존
+  - 수집 소속(`trading_day`·`intraday`·`scan_status`·`scan_completed_at`·`late_after_decision`): 수집 기록과의 관계로 따로 검증
+  - 수집 메타데이터(`scanner_commit`·`threshold_hash`·`capture_logic_hash`·`capture_source`·`created_at`)
+- 다음은 오류다 (우회 경로 없음): 알 수 없는 출처, JSON 해석 불가, 운영 출처인데 P7 형식인 원본. 백테스트 형식도 같은 엄격도로 자기 원본의 모든 판단 필드를 대조한다.
+- **적용:** 공통 검증(`scan_set_issues` → 동결·적격 기록·build_inputs·계좌 트랜잭션·일 기록·replay·CURRENT 전환), Migration(아래), P7-OPS 검증 저널 점검(`journal_integrity.raw_contract_issues`).
+- **불일치 시:** 사용·Migration 중단, 기존 데이터·봉인 보존, 자동 수정·해시 재생성·재봉인 없음, 원인(스냅샷·필드) 기록.
+
+### 4. Migration (스키마 변경 없음, 사전 검사 경로)
+
+- **같은 트랜잭션의 사전 검사:** 저널 전용 Alembic `env.py` 가 BEGIN IMMEDIATE 직후, **어떤 리비전보다 먼저** 저널 전체의 원본 계약을 검사한다. 실패하면 전체 롤백된다. 그래서 ab0006 → 최신 업그레이드에서 ab0007 backfill 이 오염을 봉인하기 전에 멈추고, 원본과 리비전(`ab0006`)이 그대로 남는다. 배포 스크립트를 거치지 않은 직접 `upgrade_journal` 도 같다.
+- **배포 스크립트:** 기존 저널이면(이미 최신이어도) 백업·upgrade·권한 변경 전에 읽기 전용으로 같은 검사를 한다. 실패하면 `RAW_CONTRACT_FAILED`(종료 코드 2)이고, 보고서에 문제 목록을 남긴다. `--check` 도 같다.
+- **확인한 경로 (테스트):**
+  - 신규 저널, ab0001 → 최신, ab0006 → 최신(정상 제품 원장), ab0007 → 최신(`ALREADY_CURRENT` + 원본 검사)
+  - 재실행 멱등
+  - ab0006 오염 저널 거부 (전체 덤프·리비전 보존)
+  - ab0007 backfill 로 이미 봉인된 오염 저널 거부 (스크립트·런타임 모두)
+  - `--check` 무변경
+  - OFF 모드 파일·DDL 없음, S01 저널 보호 (기존 테스트)
+- 운영 Migration 은 실행하지 않았다.
+
+### Runbook 추가 사항
+
+- `ab_capture_seals.source = AB0007_BACKFILL` 은 **ab0007 이관 당시 저장돼 있던 데이터 상태**를 기준으로 한 봉인이다. 과거 시점의 모든 파생 필드가 정확했다는 증거가 아니다. 원본으로 재현 가능한 필드는 위 계약으로 다시 확인한다. 원본 근거가 없는 필드(최초 탐지·최초 Strict 통과 판정 등)의 과거 정확성은 추정하거나 보증하지 않는다.
+- `integrity_day_block` 표시가 생기면:
+  1. 새 처리를 하지 않은 채 원인(오염 스냅샷·판정, 커밋된 계좌 목록)을 조사한다.
+  2. 커밋된 기록은 지우지 않는다.
+  3. 해제는 운영자 확인 후 runtime 표시를 수동으로 지우는 별도 승인 작업이다 (자동 해제·웹 진입점 없음).
+
+### 수정 전 실패·수정 후 통과 (`tests/test_auto_buy_shadow_review9_repro.py`)
+
+d95beab 와 현재 코드에 모두 있는 API 만 쓴다. d95beab worktree 에서는 10 실패 / 0 통과다. 실패는 모두 동작 단언 실패이며, 모듈·API 부재는 없다. 현재 코드에서는 10 통과다.
+
+| 재현 | d95beab | 현재 |
+|---|---|---|
+| CURRENT 에 B00 주문 → B00 판정만 제거 → replay | 실패 (새 CURRENT 전환) | 통과 (탐지, CURRENT·주문 보존, 전환 없음) |
+| B01 판정만 제거 → replay | 실패 | 통과 |
+| 현재 버전 판정 제거, 과거 버전만 남김 | 실패 (재생성 후 전환) | 통과 (재생성 없음) |
+| eligible=0 정상 부적격 판정 누락 | 실패 | 통과 |
+| 검증 후 stop_loss 변경 (구성원 수 유지), 첫 계좌 전 | 실패 (46 계좌 커밋) | 통과 (커밋 0) |
+| 검증 후 적격 판정 제거, 첫 계좌 전 | 실패 (예외 없음) | 통과 |
+| 5 계좌 커밋 후 변경 | 실패 (46 계좌 커밋) | 통과 (5 계좌 보존, 격리 표시) |
+| CURRENT 승격 직전 판정 제거 | 실패 (전환) | 통과 (FAILED, CURRENT 유지) |
+| ab0006 stop_loss 만 오염 → Migration | 실패 (적용·봉인) | 통과 (거부, 덤프·ab0006 보존) |
+| ab0007 backfill 로 봉인된 오염 저널 | 실패 (스크립트·런타임 통과) | 통과 (둘 다 거부) |
+
+수정 후 계약 테스트는 `tests/test_auto_buy_shadow_review9_contract.py` 에 있다: 원본 계약 필드별 탐지·정상 정규화·P7 형식·알 수 없는 형식, 적격 상태 분류, 격리·차단·성과 제외, Migration 경로.
+
+### 테스트 하네스 변경 (우회 제거)
+
+`backtest/entry_strategy/tests/test_shadow_p7_parity.py` 는 적격 판정을 거치지 않고 후보를 직접 주입했다. B01 판정상 부적격인 `stop_pct=None` 행도 포함됐다. 새 계좌 트랜잭션 검증(`CANDIDATES_CHANGED_SINCE_BUILD`)이 이를 거부했다.
+
+검사를 완화하지 않고, 하네스를 제품 적격 판정 경로(`record_eligibility` → `candidates`)로 바꿨다. 재구성 후보에는 P7 과 같은 정의의 `ext_pct=0`·`stop_pct`(손절폭 식)를 넣었다. 그래서 모든 후보가 B01 적격이며, P7 시뮬레이터와의 결과 대조(3 seed)는 그대로 일치한다.
+
+### 무결성 검사 성능 영향 (측정, 검증 생략 최적화 없음)
+
+합성 결정 스캔 1회·46 계좌를 이 작업 컨테이너(Linux)에서 측정했다. 계좌 트랜잭션마다 전체를 다시 검증하므로 비용은 구성원 수에 비례한다 (구성원 1건당 계좌마다 약 0.18ms).
+
+| 결정 스캔 구성원 | d95beab `process_day` | 현재 `process_day` | 현재 계좌당 재검증 |
+|---|---|---|---|
+| 2 | 77ms | 123ms | 0.6ms |
+| 50 | 141ms | 633ms | 9.2ms |
+| 200 | 321ms | 2.28s | 36ms |
+| 500 | 596ms | 5.58s | 91ms |
+
+- 계좌 트랜잭션의 쓰기 잠금 유지 시간이 구성원 500건에서 약 0.1초 늘어난다 (SQLite timeout 30초 대비 여유 있음). 재계산에서는 거래일 수만큼 곱해진다.
+- P7-OPS 재구성 데이터(하루 평균 약 2건)는 하루 약 +46ms, 1,480 거래일 약 +70초로 추정한다 (실데이터 미실행 — 아래).
+
+### P7-OPS 실데이터 대조 — 이번 환경에서 미실행
+
+- **실행하지 못한 이유:** 재구성 캐시(`backtest/exit_strategy/data/cache/ohlcv_US.pkl`·`reconstructed_US.pkl`)가 이 작업 환경에 없다. 사용자 로컬 컴퓨터도 연결돼 있지 않고, Yahoo 접근이 막혀 재구성할 수도 없었다.
+- 따라서 23 계좌·1,480 거래일 실데이터 대조는 **실행하지 않았고, 통과로 보고하지 않는다.** 실데이터 테스트 3건은 캐시가 없어 skip 됐다.
+- **실행한 것:** 같은 하네스·같은 무결성 경로의 합성 대조 (`test_p7_ops_parity.py` 합성 2 seed, `test_shadow_p7_parity.py` 3 seed). 신규 원본 계약은 P7 재구성 JSON 형식(`snapshot_row_json`)을 같은 엄격도로 검증하며, 합성 데이터에서 통과한다.
+- **로컬 실행 방법** (캐시가 있는 컴퓨터에서, 캐시의 읽기 전용 사본으로):
+  - `.venv/bin/python -m backtest.entry_strategy.run p7ops`
+  - `.venv/bin/python -m pytest backtest/entry_strategy/tests/test_p7_ops_parity.py -q`
+  - 기준값: 23 계좌, 1,480 거래일, 주문 3,734, 진입 3,545, 청산 2,233, 최종 보유 1,312, 거래량 0 만료 36
+  - 검증 저널 보고서의 `raw_contract_issues` 가 0 이어야 한다
+- 기존 P7 결과·계산 정책은 바꾸지 않았다. 판정 유지: NOT_RECOMMENDED, B01 = NEED_MORE_DATA.
 
 ## Codex 재리뷰 반영 (PR #14, 2026-11-28, head a183b99)
 
@@ -1087,7 +1251,8 @@ Current Heat 는 여기에 들어가지 않는다.
 - **`ab0004`**: 종료 run 원장·감사 이력 불변성 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27)'). 시작 전에 대상이 정확히 `ab0003` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
 - **`ab0005`**: 충돌 교체(REPLACE·UPSERT) 차단과 남은 감사 자료 불변 트리거만 추가한다 (위 'Codex 재리뷰 반영 (2026-11-27, head c27d9d0)'). 시작 전에 대상이 정확히 `ab0004` 구조인지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
 - **`ab0006`**: 테이블별 데이터 불변성 계약 트리거를 추가하고, 정책이 바뀐 ab0005 트리거 1개(`ab_eligibility_no_replace_insert`)만 교체한다 (위 'Codex 재리뷰 반영 (2026-11-27, head 36e5d2f)'). 시작 전에 대상이 정확히 `ab0005` 구조이고 기존 데이터가 계약과 맞는지 확인한다. 기존 행은 바꾸지 않는다. downgrade 는 지원하지 않는다.
-- **`ab0007`** (최종 목표 리비전): 봉인 표 `ab_capture_seals` 와 신호 집합·관계 단위 트리거를 추가하고, 기존 수집 기록마다 봉인 1행(`AB0007_BACKFILL`)을 기록한다 (위 'Codex 재리뷰 반영 (2026-11-28, head a183b99)'). 시작 전에 대상이 정확히 `ab0006` 구조이고 사전 검사(`ddl_v7.precheck`: 모든 수집 건수·소속·row_sha256·동결 해시)를 통과하는지 확인한다. 기존 행·동결 해시는 바꾸지 않는다. downgrade 는 지원하지 않는다.
+- **`ab0007`** (최종 목표 리비전): 봉인 표 `ab_capture_seals` 와 신호 집합·관계 단위 트리거를 추가하고, 기존 수집 기록마다 봉인 1행(`AB0007_BACKFILL`)을 기록한다 (위 'Codex 재리뷰 반영 (2026-11-28, head a183b99)'). 시작 전에 대상이 정확히 `ab0006` 구조이고 사전 검사(`ddl_v7.precheck`: 모든 수집 건수·소속·row_sha256·동결 해시)를 통과하는지 확인한다. 기존 행·동결 해시는 바꾸지 않는다. downgrade 는 지원하지 않는다. backfill 봉인은 이관 당시 저장 상태 기준이며, 과거 파생 필드의 정확성 증거가 아니다.
+- **원본 정합성 사전 검사** (head d95beab 반영, 스키마 변경 없음): 어떤 리비전보다 먼저, 같은 트랜잭션에서 스냅샷 정규화 필드를 원본 `row_json` 과 대조한다 (`env.py` → `raw_contract.journal_issues`). 배포 스크립트도 기존 저널(이미 최신 포함)에 같은 검사를 읽기 전용으로 먼저 한다 (`RAW_CONTRACT_FAILED`, 종료 코드 2).
 - 런타임은 `ab0007` 만 받아들인다. `ab0001`~`ab0006` 저널은 schema 미준비로 보고 처리하지 않는다 (Migration 실행은 별도 승인 — 이번 작업에서 실행하지 않음).
 - 기존 파일이면 백업한다. 실패해도 자동 복원하지 않는다. 새로 만든 뒤 upgrade 가 실패하면 빈 0600 파일이 남는다 (다음 실행에서 이어서 upgrade).
 
@@ -1176,6 +1341,10 @@ Current Heat 는 여기에 들어가지 않는다.
    - 테이블별 불변성 계약(`review7_contract`), 세션·호출 제한 카운터(`review7_session`), ab0006(`review7_migration`), 결함 재현(`review7_repro`)이 배포 커밋에서 통과
    - 동결 신호 집합(`review8_signal_set`), ab0007 사전 검증(`review8_migration`), 429 원자성(`review8_rate_limit`), 결함 재현(`review8_repro`)이 배포 커밋에서 통과
    - AUTO BUY MONITOR 에 '동결 신호 집합 무결성 오류' 표시가 없고 S5 `signal_set_integrity` = 0
+   - 적격 판정 완전성·계좌 트랜잭션 재검증·원본 계약(`review9_contract`), 결함 재현(`review9_repro`)이 배포 커밋에서 통과
+   - 기존 저널(있다면)의 `--check` 가 원본 계약까지 통과 (`RAW_CONTRACT_FAILED` 아님)
+   - S5 `integrity_day_block` = 0, runtime `integrity_day_block` 없음
+   - P7-OPS 실데이터 대조(로컬 캐시)를 최신 커밋으로 다시 실행해 기준값과 일치하고 `raw_contract_issues` = 0
 3. **⛔ SHADOW 활성화 (승인 후):** `AUTO_BUY_US_MODE=SHADOW` 로 재시작한다. 확인:
    - 스케줄러 job `auto_buy_us_shadow` 등록, S01 job 일정 변화 없음
    - 다음 정규 미국 스캔 후 수집 이력·후보 확정(`day_inputs`) 표시, 스캔 대조 미수집 0

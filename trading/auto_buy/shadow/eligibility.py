@@ -29,6 +29,7 @@ import math
 from typing import Iterable, Optional
 
 BO = ("BREAKOUT", "RE_BREAKOUT")
+POOLS = ("B00", "B01")          # 결정 스캔 구성원마다 현재 전략 버전 판정이 풀별로 정확히 1개씩 있어야 한다
 GRADE_ORDER = {"S": 0, "A": 1, "B": 2}
 QUALITY_ORDER = {"STRONG": 0, "MODERATE": 1, "WEAK": 2}
 
