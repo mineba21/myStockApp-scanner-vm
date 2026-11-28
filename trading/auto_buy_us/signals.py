@@ -119,8 +119,10 @@ def _first_pass(db, row, key, day, is_first, collection_start, settings):
     fd = row["first_detected_at"]
     if fd is None or (collection_start is not None and fd.timestamp() < collection_start):
         return None, "BEFORE_COLLECTION"
-    d = _ny_date(fd) + timedelta(days=1)
-    while d < day:
+    d = _ny_date(fd)
+    if d > day:
+        return None, "DETECTED_AFTER_DAY"
+    while d < day:  # 최초 탐지일(d0) 포함, 전일까지
         if _session(d, settings) is not None and _existing(db, d) != "CAPTURED":
             return None, "CAPTURE_GAP"
         d += timedelta(days=1)

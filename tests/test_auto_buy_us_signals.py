@@ -209,3 +209,22 @@ def test_duplicate_ticker_keeps_strict_row_and_warns(env):
     assert d["scan_log_id"] == log.id and d["ticker"] == "DUP"
     assert d["kept_id"] == rows[0]["scan_result_id"] and len(d["dropped_ids"]) == 1
     assert d["dropped_ids"][0] < d["kept_id"]
+
+
+def test_first_pass_first_detection_day_missed_is_capture_gap(env):
+    env.scan(D1, [{"ticker": "AAA"}])
+    env.capture(D1)
+    env.scan(D2, [{"ticker": "AAA"}])
+    env.scan(D2, [], start=(17, 0), end=(17, 5), triggered_by="manual")
+    assert env.capture(D2) == "MISSED"
+    env.scan(D3, [{"ticker": "CCC", "strict_filter_passed": True, "first_detected_at": fd(D2)}])
+    env.capture(D3)
+    r = env.q("SELECT first_strict_pass, first_pass_basis FROM abu_signals WHERE ticker='CCC'")[0]
+    assert r["first_strict_pass"] is None and r["first_pass_basis"] == "CAPTURE_GAP"
+
+
+def test_first_pass_detected_after_day_unknown(env):
+    env.scan(D1, [{"ticker": "LATE", "strict_filter_passed": True, "first_detected_at": fd(D2)}])
+    env.capture(D1)
+    r = env.q("SELECT first_strict_pass, first_pass_basis FROM abu_signals")[0]
+    assert r["first_strict_pass"] is None and r["first_pass_basis"] == "DETECTED_AFTER_DAY"
